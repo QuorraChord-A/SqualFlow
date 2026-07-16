@@ -1,12 +1,20 @@
-# SquadFlow
+<p align="center">
+  <img src="apps/desktop/assets/icon-source.png" width="128" alt="SquadFlow 应用图标">
+</p>
 
-> 本地优先的 AI 智能体编排工作台 · A local-first AI agent orchestration desktop app
+<h1 align="center">SquadFlow</h1>
 
-**中文** | [English](README.en.md)
+<p align="center">本地优先的 AI 智能体编排工作台</p>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#安装)
-[![Node](https://img.shields.io/badge/node-22.x-brightgreen.svg)](#从源码运行)
+<p align="center">
+  <strong>中文</strong> · <a href="README.en.md">English</a>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 License"></a>
+  <a href="#安装"><img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="macOS"></a>
+  <a href="#从源码运行"><img src="https://img.shields.io/badge/node-22.x-brightgreen.svg" alt="Node.js 22"></a>
+</p>
 
 SquadFlow 是一个运行在你自己电脑上的多智能体协作工作台：由一个 Leader 智能体带领多位专家智能体，按「澄清 → 架构 → 开发 → 验证 → 评审 → 诊断」的流程协作完成软件任务。
 

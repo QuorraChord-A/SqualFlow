@@ -1,12 +1,20 @@
-# SquadFlow
+<p align="center">
+  <img src="apps/desktop/assets/icon-source.png" width="128" alt="SquadFlow app icon">
+</p>
 
-> A local-first AI agent orchestration desktop app
+<h1 align="center">SquadFlow</h1>
 
-[中文](README.md) | **English**
+<p align="center">A local-first AI agent orchestration desktop app</p>
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#installation)
-[![Node](https://img.shields.io/badge/node-22.x-brightgreen.svg)](#running-from-source)
+<p align="center">
+  <a href="README.md">中文</a> · <strong>English</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache-2.0 License"></a>
+  <a href="#installation"><img src="https://img.shields.io/badge/platform-macOS-lightgrey.svg" alt="macOS"></a>
+  <a href="#running-from-source"><img src="https://img.shields.io/badge/node-22.x-brightgreen.svg" alt="Node.js 22"></a>
+</p>
 
 SquadFlow is a multi-agent collaboration workspace that runs on your computer. A Leader agent coordinates specialist agents through a structured workflow: clarification, architecture, implementation, verification, review, and diagnosis.
 
