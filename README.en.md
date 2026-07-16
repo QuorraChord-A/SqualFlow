@@ -69,4 +69,4 @@ Report security issues privately as described in [SECURITY.md](SECURITY.md), not
 
 ## License
 
-The project source code is licensed under the [Apache License 2.0](LICENSE). Third-party components distributed with the application remain subject to their own terms; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In particular, the Claude Agent SDK is governed by Anthropic's legal terms and is not covered by the project's Apache-2.0 license.
+The project source code is licensed under the [Apache License 2.0](LICENSE). Third-party components distributed with the application remain subject to their own terms; see [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

@@ -69,4 +69,4 @@ macOS 安装版数据默认位于：
 
 ## 许可证
 
-代码以 [Apache License 2.0](LICENSE) 发布。随应用分发的第三方组件适用其各自条款，见 [NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)；其中 Claude Agent SDK 受 Anthropic 法律条款约束，不在 Apache-2.0 覆盖范围内。
+代码以 [Apache License 2.0](LICENSE) 发布。随应用分发的第三方组件适用其各自条款，见 [NOTICE](NOTICE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
