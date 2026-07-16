@@ -11,6 +11,7 @@ export default defineConfig({
     testTimeout: 30_000,
     env: {
       SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT: path.join(testRoot, "tests", "fixtures", "agent-runtime"),
+      SQUADFLOW_EXTERNAL_CODEX_COMMAND: process.execPath,
     },
   },
 });
