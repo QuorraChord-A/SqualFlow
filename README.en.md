@@ -7,7 +7,6 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#installation)
 [![Node](https://img.shields.io/badge/node-22.x-brightgreen.svg)](#running-from-source)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 SquadFlow is a multi-agent collaboration workspace that runs on your computer. A Leader agent coordinates specialist agents through a structured workflow: clarification, architecture, implementation, verification, review, and diagnosis.
 
@@ -64,9 +63,9 @@ On macOS, installed-application data is stored at:
 
 Deleting the `.app` does not automatically delete this directory. When using cloud models, you must also follow the terms and data policies of the corresponding model provider.
 
-## Contributing
+## Security
 
-Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before starting. Report security issues privately as described in [SECURITY.md](SECURITY.md), not through a public issue.
+Report security issues privately as described in [SECURITY.md](SECURITY.md), not through a public issue.
 
 ## License
 

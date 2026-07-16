@@ -7,7 +7,6 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#安装)
 [![Node](https://img.shields.io/badge/node-22.x-brightgreen.svg)](#从源码运行)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 SquadFlow 是一个运行在你自己电脑上的多智能体协作工作台：由一个 Leader 智能体带领多位专家智能体，按「澄清 → 架构 → 开发 → 验证 → 评审 → 诊断」的流程协作完成软件任务。
 
@@ -64,9 +63,9 @@ macOS 安装版数据默认位于：
 
 删除 `.app` 不会自动删除该目录。使用云模型时，请同时遵守相应模型服务商的条款与数据政策。
 
-## 参与贡献
+## 安全
 
-欢迎 issue 与 PR！开始前请阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。安全问题请按 [SECURITY.md](SECURITY.md) 的方式私下报告，不要开公开 issue。
+安全问题请按 [SECURITY.md](SECURITY.md) 的方式私下报告，不要开公开 issue。
 
 ## 许可证
 
