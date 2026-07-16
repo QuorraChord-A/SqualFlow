@@ -1,0 +1,40 @@
+name: Bug 反馈
+description: 报告一个缺陷
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 描述问题现象，以及你期望的行为。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开 ...
+        2. 点击 ...
+        3. 出现 ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: SquadFlow 版本
+      placeholder: 例如 0.1.0（左下角更新按钮弹窗可查看）
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: 操作系统
+      placeholder: 例如 macOS 15.2 (Apple Silicon)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 日志位于应用数据目录的 logs/ 下。请先移除其中的敏感信息（路径、密钥等）。

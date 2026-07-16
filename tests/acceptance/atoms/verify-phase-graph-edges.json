@@ -1,0 +1,11 @@
+{
+  "id": "verify-phase-graph-edges",
+  "description": "验证 phase_graph 中的边是否正确",
+  "params": ["flowId", "expectedEdges"],
+  "steps": [
+    "使用 curl 查询 GET /api/flows/{flowId}"
+  ],
+  "verify": [
+    "响应 JSON 的 phase_graph.edges 包含 {expectedEdges} 中列出的所有边"
+  ]
+}

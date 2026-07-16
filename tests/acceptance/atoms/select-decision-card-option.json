@@ -1,0 +1,18 @@
+{
+  "id": "select-decision-card-option",
+  "description": "只选择 DecisionCard 选项但不提交",
+  "params": ["question", "answer"],
+  "steps": [
+    "在聊天区找到 DecisionCard 卡片",
+    "找到问题 '{question}'",
+    "选择选项 '{answer}'",
+    "不要点击 '提交决策' 按钮",
+    "最多等待 2 秒，观察聊天区和右侧数据面板"
+  ],
+  "verify": [
+    "DecisionCard 中选项 '{answer}' 呈选中状态",
+    "'提交决策' 按钮可用但尚未触发提交",
+    "聊天区没有出现新的 Leader 回复",
+    "数据库中对应 decision_cards.status 仍为 pending"
+  ]
+}

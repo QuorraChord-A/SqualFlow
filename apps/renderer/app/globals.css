@@ -1,0 +1,642 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "./themes/dark.css";
+@import "./themes/dark-emerald.css";
+@import "./themes/light.css";
+@import "./themes/semantic.css";
+@source "../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/mermaid/dist/*.js";
+
+@custom-variant dark (&:is(.dark *));
+
+.orchestration-plan-graph .react-flow__renderer {
+  cursor: default;
+}
+
+.orchestration-plan-graph .react-flow__node {
+  cursor: pointer;
+}
+
+.orchestration-plan-graph .react-flow__edge-path {
+  stroke: color-mix(in srgb, var(--foreground) 38%, transparent);
+  stroke-width: 1.4;
+}
+
+.orchestration-plan-graph .react-flow__edge.animated path {
+  stroke: color-mix(in srgb, var(--status-running) 62%, var(--foreground));
+}
+
+.orchestration-plan-graph .react-flow__background {
+  opacity: 0.34;
+}
+
+.orchestration-plan-graph .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--ui-border-strong);
+  border-radius: 0.6rem;
+  background: var(--ui-surface-raised);
+  box-shadow: var(--ui-shadow-elevated);
+}
+
+.orchestration-plan-graph .react-flow__controls-button {
+  border-bottom-color: var(--ui-border-subtle);
+  background: var(--ui-surface-raised);
+  color: var(--foreground);
+}
+
+.orchestration-plan-graph .react-flow__controls-button:hover {
+  background: var(--ui-surface-control-hover);
+}
+
+.orchestration-plan-graph .react-flow__controls-button svg {
+  fill: currentColor;
+}
+
+.orchestration-plan-graph.is-compact .react-flow__background,
+.orchestration-plan-graph.is-compact .react-flow__attribution {
+  display: none;
+}
+
+.orchestration-plan-graph.is-compact .react-flow__pane {
+  cursor: pointer;
+}
+
+.orchestration-plan-graph.is-compact .react-flow__controls {
+  transform: scale(0.82);
+  transform-origin: bottom left;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orchestration-plan-graph .react-flow__edge.animated path {
+    animation: none;
+  }
+}
+
+html[data-squadflow-desktop="true"] .sf-left-window-controls {
+  left: 82px;
+}
+
+html[data-squadflow-desktop="true"] .sf-topbar-left-collapsed {
+  padding-left: 19rem;
+}
+
+html[data-squadflow-desktop="true"] .sf-window-drag-region {
+  -webkit-app-region: drag;
+  pointer-events: auto;
+}
+
+html[data-squadflow-desktop="true"] :where(
+  button,
+  a,
+  input,
+  textarea,
+  select,
+  [role="button"],
+  [data-slot="popover-trigger"],
+  [data-base-ui-focusable]
+) {
+  -webkit-app-region: no-drag;
+}
+
+/* ──────────────────────────────────────────────
+   Theme token mappings — Tailwind utility classes
+   Values are defined in theme files (app/themes/).
+   This block only maps CSS vars to Tailwind names.
+   ────────────────────────────────────────────── */
+@theme inline {
+  /* Typography — set by next/font/google on <html> via CSS variable classes */
+  --font-heading: var(--font-sans);
+  --font-sans: 'Inter', 'system-ui', 'sans-serif';
+  --font-mono: 'JetBrains Mono', 'Menlo', 'monospace';
+
+  /* Semantic colors → CSS variables (per-theme) */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Semantic UI surfaces — shared component contract */
+  --color-ui-canvas: var(--ui-surface-canvas);
+  --color-ui-raised: var(--ui-surface-raised);
+  --color-ui-sunken: var(--ui-surface-sunken);
+  --color-ui-overlay: var(--ui-surface-overlay);
+  --color-ui-control: var(--ui-surface-control);
+  --color-ui-control-hover: var(--ui-surface-control-hover);
+  --color-ui-border-subtle: var(--ui-border-subtle);
+  --color-ui-border-strong: var(--ui-border-strong);
+  --color-ui-permission: var(--ui-permission-accent);
+  --color-ui-scrim: var(--ui-scrim);
+
+  /* Sidebar */
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  /* Charts */
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Status lifecycle */
+  --color-status-pending: var(--status-pending);
+  --color-status-running: var(--status-running);
+  --color-status-completed: var(--status-completed);
+  --color-status-failed: var(--status-failed);
+  --color-status-aborted: var(--status-aborted);
+
+  /* Terminal */
+  --color-terminal-bg: var(--terminal-bg);
+  --color-terminal-text: var(--terminal-text);
+  --color-terminal-border: var(--terminal-border);
+  --color-terminal-muted: var(--terminal-muted);
+  --color-terminal-hover: var(--terminal-hover);
+  --color-terminal-hover-text: var(--terminal-hover-text);
+  --color-terminal-cursor: var(--terminal-cursor);
+
+  /* Radius */
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* Glassmorphism — theme-agnostic, uses CSS variables */
+.glass {
+  background: color-mix(in srgb, var(--card) 60%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+.glass-subtle {
+  background: color-mix(in srgb, var(--card) 30%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+/* Scrollbar — theme-agnostic */
+.sf-scrollbar,
+.custom-scroll {
+  scrollbar-color: color-mix(in srgb, var(--foreground) 28%, transparent) transparent;
+  scrollbar-width: thin;
+}
+.sf-scrollbar::-webkit-scrollbar,
+.custom-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.sf-scrollbar::-webkit-scrollbar-track,
+.custom-scroll::-webkit-scrollbar-track { background: transparent; }
+.sf-scrollbar::-webkit-scrollbar-thumb,
+.custom-scroll::-webkit-scrollbar-thumb {
+  min-height: 40px;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 28%, transparent);
+  background-clip: content-box;
+}
+.sf-scrollbar::-webkit-scrollbar-thumb:hover,
+.custom-scroll::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--foreground) 42%, transparent);
+  background-clip: content-box;
+}
+.sf-scrollbar::-webkit-scrollbar-corner,
+.custom-scroll::-webkit-scrollbar-corner { background: transparent; }
+
+/* Markdown and code rendering final overrides.
+   Keep these outside Tailwind layers so they win over Streamdown utility classes. */
+.sf-markdown {
+  color: color-mix(in srgb, var(--foreground) 90%, transparent);
+  font-size: 0.875rem;
+  font-weight: 450;
+  line-height: 1.72;
+}
+
+.sf-markdown :where(h1, h2, h3, h4) {
+  color: var(--foreground);
+  font-weight: 680;
+  letter-spacing: 0;
+  line-height: 1.32;
+}
+
+.sf-markdown :where(h1) { margin: 1.15rem 0 0.55rem; font-size: 1.35rem; }
+.sf-markdown :where(h2) { margin: 1rem 0 0.48rem; font-size: 1.16rem; }
+.sf-markdown :where(h3) { margin: 0.85rem 0 0.38rem; font-size: 1.02rem; }
+.sf-markdown :where(h4) { margin: 0.75rem 0 0.32rem; font-size: 0.94rem; }
+
+.sf-markdown :where(p) {
+  margin: 0.52rem 0;
+  color: color-mix(in srgb, var(--foreground) 88%, transparent);
+  font-weight: 450;
+}
+
+.sf-markdown :where(ul, ol) {
+  margin: 0.55rem 0;
+  padding-left: 1.2rem;
+}
+
+.sf-markdown :where(li) {
+  margin: 0.18rem 0;
+  padding-left: 0.12rem;
+  color: color-mix(in srgb, var(--foreground) 88%, transparent);
+  font-weight: 450;
+}
+
+.sf-markdown :where(li)::marker {
+  color: color-mix(in srgb, var(--foreground) 46%, transparent);
+}
+
+.sf-markdown :where(blockquote) {
+  margin: 0.85rem 0;
+  border-left: 3px solid color-mix(in srgb, var(--ring) 48%, transparent);
+  border-radius: 0 0.6rem 0.6rem 0;
+  background: color-mix(in srgb, var(--ui-surface-raised) 38%, transparent);
+  padding: 0.62rem 0.85rem;
+  color: color-mix(in srgb, var(--foreground) 80%, transparent);
+  font-weight: 450;
+}
+
+.sf-markdown :where(hr) {
+  margin: 1.05rem 0;
+  border-color: var(--ui-border-subtle);
+}
+
+.sf-markdown :where(a) {
+  color: color-mix(in srgb, var(--ring) 76%, var(--foreground));
+  text-underline-offset: 3px;
+}
+
+.sf-markdown :where(strong) {
+  color: var(--foreground);
+  font-weight: 680;
+}
+
+.sf-markdown :where(code[data-streamdown="inline-code"], :not(pre) > code) {
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: 0.45rem;
+  background: color-mix(in srgb, var(--ui-surface-control) 58%, transparent);
+  padding: 0.12rem 0.38rem;
+  color: color-mix(in srgb, var(--foreground) 92%, var(--ui-code-token-string));
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  font-weight: 600;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] {
+  margin: 0.8rem 0;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  box-shadow: none;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] > div:first-child:not([data-streamdown]) {
+  display: none;
+}
+
+.sf-markdown [data-streamdown="table"] {
+  background: color-mix(in srgb, var(--ui-surface-card) 42%, transparent);
+  box-shadow: none;
+}
+
+.sf-markdown :where(table) {
+  width: max-content;
+  min-width: 100%;
+  overflow: hidden;
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: 0.75rem;
+  font-size: 0.84rem;
+}
+
+.sf-markdown :where(th, td) {
+  border-bottom: 1px solid var(--ui-border-subtle);
+  padding: 0.48rem 0.68rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.sf-markdown :where(th) {
+  background: color-mix(in srgb, var(--ui-surface-control) 42%, transparent);
+  color: var(--foreground);
+  font-weight: 650;
+}
+
+.sf-markdown :where(td) {
+  color: color-mix(in srgb, var(--foreground) 86%, transparent);
+  font-weight: 450;
+}
+
+.sf-markdown :where(tr:last-child td) {
+  border-bottom: 0;
+}
+
+.sf-markdown [data-streamdown="code-block"],
+.sf-markdown [data-streamdown="mermaid-block"] {
+  margin: 0.85rem 0;
+  gap: 0;
+  overflow: hidden;
+  border-color: var(--ui-border-subtle);
+  border-radius: 0.8rem;
+  background: var(--ui-code-surface);
+  padding: 0;
+  box-shadow: var(--ui-shadow-inset);
+}
+
+.sf-markdown [data-streamdown="code-block-header"] {
+  height: 2.15rem;
+  border-bottom: 1px solid var(--ui-border-subtle);
+  padding: 0 0.72rem;
+  color: color-mix(in srgb, var(--foreground) 58%, transparent);
+}
+
+.sf-markdown [data-streamdown="code-block-header"] span {
+  margin-left: 0;
+  border-radius: 0.45rem;
+  background: var(--ui-code-chip);
+  padding: 0.1rem 0.4rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.sf-markdown [data-streamdown="code-block-actions"] {
+  border-color: var(--ui-border-subtle);
+  background: color-mix(in srgb, var(--ui-surface-overlay) 86%, transparent);
+  backdrop-filter: blur(10px);
+}
+
+.sf-markdown [data-streamdown="code-block-body"] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.75rem 0;
+  font-size: 0.79rem;
+}
+
+.sf-markdown [data-streamdown="code-block-body"] pre {
+  background: transparent !important;
+}
+
+.sf-markdown [data-streamdown="code-block-body"] code {
+  font-family: var(--font-mono);
+  line-height: 1.58;
+}
+
+.sf-markdown [data-streamdown="code-block-body"] code > span {
+  padding-right: 1rem;
+}
+
+.sf-markdown-document {
+  max-width: 72ch;
+}
+
+.sf-code-file-preview .cm-editor {
+  height: 100%;
+}
+
+.sf-code-file-preview .cm-tooltip {
+  border-color: var(--ui-border-subtle);
+  background: var(--ui-surface-overlay);
+  color: var(--foreground);
+}
+
+.sf-plain-text-preview {
+  max-height: 100%;
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background-color: var(--border); border-radius: 3px; }
+}
+
+/* Stage pulse animation — theme-agnostic */
+@keyframes stage-pulse-glow {
+  0%, 100% { box-shadow: 0 0 12px color-mix(in srgb, var(--primary) 50%, transparent); }
+  50% { box-shadow: 0 0 22px color-mix(in srgb, var(--primary) 85%, transparent); }
+}
+.animate-stage-glow {
+  animation: stage-pulse-glow 2s ease-in-out infinite;
+}
+
+@keyframes left-sidebar-enter {
+  from {
+    opacity: 0.98;
+    transform: translateX(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes left-sidebar-exit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0.98;
+    transform: translateX(-100%);
+  }
+}
+
+@keyframes left-sidebar-space-enter {
+  from {
+    width: 0;
+  }
+  to {
+    width: var(--left-sidebar-width);
+  }
+}
+
+@keyframes left-sidebar-space-exit {
+  from {
+    width: var(--left-sidebar-width);
+  }
+  to {
+    width: 0;
+  }
+}
+
+@keyframes right-panel-drawer-enter {
+  from {
+    opacity: 0.98;
+    transform: translateX(100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes right-panel-drawer-exit {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0.98;
+    transform: translateX(100%);
+  }
+}
+
+@keyframes codex-effort-particle {
+  0% {
+    opacity: 0;
+    transform: translate3d(-9px, 2px, 0) scale(0.55);
+  }
+  24% {
+    opacity: 0.95;
+    transform: translate3d(-2px, -2px, 0) scale(1.05);
+  }
+  54% {
+    opacity: 0.3;
+    transform: translate3d(6px, 1px, 0) scale(0.72);
+  }
+  76% {
+    opacity: 0.9;
+    transform: translate3d(11px, -2px, 0) scale(0.95);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(18px, 1px, 0) scale(0.55);
+  }
+}
+
+@keyframes codex-effort-gradient {
+  0%, 100% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+}
+
+.sf-codex-effort-particle {
+  animation: codex-effort-particle 2.6s linear infinite;
+  box-shadow: 0 0 7px color-mix(in srgb, var(--ui-codex-effort-highlight) 78%, transparent);
+  will-change: opacity, transform;
+}
+
+.sf-codex-effort-gradient {
+  animation: codex-effort-gradient 3.2s ease-in-out infinite;
+  background-size: 165% 100%;
+  will-change: background-position;
+}
+
+.animate-left-sidebar-enter {
+  animation: left-sidebar-enter 220ms ease-out both;
+}
+
+.animate-left-sidebar-exit {
+  animation: left-sidebar-exit 220ms ease-out both;
+}
+
+.animate-left-sidebar-space-enter {
+  animation: left-sidebar-space-enter 220ms ease-out both;
+}
+
+.animate-left-sidebar-space-exit {
+  animation: left-sidebar-space-exit 220ms ease-out both;
+}
+
+.sf-right-panel-drawer-enter {
+  animation: right-panel-drawer-enter 400ms ease-out both;
+}
+
+.sf-right-panel-drawer-exit {
+  animation: right-panel-drawer-exit 400ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-left-sidebar-enter,
+  .animate-left-sidebar-exit,
+  .animate-left-sidebar-space-enter,
+  .animate-left-sidebar-space-exit,
+  .sf-right-panel-drawer-enter,
+  .sf-right-panel-drawer-exit,
+  .sf-codex-effort-particle,
+  .sf-codex-effort-gradient {
+    animation-duration: 1ms;
+  }
+}
+
+/* Mermaid pan-zoom — smoother transitions */
+[data-language="mermaid"] [style*="transition"],
+[class*="language-mermaid"] [style*="transition"] {
+  transition-duration: 0.25s !important;
+  transition-timing-function: ease-out !important;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    scrollbar-color: color-mix(in srgb, var(--foreground) 28%, transparent) transparent;
+    scrollbar-width: thin;
+  }
+  *::-webkit-scrollbar { width: 10px; height: 10px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb {
+    min-height: 40px;
+    border: 3px solid transparent;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--foreground) 28%, transparent);
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--foreground) 42%, transparent);
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-corner { background: transparent; }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+}
+
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+a[href],
+select:not(:disabled),
+summary,
+label[for],
+input[type="checkbox"]:not(:disabled),
+input[type="radio"]:not(:disabled),
+[data-slot="dropdown-menu-item"]:not([data-disabled]),
+[data-slot="dropdown-menu-sub-trigger"]:not([data-disabled]),
+[data-slot="select-trigger"]:not([data-disabled]),
+[data-slot="select-item"]:not([data-disabled]) {
+  cursor: pointer;
+}

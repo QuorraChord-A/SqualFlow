@@ -1,0 +1,16 @@
+{
+  "id": "respond-to-decision-card",
+  "description": "响应 DecisionCard 中的问题",
+  "params": ["question", "answer"],
+  "steps": [
+    "在聊天区找到 DecisionCard 卡片",
+    "找到问题 '{question}'",
+    "选择选项 '{answer}'",
+    "点击 '提交决策' 按钮",
+    "最多等待 3 秒，直到 DecisionCard 折叠为确认摘要"
+  ],
+  "verify": [
+    "DecisionCard 中显示已确认决策",
+    "DecisionCard 中显示选择结果 '{answer}'"
+  ]
+}

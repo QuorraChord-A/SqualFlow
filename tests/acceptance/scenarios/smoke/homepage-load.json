@@ -1,0 +1,16 @@
+{
+  "name": "真实首页加载和基础 UI 验证",
+  "description": "验证 SquadFlow 真实产品首页能正常加载，显示 Workspace、Flows/Projects 与空状态",
+  "category": "smoke",
+  "steps": [
+    "open-homepage",
+    {
+      "verify": [
+        "页面中出现 Default Workspace",
+        "左侧显示 Flows Tab",
+        "左侧显示 Projects Tab",
+        "未选择 Flow 时主区域提示选择一个 SquadFlow"
+      ]
+    }
+  ]
+}

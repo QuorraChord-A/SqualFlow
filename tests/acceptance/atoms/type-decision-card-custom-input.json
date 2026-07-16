@@ -1,0 +1,20 @@
+{
+  "id": "type-decision-card-custom-input",
+  "description": "在 DecisionCard 自定义输入框输入内容但不提交",
+  "params": ["question", "text"],
+  "steps": [
+    "在聊天区找到 DecisionCard 卡片",
+    "找到问题 '{question}'",
+    "在该问题下方的 '其他 / 自定义' 输入框输入 '{text}'",
+    "不要点击 '提交决策' 按钮",
+    "最多等待 2 秒，观察聊天区、WebSocket 消息和数据库"
+  ],
+  "verify": [
+    "自定义输入框中保留文本 '{text}'",
+    "DecisionCard 仍处于 pending 状态",
+    "前端没有发送 flow:decision WebSocket 消息",
+    "数据库中对应 decision_cards.status 仍为 pending",
+    "数据库中对应 decision_cards.answers 仍为空对象",
+    "聊天区没有因为输入过程出现新的 Leader 回复"
+  ]
+}

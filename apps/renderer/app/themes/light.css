@@ -1,0 +1,81 @@
+/* light.css — shadcn/ui standard light theme */
+
+[data-theme="light"] {
+  /* Core palette */
+  --background: #ffffff;
+  --foreground: #0a0a0a;
+  --card: #ffffff;
+  --card-foreground: #0a0a0a;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0a;
+
+  /* Primary — near-black for CTAs on light background */
+  --primary: #171717;
+  --primary-foreground: #fafafa;
+
+  /* Secondary — subtle surface */
+  --secondary: #f5f5f5;
+  --secondary-foreground: #171717;
+
+  /* Muted — background-level for subdued areas */
+  --muted: #f5f5f5;
+  --muted-foreground: #737373;
+
+  /* Accent — hover/focus background */
+  --accent: #f5f5f5;
+  --accent-foreground: #171717;
+
+  /* Destructive — errors, danger actions */
+  --destructive: #ef4444;
+
+  /* Borders and inputs */
+  --border: #e5e5e5;
+  --input: #e5e5e5;
+  --ring: #0a0a0a;
+
+  /* Radius */
+  --radius: 0.625rem;
+
+  /* Chart palette */
+  --chart-1: #171717;
+  --chart-2: #737373;
+  --chart-3: #a3a3a3;
+  --chart-4: #ef4444;
+  --chart-5: #d4d4d4;
+
+  /* Sidebar */
+  --sidebar: #fafafa;
+  --sidebar-foreground: #0a0a0a;
+  --sidebar-primary: #171717;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-accent: #f5f5f5;
+  --sidebar-accent-foreground: #171717;
+  --sidebar-border: #e5e5e5;
+  --sidebar-ring: #0a0a0a;
+
+  /* Status lifecycle */
+  --status-pending: #f59e0b;
+  --status-running: #3b82f6;
+  --status-completed: #22c55e;
+  --status-failed: #ef4444;
+  --status-aborted: #737373;
+
+  /* Reasoning effort spectrum: cool = faster/lighter, warm = slower/deeper */
+  --effort-low: #3b82f6;
+  --effort-medium: #f59e0b;
+  --effort-high: #f97316;
+  --effort-xhigh: #ef4444;
+
+  /* Terminal */
+  --terminal-bg: #f4f4f5;
+  --terminal-text: #18181b;
+  --terminal-border: #e4e4e7;
+  --terminal-muted: #71717a;
+  --terminal-hover: #e4e4e7;
+  --terminal-hover-text: #18181b;
+  --terminal-cursor: #18181b;
+
+  /* Fonts */
+  --font-sans: 'Inter', 'system-ui', 'sans-serif';
+  --font-mono: 'JetBrains Mono', 'Menlo', 'monospace';
+}

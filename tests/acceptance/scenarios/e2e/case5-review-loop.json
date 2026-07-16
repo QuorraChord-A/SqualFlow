@@ -1,0 +1,98 @@
+{
+  "name": "Case 5: Review→Develop 回环 - review fail → develop fix",
+  "description": "验证 review 失败后的回环：review fail → develop fix → verify → review pass，验证 review phase 记录和 fix_count",
+  "category": "e2e",
+  "steps": [
+    "open-homepage",
+    {
+      "atom": "create-project",
+      "params": {
+        "name": "Case5 Review Loop",
+        "path": "/tmp/case5-reviewloop"
+      }
+    },
+    {
+      "atom": "create-flow",
+      "params": {
+        "name": "Case5 Review Loop Test",
+        "description": "Case5 Review Loop Test"
+      }
+    },
+    {
+      "atom": "select-flow",
+      "params": {
+        "flowName": "Case5 Review Loop Test"
+      }
+    },
+    {
+      "atom": "select-flow-project",
+      "params": {
+        "projectName": "Case5 Review Loop"
+      }
+    },
+    "verify-realtime-ready",
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "Python实现一个代码质量有问题的计算器"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 50
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧右侧数据面板中出现 clarify",
+        "聊天区或右侧右侧数据面板中出现 develop",
+        "聊天区或右侧右侧数据面板中出现 verify",
+        "聊天区或右侧右侧数据面板中出现 review",
+        "聊天区或右侧右侧数据面板中出现 fail"
+      ]
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 40
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧右侧数据面板中出现 develop",
+        "聊天区或右侧右侧数据面板中出现 verify",
+        "聊天区或右侧右侧数据面板中出现 review",
+        "聊天区或右侧右侧数据面板中出现 pass"
+      ]
+    },
+    {
+      "atom": "verify-database-flow-phases",
+      "params": {
+        "flowId": "$context.flowId",
+        "runId": "$context.runId",
+        "expectedPhases": [
+          "clarify",
+          "develop",
+          "verify",
+          "review",
+          "develop",
+          "verify",
+          "review"
+        ]
+      }
+    },
+    {
+      "atom": "verify-phase-graph-edges",
+      "params": {
+        "flowId": "$context.flowId",
+        "expectedEdges": [
+          [
+            "review",
+            "develop"
+          ]
+        ]
+      }
+    }
+  ]
+}

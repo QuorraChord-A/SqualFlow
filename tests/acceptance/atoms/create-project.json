@@ -1,0 +1,17 @@
+{
+  "id": "create-project",
+  "description": "创建一个新的 Project",
+  "params": ["name", "path"],
+  "steps": [
+    "切换到左侧 Projects Tab",
+    "点击 '新建项目' 图标或 '创建一个' 按钮",
+    "在 '新建项目' 弹窗的名称输入框填写 '{name}'",
+    "在本地路径输入框填写 '{path}'",
+    "保持 Agent 类型为 Claude Code",
+    "点击 '创建' 按钮",
+    "最多等待 2 秒，直到 Projects 列表更新"
+  ],
+  "verify": [
+    "Projects 列表中存在名称为 '{name}' 的 Project"
+  ]
+}

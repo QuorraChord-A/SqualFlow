@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "roles": {
+    "leader": {
+      "enabled": true,
+      "configId": "default-agent-sdk",
+      "modelId": "mimo-v25"
+    },
+    "coder": {
+      "enabled": true,
+      "configId": "default-agent-sdk",
+      "modelId": "mimo-v25"
+    },
+    "research": {
+      "enabled": false,
+      "configId": "default-agent-sdk",
+      "modelId": "mimo-v25"
+    },
+    "verify": {
+      "enabled": true,
+      "configId": "default-agent-sdk",
+      "modelId": "mimo-v25"
+    },
+    "codereview": {
+      "enabled": true,
+      "configId": "default-agent-sdk",
+      "modelId": "mimo-v25"
+    }
+  }
+}

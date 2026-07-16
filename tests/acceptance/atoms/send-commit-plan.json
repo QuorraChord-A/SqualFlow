@@ -1,0 +1,17 @@
+{
+  "id": "send-commit-plan",
+  "description": "在澄清或架构阶段提交当前方案",
+  "params": [],
+  "steps": [
+    "确认当前选中 Flow 处于 active 状态",
+    "确认当前阶段为 clarify 或 architecture",
+    "确认没有 pending DecisionCard",
+    "点击聊天输入区上方的 '提交方案' 按钮",
+    "最多等待 3 秒，观察聊天区新的 Leader 回复"
+  ],
+  "verify": [
+    "前端发送的是 flow:commit_plan 事件",
+    "后端 mailbox 中 Leader 收到的消息类型为 commit_plan",
+    "页面不会出现旧的 Build 按钮或 flow:build 事件"
+  ]
+}

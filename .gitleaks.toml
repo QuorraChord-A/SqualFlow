@@ -1,0 +1,14 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Generated dependencies, build outputs, and bundled binaries"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)apps/local-service/dist/''',
+  '''(^|/)apps/renderer/\.next/''',
+  '''(^|/)dist/''',
+  '''(^|/)apps/desktop/\.staging/''',
+  '''(^|/)\.artifacts/''',
+  '''^apps/desktop/resources/codex-runtime/[^/]+/codex$''',
+]

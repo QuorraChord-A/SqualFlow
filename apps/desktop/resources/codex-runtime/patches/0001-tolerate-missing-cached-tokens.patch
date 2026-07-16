@@ -1,0 +1,188 @@
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index bf6d755..07e2d28 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -8,6 +8,7 @@ use codex_client::StreamResponse;
+ use codex_client::TransportError;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::TokenUsage;
++use codex_protocol::protocol::UNKNOWN_CACHED_INPUT_TOKENS;
+ use eventsource_stream::Eventsource;
+ use futures::StreamExt;
+ use futures::TryStreamExt;
+@@ -138,7 +139,7 @@ impl From<ResponseCompletedUsage> for TokenUsage {
+             input_tokens: val.input_tokens,
+             cached_input_tokens: val
+                 .input_tokens_details
+-                .map(|d| d.cached_tokens)
++                .map(|d| d.cached_tokens.unwrap_or(UNKNOWN_CACHED_INPUT_TOKENS))
+                 .unwrap_or(0),
+             output_tokens: val.output_tokens,
+             reasoning_output_tokens: val
+@@ -152,7 +153,8 @@ impl From<ResponseCompletedUsage> for TokenUsage {
+ 
+ #[derive(Debug, Deserialize)]
+ struct ResponseCompletedInputTokensDetails {
+-    cached_tokens: i64,
++    #[serde(default)]
++    cached_tokens: Option<i64>,
+ }
+ 
+ #[derive(Debug, Deserialize)]
+@@ -628,6 +630,74 @@ mod tests {
+         }
+     }
+ 
++    #[tokio::test]
++    async fn completed_with_missing_cached_tokens_preserves_other_usage() {
++        let events = run_sse(vec![json!({
++            "type": "response.completed",
++            "response": {
++                "id": "resp1",
++                "usage": {
++                    "input_tokens": 80,
++                    "input_tokens_details": {},
++                    "output_tokens": 20,
++                    "output_tokens_details": null,
++                    "total_tokens": 100
++                }
++            }
++        })])
++        .await;
++
++        assert_eq!(events.len(), 1);
++        match &events[0] {
++            ResponseEvent::Completed {
++                response_id,
++                token_usage: Some(token_usage),
++            } => {
++                assert_eq!(response_id, "resp1");
++                assert_eq!(token_usage.input_tokens, 80);
++                assert_eq!(token_usage.cached_input_tokens, UNKNOWN_CACHED_INPUT_TOKENS);
++                assert_eq!(token_usage.output_tokens, 20);
++                assert_eq!(token_usage.reasoning_output_tokens, 0);
++                assert_eq!(token_usage.total_tokens, 100);
++            }
++            other => panic!("unexpected event: {other:?}"),
++        }
++    }
++
++    #[tokio::test]
++    async fn completed_with_cached_tokens_preserves_exact_usage() {
++        let events = run_sse(vec![json!({
++            "type": "response.completed",
++            "response": {
++                "id": "resp1",
++                "usage": {
++                    "input_tokens": 80,
++                    "input_tokens_details": {"cached_tokens": 40},
++                    "output_tokens": 20,
++                    "output_tokens_details": {"reasoning_tokens": 5},
++                    "total_tokens": 100
++                }
++            }
++        })])
++        .await;
++
++        assert_eq!(events.len(), 1);
++        match &events[0] {
++            ResponseEvent::Completed {
++                response_id,
++                token_usage: Some(token_usage),
++            } => {
++                assert_eq!(response_id, "resp1");
++                assert_eq!(token_usage.input_tokens, 80);
++                assert_eq!(token_usage.cached_input_tokens, 40);
++                assert_eq!(token_usage.output_tokens, 20);
++                assert_eq!(token_usage.reasoning_output_tokens, 5);
++                assert_eq!(token_usage.total_tokens, 100);
++            }
++            other => panic!("unexpected event: {other:?}"),
++        }
++    }
++
+     #[tokio::test]
+     async fn error_when_missing_completed() {
+         let item1 = json!({
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 16f7439..3db42b4 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1605,7 +1605,7 @@ where
+                         session_telemetry.sse_event_completed(
+                             usage.input_tokens,
+                             usage.output_tokens,
+-                            Some(usage.cached_input_tokens),
++                            Some(usage.cached_input_tokens).filter(|tokens| *tokens >= 0),
+                             Some(usage.reasoning_output_tokens),
+                             usage.total_tokens,
+                         );
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2c2c9ca..6b5df3d 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2055,6 +2055,13 @@ pub struct TokenUsage {
+     pub total_tokens: i64,
+ }
+ 
++/// Sentinel used when a provider reports input usage but omits cache telemetry.
++///
++/// Keeping this distinct from zero preserves the difference between "no cache
++/// hit" and "cache usage was not reported" without dropping the other token
++/// counts needed for context-window accounting.
++pub const UNKNOWN_CACHED_INPUT_TOKENS: i64 = -1;
++
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct TokenUsageInfo {
+     pub total_token_usage: TokenUsage,
+@@ -2208,7 +2215,13 @@ impl TokenUsage {
+     /// In-place element-wise sum of token counts.
+     pub fn add_assign(&mut self, other: &TokenUsage) {
+         self.input_tokens += other.input_tokens;
+-        self.cached_input_tokens += other.cached_input_tokens;
++        self.cached_input_tokens = if self.cached_input_tokens == UNKNOWN_CACHED_INPUT_TOKENS
++            || other.cached_input_tokens == UNKNOWN_CACHED_INPUT_TOKENS
++        {
++            UNKNOWN_CACHED_INPUT_TOKENS
++        } else {
++            self.cached_input_tokens + other.cached_input_tokens
++        };
+         self.output_tokens += other.output_tokens;
+         self.reasoning_output_tokens += other.reasoning_output_tokens;
+         self.total_tokens += other.total_tokens;
+@@ -5074,4 +5087,35 @@ mod tests {
+ 
+         assert_eq!(info.model_context_window, Some(258_400));
+     }
++
++    #[test]
++    fn unknown_cached_tokens_remain_unknown_when_usage_is_accumulated() {
++        let mut total = TokenUsage {
++            input_tokens: 10,
++            cached_input_tokens: 4,
++            output_tokens: 1,
++            reasoning_output_tokens: 0,
++            total_tokens: 11,
++        };
++        total.add_assign(&TokenUsage {
++            input_tokens: 20,
++            cached_input_tokens: UNKNOWN_CACHED_INPUT_TOKENS,
++            output_tokens: 2,
++            reasoning_output_tokens: 1,
++            total_tokens: 22,
++        });
++        total.add_assign(&TokenUsage {
++            input_tokens: 30,
++            cached_input_tokens: 8,
++            output_tokens: 3,
++            reasoning_output_tokens: 0,
++            total_tokens: 33,
++        });
++
++        assert_eq!(total.input_tokens, 60);
++        assert_eq!(total.cached_input_tokens, UNKNOWN_CACHED_INPUT_TOKENS);
++        assert_eq!(total.output_tokens, 6);
++        assert_eq!(total.reasoning_output_tokens, 1);
++        assert_eq!(total.total_tokens, 66);
++    }
+ }

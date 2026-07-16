@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "runtimeVersion": "0.120.0",
+  "variant": "squadflow-missing-cached-tokens.2",
+  "upstream": {
+    "repository": "https://github.com/openai/codex.git",
+    "tag": "rust-v0.120.0",
+    "commit": "65319eb1400cbd2890c43d572263dabd25f18ba9"
+  },
+  "rustToolchain": "1.93.0",
+  "cargoLockNormalization": {
+    "sourceSha256": "fb40f69b1cf09a1f34a5b9f7b8887175d563c198ab03b126232d8a9b171f8043",
+    "from": "version = \"0.0.0\"",
+    "to": "version = \"0.120.0\"",
+    "replacementCount": 93,
+    "normalizedSha256": "0462c677e162468422d5bdf14ee4b9fd283084ca5af24c426d82dc126ee86728"
+  },
+  "patches": [
+    {
+      "path": "patches/0001-tolerate-missing-cached-tokens.patch",
+      "sha256": "8d72f9120c8923cae8ef9c585125ff0ff5e6424ddcdf99397a2edf9d5f9219d1"
+    }
+  ],
+  "artifacts": {
+    "darwin-arm64": {
+      "binarySha256": "901966aca97da5998a2072afaf0413fcd5dbdf5c61557769cc9c2f0a8294485b"
+    }
+  }
+}

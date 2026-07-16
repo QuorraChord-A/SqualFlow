@@ -1,0 +1,33 @@
+{
+  "name": "squadflow",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SquadFlow: a local-first AI agent orchestration desktop app.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "packageManager": "npm@10.9.4",
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "dev": "node scripts/dev.mjs",
+    "dev:service": "npm --prefix apps/local-service run dev",
+    "dev:renderer": "npm --prefix apps/renderer run dev",
+    "dev:desktop": "npm --prefix apps/desktop run dev",
+    "test": "npm run test:service && npm run test:renderer && npm run test:desktop",
+    "test:service": "npm --prefix apps/local-service test",
+    "test:renderer": "npm --prefix apps/renderer run test:run",
+    "test:desktop": "npm --prefix apps/desktop run test:scripts",
+    "typecheck": "npm --prefix apps/local-service run typecheck && npm --prefix apps/renderer run typecheck",
+    "lint": "npm --prefix apps/renderer run lint",
+    "security:secrets": "gitleaks dir . --redact --no-banner",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "build": "npm run build:service && npm run build:renderer",
+    "build:service": "npm --prefix apps/local-service run build",
+    "build:renderer": "npm --prefix apps/renderer run build",
+    "desktop:package": "bash apps/desktop/scripts/desktop-macos.sh package",
+    "desktop:smoke": "bash apps/desktop/scripts/desktop-macos.sh smoke",
+    "desktop:release": "bash apps/desktop/scripts/desktop-macos.sh release",
+    "codex:build": "bash apps/desktop/scripts/build-bundled-codex.sh"
+  }
+}

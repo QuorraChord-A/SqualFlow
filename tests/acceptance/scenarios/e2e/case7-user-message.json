@@ -1,0 +1,77 @@
+{
+  "name": "Case 7: 用户补充消息 - 流程中接收用户新消息",
+  "description": "验证用户补充消息功能：flow 执行中用户发送新消息 → Leader 接收并处理 → 验证消息通过 Mailbox 传递，不影响当前 phase",
+  "category": "e2e",
+  "steps": [
+    "open-homepage",
+    {
+      "atom": "create-project",
+      "params": {
+        "name": "Case7 User Message",
+        "path": "/tmp/case7-usermsg"
+      }
+    },
+    {
+      "atom": "create-flow",
+      "params": {
+        "name": "Case7 User Message Test",
+        "description": "Case7 User Message Test"
+      }
+    },
+    {
+      "atom": "select-flow",
+      "params": {
+        "flowName": "Case7 User Message Test"
+      }
+    },
+    {
+      "atom": "select-flow-project",
+      "params": {
+        "projectName": "Case7 User Message"
+      }
+    },
+    "verify-realtime-ready",
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "Python实现计算器"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 10
+      }
+    },
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "补充需求：需要支持科学计算"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 5
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧右侧数据面板中出现补充需求",
+        "聊天区或右侧右侧数据面板中出现科学计算"
+      ]
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 30
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧右侧数据面板中出现 clarify",
+        "聊天区或右侧右侧数据面板中出现 develop"
+      ]
+    }
+  ]
+}

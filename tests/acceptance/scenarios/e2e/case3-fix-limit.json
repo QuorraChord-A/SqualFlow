@@ -1,0 +1,89 @@
+{
+  "name": "Case 3: Fix 超限 - verify fail ×3 → diagnose",
+  "description": "验证 fix 超限触发 diagnose：verify 连续失败 3 次后自动进入 diagnose 阶段，验证 fix_count 重置和 diagnose phase",
+  "category": "e2e",
+  "steps": [
+    "open-homepage",
+    {
+      "atom": "create-project",
+      "params": {
+        "name": "Case3 Fix Limit",
+        "path": "/tmp/case3-fixlimit"
+      }
+    },
+    {
+      "atom": "create-flow",
+      "params": {
+        "name": "Case3 Fix Limit Test",
+        "description": "Case3 Fix Limit Test"
+      }
+    },
+    {
+      "atom": "select-flow",
+      "params": {
+        "flowName": "Case3 Fix Limit Test"
+      }
+    },
+    {
+      "atom": "select-flow-project",
+      "params": {
+        "projectName": "Case3 Fix Limit"
+      }
+    },
+    "verify-realtime-ready",
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "Python实现一个复杂的问题，需要多次修复"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 60
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧右侧数据面板中出现 verify",
+        "聊天区或右侧右侧数据面板中出现 fail",
+        "聊天区或右侧右侧数据面板中出现 fix_count",
+        "聊天区或右侧右侧数据面板中出现 diagnose"
+      ]
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 30
+      }
+    },
+    {
+      "atom": "respond-to-decision-card",
+      "params": {
+        "question": "选择回退目标",
+        "answer": "develop"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 40
+      }
+    },
+    {
+      "atom": "verify-database-flow-phases",
+      "params": {
+        "flowId": "$context.flowId",
+        "runId": "$context.runId",
+        "expectedPhases": [
+          "clarify",
+          "develop",
+          "verify",
+          "verify",
+          "verify",
+          "diagnose"
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "id": "default-agent-sdk",
+  "fileName": "default-agent-sdk.json",
+  "name": "测试供应商",
+  "sdk": "claudecode",
+  "authMode": "apiKey",
+  "baseUrl": "",
+  "apiKey": "",
+  "models": [
+    {
+      "id": "mimo-v25",
+      "name": "mimo-v2.5",
+      "contextWindowK": 200
+    }
+  ]
+}

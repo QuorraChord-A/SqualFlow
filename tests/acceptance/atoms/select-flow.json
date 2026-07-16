@@ -1,0 +1,13 @@
+{
+  "id": "select-flow",
+  "description": "选择指定的 Flow",
+  "params": ["flowName"],
+  "steps": [
+    "在 Flows 列表中找到名为 '{flowName}' 的 Flow",
+    "点击该 Flow 项",
+    "最多等待 2 秒，直到当前选中 Flow 更新"
+  ],
+  "verify": [
+    "页面显示当前选中的 Flow 名称为 '{flowName}'"
+  ]
+}

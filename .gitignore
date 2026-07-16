@@ -1,0 +1,41 @@
+# Dependencies and build output
+node_modules/
+apps/local-service/dist/
+apps/renderer/.next/
+*.tsbuildinfo
+/dist/
+
+# Packaged runtime binaries are reproducible build output
+apps/desktop/resources/codex-runtime/*/codex
+apps/desktop/resources/codex-runtime/*/manifest.json
+apps/desktop/.staging/
+.artifacts/
+
+# Local application data
+data/
+testworkspace/
+*.db
+*.db-shm
+*.db-wal
+
+# Test and tool output
+coverage/
+.playwright-cli/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+.claude/
+.codex/
+*.log
+
+# Local agent instructions
+/AGENTS.md
+/CLAUDE.md
+/private-docs/

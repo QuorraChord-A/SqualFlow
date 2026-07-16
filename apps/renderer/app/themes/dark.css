@@ -1,0 +1,81 @@
+/* dark.css — shadcn/ui default neutral dark theme (AI Elements default) */
+
+[data-theme="dark"] {
+  /* Core palette — neutral graphite */
+  --background: #1d1d1f;
+  --foreground: #f2f2f3;
+  --card: #262628;
+  --card-foreground: #f2f2f3;
+  --popover: #262628;
+  --popover-foreground: #f2f2f3;
+
+  /* Primary — light/white for CTAs on dark background */
+  --primary: #f3f4f6;
+  --primary-foreground: #1d1d1f;
+
+  /* Secondary — subtle surface */
+  --secondary: #2f2f32;
+  --secondary-foreground: #f2f2f3;
+
+  /* Muted — background-level for subdued areas */
+  --muted: #2b2b2e;
+  --muted-foreground: #aaaab1;
+
+  /* Accent — hover/focus background */
+  --accent: #313136;
+  --accent-foreground: #f2f2f3;
+
+  /* Destructive — errors, danger actions */
+  --destructive: #ef4444;
+
+  /* Borders and inputs */
+  --border: #39393f;
+  --input: #39393f;
+  --ring: #d0d0d6;
+
+  /* Radius */
+  --radius: 0.625rem;
+
+  /* Chart palette */
+  --chart-1: #f2f2f3;
+  --chart-2: #b7b7bf;
+  --chart-3: #d7d7dd;
+  --chart-4: #ef4444;
+  --chart-5: #737373;
+
+  /* Sidebar */
+  --sidebar: #2a2a2c;
+  --sidebar-foreground: #f2f2f3;
+  --sidebar-primary: #f2f2f3;
+  --sidebar-primary-foreground: #1d1d1f;
+  --sidebar-accent: #35353a;
+  --sidebar-accent-foreground: #f2f2f3;
+  --sidebar-border: #38383d;
+  --sidebar-ring: #d0d0d6;
+
+  /* Status lifecycle */
+  --status-pending: #f59e0b;
+  --status-running: #3b82f6;
+  --status-completed: #22c55e;
+  --status-failed: #ef4444;
+  --status-aborted: #8a93a0;
+
+  /* Reasoning effort spectrum: cool = faster/lighter, warm = slower/deeper */
+  --effort-low: #38bdf8;
+  --effort-medium: #f59e0b;
+  --effort-high: #fb923c;
+  --effort-xhigh: #f87171;
+
+  /* Terminal */
+  --terminal-bg: #18181a;
+  --terminal-text: #f2f2f3;
+  --terminal-border: #39393f;
+  --terminal-muted: #a7a7af;
+  --terminal-hover: #2f2f32;
+  --terminal-hover-text: #f2f2f3;
+  --terminal-cursor: #f2f2f3;
+
+  /* Fonts — next/font/google sets these on <html> via class; these are fallbacks only */
+  --font-sans: 'Inter', 'system-ui', 'sans-serif';
+  --font-mono: 'JetBrains Mono', 'Menlo', 'monospace';
+}

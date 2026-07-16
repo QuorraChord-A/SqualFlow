@@ -1,0 +1,20 @@
+{
+  "id": "create-flow",
+  "description": "创建一个新的 Flow",
+  "params": ["name", "description"],
+  "steps": [
+    "切换到左侧 Flows Tab",
+    "点击 '新建 Flow' 图标或 '+ New Flow' 按钮",
+    "在 '新建 SquadFlow' 弹窗的名称输入框填写 '{name}'",
+    "在描述输入框填写 '{description}'",
+    "保持 Agent 类型为 Claude Code",
+    "保持类型为 full",
+    "点击 '创建' 按钮",
+    "最多等待 2 秒，直到 Flows 列表更新"
+  ],
+  "verify": [
+    "Flows 列表中存在名称为 '{name}' 的 Flow",
+    "该 Flow 的类型标记为 Full",
+    "创建后该 Flow 被选中，主区域显示聊天输入框"
+  ]
+}

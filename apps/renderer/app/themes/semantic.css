@@ -1,0 +1,65 @@
+/* Central semantic UI tokens. Components should use these roles, not literal colors. */
+
+:root {
+  --ui-surface-canvas: var(--background);
+  --ui-surface-raised: var(--card);
+  --ui-surface-sunken: color-mix(in srgb, var(--background) 72%, var(--card));
+  --ui-surface-overlay: var(--popover);
+  --ui-surface-control: var(--secondary);
+  --ui-surface-control-hover: var(--accent);
+  --ui-border-subtle: color-mix(in srgb, var(--border) 72%, transparent);
+  --ui-border-strong: var(--border);
+  --ui-permission-accent: var(--status-pending);
+  --ui-effort-low: var(--effort-low);
+  --ui-effort-medium: var(--effort-medium);
+  --ui-effort-high: var(--effort-high);
+  --ui-effort-xhigh: var(--effort-xhigh);
+  --ui-codex-effort-start: #2f91ff;
+  --ui-codex-effort-middle: #6c63ff;
+  --ui-codex-effort-end: #a855f7;
+  --ui-codex-effort-highlight: #fff;
+  --ui-codex-effort-knob-shadow: 0 2px 7px rgba(0, 0, 0, 0.28);
+  --ui-shadow-inset: inset 0 1px 0 color-mix(in srgb, var(--foreground) 3%, transparent);
+  --ui-code-surface: color-mix(in srgb, var(--ui-surface-raised) 78%, var(--background));
+  --ui-code-chip: color-mix(in srgb, var(--ui-surface-control) 62%, transparent);
+  --ui-code-token-keyword: #cf222e;
+  --ui-code-token-name: #24292f;
+  --ui-code-token-function: #8250df;
+  --ui-code-token-constant: #0550ae;
+  --ui-code-token-definition: #953800;
+  --ui-code-token-type: #0550ae;
+  --ui-code-token-operator: #116329;
+  --ui-code-token-comment: #6e7781;
+  --ui-code-token-heading: var(--foreground);
+  --ui-code-token-atom: #0550ae;
+  --ui-code-token-string: #0a3069;
+}
+
+[data-theme="light"] {
+  --ui-surface-sunken: var(--muted);
+  --ui-scrim: rgba(15, 23, 42, 0.10);
+  --ui-shadow-elevated: 0 20px 56px rgba(15, 23, 42, 0.14);
+  --ui-shadow-overlay: 0 22px 70px rgba(15, 23, 42, 0.17);
+  --ui-shadow-dialog: 0 34px 110px rgba(15, 23, 42, 0.22);
+}
+
+[data-theme="dark"],
+[data-theme="dark-emerald"] {
+  --ui-scrim: rgba(0, 0, 0, 0.42);
+  --ui-shadow-elevated: 0 20px 56px rgba(0, 0, 0, 0.30);
+  --ui-shadow-overlay: 0 22px 70px rgba(0, 0, 0, 0.48);
+  --ui-shadow-dialog: 0 34px 110px rgba(0, 0, 0, 0.58);
+  --ui-code-surface: color-mix(in srgb, var(--ui-surface-raised) 72%, var(--background));
+  --ui-code-chip: color-mix(in srgb, var(--ui-surface-control) 48%, transparent);
+  --ui-code-token-keyword: #ff7b72;
+  --ui-code-token-name: #e6edf3;
+  --ui-code-token-function: #d2a8ff;
+  --ui-code-token-constant: #79c0ff;
+  --ui-code-token-definition: #ffa657;
+  --ui-code-token-type: #79c0ff;
+  --ui-code-token-operator: #7ee787;
+  --ui-code-token-comment: #8b949e;
+  --ui-code-token-heading: #e6edf3;
+  --ui-code-token-atom: #79c0ff;
+  --ui-code-token-string: #a5d6ff;
+}

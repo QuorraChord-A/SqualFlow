@@ -1,0 +1,11 @@
+{
+  "id": "verify-event-type",
+  "description": "验证真实产品页已呈现指定流程事件或状态",
+  "params": ["eventType"],
+  "steps": [
+    "查看中间聊天区和右侧数据面板"
+  ],
+  "verify": [
+    "聊天区或右侧数据面板中可观察到 '{eventType}' 对应的流程状态、消息或记录"
+  ]
+}

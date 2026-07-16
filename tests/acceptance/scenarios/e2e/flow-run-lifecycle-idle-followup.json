@@ -1,0 +1,109 @@
+{
+  "name": "Flow / Run 生命周期 - idle 后追问创建新 Run",
+  "description": "验证不选择项目时使用 Flow 专属目录；DecisionCard 只选择不提交不会推进；提交后完整经过 develop、verify、review；Run 完成后 Flow 进入 idle；idle 后追问创建新 Run 并复用 Flow-level Leader session。",
+  "category": "e2e",
+  "steps": [
+    "open-homepage",
+    {
+      "verify": [
+        "左侧 Sidebar 平铺 Flow 列表，不存在 Completed 分组",
+        "左侧 FlowItem 不显示旧的 Clarify / Design / Plan / Execute 固定阶段树"
+      ]
+    },
+    {
+      "atom": "create-flow",
+      "params": {
+        "name": "Flow Run Lifecycle Test",
+        "description": "验证 Flow / Run / idle / follow-up 语义"
+      }
+    },
+    {
+      "atom": "select-flow",
+      "params": {
+        "flowName": "Flow Run Lifecycle Test"
+      }
+    },
+    {
+      "atom": "select-flow-project",
+      "params": {
+        "projectName": "不使用项目"
+      }
+    },
+    "verify-realtime-ready",
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "写个 helloworld"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 20
+      }
+    },
+    {
+      "atom": "select-decision-card-option",
+      "params": {
+        "question": "HelloWorld",
+        "answer": "直接跳到开发"
+      }
+    },
+    {
+      "verify": [
+        "数据库中当前 Flow 只有一个 active Run",
+        "数据库中 pending DecisionCard 没有 answers",
+        "flow_tasks 中尚未出现该 Run 的新 coding task"
+      ]
+    },
+    {
+      "atom": "respond-to-decision-card",
+      "params": {
+        "question": "HelloWorld",
+        "answer": "直接跳到开发"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 90
+      }
+    },
+    {
+      "verify": [
+        "聊天区或右侧数据面板中出现 develop",
+        "聊天区或右侧数据面板中出现 verify",
+        "聊天区或右侧数据面板中出现 review",
+        "Run #1 状态为 done",
+        "聊天输入框 placeholder 显示输入消息将开始新的 Run"
+      ]
+    },
+    {
+      "atom": "verify-database-flow-status",
+      "params": {
+        "flowId": "$context.flowId",
+        "expectedStatus": "idle"
+      }
+    },
+    {
+      "atom": "send-message",
+      "params": {
+        "message": "把输出改成 Hello Paris"
+      }
+    },
+    {
+      "atom": "wait-for-events",
+      "params": {
+        "seconds": 5
+      }
+    },
+    {
+      "verify": [
+        "右侧 Run 下拉显示 Run #2 active",
+        "数据库中同一个 Flow 存在 Run #1 done 和 Run #2 active",
+        "agent_sessions 中 Leader 记录 run_id 为空且 session_id 与 Run #1 相同",
+        "Run #2 可以创建新的 worker agent_session，但不会新建 run 级 Leader"
+      ]
+    }
+  ]
+}

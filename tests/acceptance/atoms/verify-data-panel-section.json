@@ -1,0 +1,11 @@
+{
+  "id": "verify-data-panel-section",
+  "description": "验证数据面板中是否显示指定区域",
+  "params": ["section"],
+  "steps": [
+    "查看右侧数据面板"
+  ],
+  "verify": [
+    "右侧数据面板包含 '{section}' 区域或 Tab"
+  ]
+}

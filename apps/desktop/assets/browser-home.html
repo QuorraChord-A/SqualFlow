@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>浏览器</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #18181a;
+      color: #f3f3f4;
+    }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; }
+    body {
+      display: grid;
+      place-items: center;
+      background: #18181a;
+    }
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px;
+      text-align: center;
+    }
+    svg {
+      width: 48px;
+      height: 48px;
+      margin-bottom: 28px;
+      color: #a8a8ac;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      font-weight: 650;
+      letter-spacing: 0;
+      line-height: 1.2;
+    }
+    p {
+      margin: 16px 0 0;
+      color: #a8a8ac;
+      font-size: 19px;
+      line-height: 1.45;
+    }
+    @media (prefers-color-scheme: light) {
+      :root, body { background: #f7f7f8; color: #202124; }
+      svg, p { color: #777a80; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M3 12h18"></path>
+      <path d="M12 3a14 14 0 0 1 0 18"></path>
+      <path d="M12 3a14 14 0 0 0 0 18"></path>
+    </svg>
+    <h1>开始浏览</h1>
+    <p>输入 URL 以打开页面</p>
+  </main>
+</body>
+</html>
