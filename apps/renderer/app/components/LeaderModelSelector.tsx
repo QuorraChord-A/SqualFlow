@@ -28,6 +28,7 @@ interface LeaderModelSelectorProps {
   className?: string;
   onOpenModelSettings?: () => void;
   onConfiguredChange?: (configured: boolean) => void;
+  onUpdatingChange?: (updating: boolean) => void;
   reasoningEffortDisabled?: boolean;
 }
 
@@ -183,6 +184,7 @@ export default function LeaderModelSelector({
   className,
   onOpenModelSettings,
   onConfiguredChange,
+  onUpdatingChange,
   reasoningEffortDisabled = false,
 }: LeaderModelSelectorProps) {
   const [runtimePickerOpen, setRuntimePickerOpen] = useState(false);
@@ -373,6 +375,14 @@ export default function LeaderModelSelector({
   useEffect(() => {
     onConfiguredChange?.(isConfigured);
   }, [isConfigured, onConfiguredChange]);
+
+  useEffect(() => {
+    onUpdatingChange?.(isUpdatingRuntime || isUpdatingEffort);
+  }, [isUpdatingEffort, isUpdatingRuntime, onUpdatingChange]);
+
+  useEffect(() => () => {
+    onUpdatingChange?.(false);
+  }, [onUpdatingChange]);
 
   const openRuntimePicker = (open: boolean) => {
     if (open && runtimeConfigs.length === 0 && onOpenModelSettings) {

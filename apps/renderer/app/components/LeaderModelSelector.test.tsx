@@ -167,6 +167,30 @@ describe("LeaderModelSelector", () => {
     }));
   });
 
+  it("reports the provider selection as updating until the flow save completes", async () => {
+    const user = userEvent.setup();
+    const onUpdatingChange = vi.fn();
+    let finishUpdate: (() => void) | undefined;
+    apiMocks.updateFlowLeaderRuntimeSelection.mockImplementation(() => new Promise((resolve) => {
+      finishUpdate = () => resolve({
+        leader_runtime_config_id: "bailian",
+        leader_runtime_model_id: "qwen-a3b",
+        leader_runtime_reasoning_effort: null,
+      });
+    }));
+
+    render(<LeaderModelSelector flowId="flow-1" onUpdatingChange={onUpdatingChange} />);
+
+    await user.click(await screen.findByRole("button", { name: "切换模型" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "百炼" }));
+    await user.click(await screen.findByRole("button", { name: "qwen3.6-35b-a3b" }));
+
+    await waitFor(() => expect(onUpdatingChange).toHaveBeenLastCalledWith(true));
+    expect(finishUpdate).toBeTypeOf("function");
+    finishUpdate?.();
+    await waitFor(() => expect(onUpdatingChange).toHaveBeenLastCalledWith(false));
+  });
+
   it("keeps another SDK visible but disables all of its models", async () => {
     const user = userEvent.setup();
 

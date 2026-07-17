@@ -469,6 +469,7 @@ export default function LeaderChatPanel({
   const [localComposerValue, setLocalComposerValue] = useState("");
   const [flowStateConfirmed, setFlowStateConfirmed] = useState(false);
   const [leaderModelConfigured, setLeaderModelConfigured] = useState(false);
+  const [runtimeSelectionUpdating, setRuntimeSelectionUpdating] = useState(false);
   const browserElementAttachments = useBrowserSelectionStore((state) => state.elements);
   const clearBrowserElementAttachments = useBrowserSelectionStore((state) => state.clearElements);
   const setBrowserElementAttachments = useBrowserSelectionStore((state) => state.setElements);
@@ -516,6 +517,7 @@ export default function LeaderChatPanel({
     setContextCompaction(null);
     setFlowStateConfirmed(false);
     setSettingsUpdating(false);
+    setRuntimeSelectionUpdating(false);
     setSpecRequested(false);
     const restoredMessages = flowId ? hydrateFlowQueue(flowId) : EMPTY_RUNNING_QUEUE;
     const restoredKnownRunning = flowId ? hydrateKnownRunningFlow(flowId) : false;
@@ -943,12 +945,13 @@ export default function LeaderChatPanel({
   }, [isWaiting, updateQueuedMessages]);
 
   const handleComposerSend = useCallback((text: string, options: LeaderMessageOptions = {}): Promise<boolean> | boolean => {
+    if (runtimeSelectionUpdating) return false;
     if (shouldQueueNewMessage) {
       enqueueMessage(text, options);
       return true;
     }
     return sendMessage(text, options);
-  }, [enqueueMessage, sendMessage, shouldQueueNewMessage]);
+  }, [enqueueMessage, runtimeSelectionUpdating, sendMessage, shouldQueueNewMessage]);
 
   const handleComposerSendWithAttachments = useCallback(async (text: string): Promise<boolean> => {
     const content = text;
@@ -1108,7 +1111,7 @@ export default function LeaderChatPanel({
     }
   }, [flowId, isStreaming, leaderModelConfigured, sendMessage, setKnownRunningFlow, updateQueuedMessages]);
 
-  const composerDisabled = !flowId || !leaderModelConfigured || hasPendingDecisionCards;
+  const composerDisabled = !flowId || !leaderModelConfigured || runtimeSelectionUpdating || hasPendingDecisionCards;
   const placeholder = hasPendingDecisionCards
     ? "请先完成澄清卡片..."
     : !leaderModelConfigured
@@ -1127,6 +1130,7 @@ export default function LeaderChatPanel({
     <LeaderModelSelector
       flowId={flowId}
       onConfiguredChange={setLeaderModelConfigured}
+      onUpdatingChange={setRuntimeSelectionUpdating}
       onOpenModelSettings={onOpenModelSettings}
       reasoningEffortDisabled={isWaiting}
       className={isCompactComposer

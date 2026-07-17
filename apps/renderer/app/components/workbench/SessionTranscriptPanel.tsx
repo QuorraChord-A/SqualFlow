@@ -1299,11 +1299,13 @@ export default function SessionTranscriptPanel({
   const showReasoning = showReasoningOverride ?? storeShowReasoning;
   const [transcript, dispatchTranscript] = useReducer(transcriptReducer, emptyTranscriptState);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyLoadVersion, setHistoryLoadVersion] = useState(0);
   const prevFlowIdRef = useRef<string | null>(null);
   const prevFlowExpertIdRef = useRef<string | null>(null);
   const prevAgentSessionIdRef = useRef<string | null>(null);
   const lastRealAgentSessionIdRef = useRef<string | null>(null);
   const fetchedSessionRef = useRef<string | null>(null);
+  const pendingHistoryRequestRef = useRef<string | null>(null);
   const eventFrameRef = useRef<number | null>(null);
   const finishResyncTimersRef = useRef<number[]>([]);
   const pendingEventsRef = useRef<Array<{ cursor: number; event: TranscriptEvent }>>([]);
@@ -1393,6 +1395,7 @@ export default function SessionTranscriptPanel({
       }
       inferredAgentSessionIdRef.current = agentSessionId;
       fetchedSessionRef.current = null;
+      pendingHistoryRequestRef.current = null;
       cancelPendingEventFlush();
       clearFinishResyncTimers();
       dispatchTranscript({ type: "reset" });
@@ -1414,6 +1417,7 @@ export default function SessionTranscriptPanel({
 
     if (!flowId || (!agentSessionId && !flowExpertId)) {
       fetchedSessionRef.current = null;
+      pendingHistoryRequestRef.current = null;
       setIsLoadingHistory(false);
       return;
     }
@@ -1423,6 +1427,7 @@ export default function SessionTranscriptPanel({
       : `${flowId}:ags:${agentSessionId}`;
     if (fetchKey === fetchedSessionRef.current) return;
     fetchedSessionRef.current = fetchKey;
+    pendingHistoryRequestRef.current = fetchKey;
 
     setIsLoadingHistory(true);
     if (flowExpertId) {
@@ -1496,6 +1501,10 @@ export default function SessionTranscriptPanel({
 
       if (msg.type === "session:transcript_snapshot") {
         setIsLoadingHistory(false);
+        if (pendingHistoryRequestRef.current) {
+          pendingHistoryRequestRef.current = null;
+          setHistoryLoadVersion((version) => version + 1);
+        }
         flushPendingEvents();
         dispatchTranscript({
           type: "load-snapshot",
@@ -1509,6 +1518,10 @@ export default function SessionTranscriptPanel({
 
       if (msg.type === "session:transcript_event") {
         setIsLoadingHistory(false);
+        if (pendingHistoryRequestRef.current) {
+          pendingHistoryRequestRef.current = null;
+          setHistoryLoadVersion((version) => version + 1);
+        }
         const event = msg.data.event as TranscriptEvent;
         scheduleTranscriptEvent({ cursor: msg.data.cursor, event });
         if (event.type === "turn-finished") {
@@ -1540,7 +1553,11 @@ export default function SessionTranscriptPanel({
       resize="instant"
       initial="instant"
     >
-      <TranscriptScrollProvider flowId={flowId} isLoadingHistory={isLoadingHistory}>
+      <TranscriptScrollProvider
+        flowId={flowId}
+        isLoadingHistory={isLoadingHistory}
+        historyLoadVersion={historyLoadVersion}
+      >
         <SessionTranscriptContent
         messages={transcript.messages}
         historyBoundaries={transcript.historyBoundaries}

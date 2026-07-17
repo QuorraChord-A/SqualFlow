@@ -71,14 +71,20 @@ function ToggleProbe() {
 function FlowScrollProbe({
   flowId,
   isLoadingHistory,
+  historyLoadVersion,
   anchorTop,
 }: {
   flowId: string;
   isLoadingHistory: boolean;
+  historyLoadVersion: number;
   anchorTop: number;
 }) {
   return (
-    <TranscriptScrollProvider flowId={flowId} isLoadingHistory={isLoadingHistory}>
+    <TranscriptScrollProvider
+      flowId={flowId}
+      isLoadingHistory={isLoadingHistory}
+      historyLoadVersion={historyLoadVersion}
+    >
       <FlowScrollThread flowId={flowId} anchorTop={anchorTop} />
     </TranscriptScrollProvider>
   );
@@ -188,24 +194,48 @@ describe("TranscriptScrollContext", () => {
 
   it("keeps separate reading positions while switching between flows", async () => {
     const { rerender } = render(
-      <FlowScrollProbe flowId="flow-1" isLoadingHistory anchorTop={70} />,
+      <FlowScrollProbe flowId="flow-1" isLoadingHistory historyLoadVersion={0} anchorTop={70} />,
     );
-    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} anchorTop={70} />);
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={1} anchorTop={70} />);
     await waitFor(() => expect(scrollToBottom).toHaveBeenCalled());
 
     const scrollElement = screen.getByTestId("flow-scroll-element");
     scrollElement.scrollTop = 360;
     fireEvent.scroll(scrollElement);
 
-    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory anchorTop={140} />);
-    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory={false} anchorTop={140} />);
+    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory historyLoadVersion={1} anchorTop={140} />);
+    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory={false} historyLoadVersion={2} anchorTop={140} />);
     await waitFor(() => expect(scrollToBottom).toHaveBeenCalledTimes(2));
     scrollElement.scrollTop = 700;
     fireEvent.scroll(scrollElement);
 
-    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory anchorTop={250} />);
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory historyLoadVersion={2} anchorTop={250} />);
     scrollElement.scrollTop = 80;
-    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} anchorTop={250} />);
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={3} anchorTop={250} />);
+
+    await waitFor(() => expect(scrollElement.scrollTop).toBe(260));
+  });
+
+  it("restores after a fast history response skips the visible loading frame", async () => {
+    const { rerender } = render(
+      <FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={0} anchorTop={70} />,
+    );
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={1} anchorTop={70} />);
+    await waitFor(() => expect(scrollToBottom).toHaveBeenCalledTimes(1));
+
+    const scrollElement = screen.getByTestId("flow-scroll-element");
+    scrollElement.scrollTop = 360;
+    fireEvent.scroll(scrollElement);
+
+    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory={false} historyLoadVersion={1} anchorTop={140} />);
+    rerender(<FlowScrollProbe flowId="flow-2" isLoadingHistory={false} historyLoadVersion={2} anchorTop={140} />);
+    await waitFor(() => expect(scrollToBottom).toHaveBeenCalledTimes(2));
+    scrollElement.scrollTop = 700;
+    fireEvent.scroll(scrollElement);
+
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={2} anchorTop={250} />);
+    scrollElement.scrollTop = 80;
+    rerender(<FlowScrollProbe flowId="flow-1" isLoadingHistory={false} historyLoadVersion={3} anchorTop={250} />);
 
     await waitFor(() => expect(scrollElement.scrollTop).toBe(260));
   });

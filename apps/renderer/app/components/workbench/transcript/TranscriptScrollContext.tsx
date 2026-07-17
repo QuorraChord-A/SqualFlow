@@ -66,18 +66,20 @@ export function TranscriptScrollProvider({
   children,
   flowId = null,
   isLoadingHistory = false,
+  historyLoadVersion = 0,
 }: {
   children: React.ReactNode;
   flowId?: string | null;
   isLoadingHistory?: boolean;
+  historyLoadVersion?: number;
 }) {
   const { scrollRef, scrollToBottom, stopScroll = () => {} } = useStickToBottomContext();
   const [thread, setThread] = useState<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
   const flowScrollMemoryRef = useRef(new Map<string, TranscriptScrollMemory>());
-  const loadingFlowIdRef = useRef<string | null>(null);
-  const loadedFlowIdRef = useRef<string | null>(null);
+  const previousFlowIdRef = useRef<string | null>(null);
+  const pendingRestoreRef = useRef<{ flowId: string; historyLoadVersion: number } | null>(null);
   const restoringFlowRef = useRef(false);
   const restoreFrameRef = useRef<number | null>(null);
 
@@ -118,38 +120,49 @@ export function TranscriptScrollProvider({
     const scrollElement = scrollRef?.current;
     if (!scrollElement || !thread || !flowId) return;
     const remember = () => {
-      if (restoringFlowRef.current || loadedFlowIdRef.current !== flowId) return;
+      if (restoringFlowRef.current || isLoadingHistory) return;
       flowScrollMemoryRef.current.set(flowId, captureTranscriptScrollMemory(scrollElement));
     };
     scrollElement.addEventListener("scroll", remember, { passive: true });
     return () => scrollElement.removeEventListener("scroll", remember);
-  }, [flowId, scrollRef, thread]);
+  }, [flowId, isLoadingHistory, scrollRef, thread]);
 
   useLayoutEffect(() => {
+    if (previousFlowIdRef.current === flowId) return;
+    previousFlowIdRef.current = flowId;
+    if (restoreFrameRef.current !== null) {
+      window.cancelAnimationFrame(restoreFrameRef.current);
+      restoreFrameRef.current = null;
+    }
     if (!flowId) {
-      loadedFlowIdRef.current = null;
-      loadingFlowIdRef.current = null;
+      pendingRestoreRef.current = null;
+      restoringFlowRef.current = false;
       return;
     }
-    if (isLoadingHistory) {
-      loadedFlowIdRef.current = null;
-      loadingFlowIdRef.current = flowId;
-      return;
-    }
-    if (loadingFlowIdRef.current !== flowId) return;
-    loadingFlowIdRef.current = null;
+    restoringFlowRef.current = true;
+    pendingRestoreRef.current = { flowId, historyLoadVersion };
+  }, [flowId, historyLoadVersion]);
+
+  useLayoutEffect(() => {
+    const pendingRestore = pendingRestoreRef.current;
+    if (
+      !flowId
+      || !pendingRestore
+      || pendingRestore.flowId !== flowId
+      || historyLoadVersion <= pendingRestore.historyLoadVersion
+    ) return;
+    pendingRestoreRef.current = null;
     if (restoreFrameRef.current !== null) window.cancelAnimationFrame(restoreFrameRef.current);
     restoreFrameRef.current = window.requestAnimationFrame(() => {
       restoreFrameRef.current = null;
       const scrollElement = scrollRef?.current;
       const memory = flowScrollMemoryRef.current.get(flowId);
-      restoringFlowRef.current = true;
       if (!scrollElement || !memory || memory.followBottom) {
         scrollToBottom({ animation: "instant" });
       } else {
+        stopScroll();
         restoreTranscriptScrollMemory(scrollElement, memory);
       }
-      loadedFlowIdRef.current = flowId;
       window.requestAnimationFrame(() => {
         restoringFlowRef.current = false;
       });
@@ -160,7 +173,7 @@ export function TranscriptScrollProvider({
         restoreFrameRef.current = null;
       }
     };
-  }, [flowId, isLoadingHistory, scrollRef, scrollToBottom]);
+  }, [flowId, historyLoadVersion, scrollRef, scrollToBottom, stopScroll]);
 
   const toggle = useCallback(<T extends HTMLElement>(event: React.MouseEvent<T>, change: () => void) => {
     const element = event.currentTarget;

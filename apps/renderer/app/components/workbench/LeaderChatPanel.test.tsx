@@ -12,7 +12,10 @@ import { usePlanFeedbackStore } from "../../stores/usePlanFeedbackStore";
 import LeaderChatPanel from "./LeaderChatPanel";
 
 const wsMessageHandlers = vi.hoisted(() => new Set<(message: WsInMessage) => void>());
-const leaderSelectorMock = vi.hoisted(() => ({ configured: true }));
+const leaderSelectorMock = vi.hoisted(() => ({
+  configured: true,
+  onUpdatingChange: undefined as ((updating: boolean) => void) | undefined,
+}));
 const apiMocks = vi.hoisted(() => ({
   compactFlowContext: vi.fn(),
   fetchAgentRuntimeConfig: vi.fn(),
@@ -25,10 +28,22 @@ const apiMocks = vi.hoisted(() => ({
 vi.mock("../LeaderModelSelector", async () => {
   const React = await vi.importActual<typeof import("react")>("react");
   return {
-    default: ({ onConfiguredChange }: { onConfiguredChange?: (configured: boolean) => void }) => {
+    default: ({
+      onConfiguredChange,
+      onUpdatingChange,
+    }: {
+      onConfiguredChange?: (configured: boolean) => void;
+      onUpdatingChange?: (updating: boolean) => void;
+    }) => {
       React.useEffect(() => {
         onConfiguredChange?.(leaderSelectorMock.configured);
       }, [onConfiguredChange]);
+      React.useEffect(() => {
+        leaderSelectorMock.onUpdatingChange = onUpdatingChange;
+        return () => {
+          leaderSelectorMock.onUpdatingChange = undefined;
+        };
+      }, [onUpdatingChange]);
       return <button type="button">qwen3.6-plus-2026-04-02</button>;
     },
   };
@@ -141,6 +156,7 @@ describe("LeaderChatPanel", () => {
     vi.mocked(wsClient.sendFlowGuide).mockClear();
     vi.mocked(wsClient.onMessage).mockClear();
     leaderSelectorMock.configured = true;
+    leaderSelectorMock.onUpdatingChange = undefined;
     apiMocks.compactFlowContext.mockReset();
     apiMocks.compactFlowContext.mockResolvedValue(null);
     apiMocks.fetchAgentRuntimeConfig.mockReset();
@@ -200,6 +216,30 @@ describe("LeaderChatPanel", () => {
     });
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ agent_session_id: expect.anything() }));
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ flow_expert_id: expect.anything() }));
+  });
+
+  it("keeps the drafted message unsent until the runtime selection finishes saving", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+
+    renderPanel();
+    const input = screen.getByPlaceholderText("输入消息...");
+    await user.type(input, "switch then send");
+    await waitFor(() => expect(leaderSelectorMock.onUpdatingChange).toBeTypeOf("function"));
+
+    act(() => leaderSelectorMock.onUpdatingChange?.(true));
+    await user.keyboard("{Enter}");
+
+    expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "flow:message" }));
+    expect(input).toHaveValue("switch then send");
+
+    act(() => leaderSelectorMock.onUpdatingChange?.(false));
+    await user.keyboard("{Enter}");
+
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:message",
+      content: "switch then send",
+    }));
   });
 
   it("sends plan feedback with an empty content field and only a display-layer summary", async () => {
