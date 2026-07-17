@@ -162,9 +162,7 @@ describe("REST API", () => {
 
   it("deletes a project association and its app data without deleting the project directory", async () => {
     const originalRuntimeScratchRoot = config.runtimeScratchRoot;
-    const originalTestWorkspaceRoot = config.testWorkspaceRoot;
     config.runtimeScratchRoot = tempProjectDir("project-runtime-scratch");
-    config.testWorkspaceRoot = tempProjectDir("project-test-workspace");
     const store = createStore(tempDb());
     const app = createApp({ logger: false, store } as any);
     const projectPath = tempProjectDir("delete-project");
@@ -172,11 +170,7 @@ describe("REST API", () => {
     try {
       const project = store.createProject({ name: "Delete Project", localPath: projectPath });
       const flow = store.createFlow({ name: "Delete Project Flow", description: "", projectId: project.id });
-      const runtimeDirs = [
-        path.join(config.testWorkspaceRoot, `flow-${flow.id}`),
-        path.join(config.testWorkspaceRoot, "scratch", flow.id),
-        path.join(config.runtimeScratchRoot, flow.id),
-      ];
+      const runtimeDirs = [path.join(config.runtimeScratchRoot, flow.id)];
       for (const dir of runtimeDirs) {
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, "marker.txt"), "runtime");
@@ -191,16 +185,13 @@ describe("REST API", () => {
       for (const dir of runtimeDirs) expect(fs.existsSync(dir)).toBe(false);
     } finally {
       config.runtimeScratchRoot = originalRuntimeScratchRoot;
-      config.testWorkspaceRoot = originalTestWorkspaceRoot;
       await app.close();
     }
   });
 
   it("removes flow runtime directories without deleting the project directory", async () => {
     const originalRuntimeScratchRoot = config.runtimeScratchRoot;
-    const originalTestWorkspaceRoot = config.testWorkspaceRoot;
     config.runtimeScratchRoot = tempProjectDir("runtime-scratch");
-    config.testWorkspaceRoot = tempProjectDir("test-workspace");
     const store = createStore(tempDb());
     const app = createApp({ logger: false, store } as any);
     const projectPath = tempProjectDir("delete-flow-project");
@@ -208,10 +199,8 @@ describe("REST API", () => {
     try {
       const project = store.createProject({ name: "Delete Flow Project", localPath: projectPath });
       const flow = store.createFlow({ name: "Delete Flow", description: "", projectId: project.id });
-      const legacyFlowDir = path.join(config.testWorkspaceRoot, `flow-${flow.id}`);
-      const legacyScratchDir = path.join(config.testWorkspaceRoot, "scratch", flow.id);
       const runtimeScratchDir = path.join(config.runtimeScratchRoot, flow.id);
-      for (const dir of [legacyFlowDir, legacyScratchDir, runtimeScratchDir]) {
+      for (const dir of [runtimeScratchDir]) {
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, "marker.txt"), "runtime");
       }
@@ -220,22 +209,17 @@ describe("REST API", () => {
 
       expect(response.statusCode).toBe(204);
       expect(store.getFlow(flow.id)).toBeUndefined();
-      expect(fs.existsSync(legacyFlowDir)).toBe(false);
-      expect(fs.existsSync(legacyScratchDir)).toBe(false);
       expect(fs.existsSync(runtimeScratchDir)).toBe(false);
       expect(fs.existsSync(projectPath)).toBe(true);
     } finally {
       config.runtimeScratchRoot = originalRuntimeScratchRoot;
-      config.testWorkspaceRoot = originalTestWorkspaceRoot;
       await app.close();
     }
   });
 
   it("removes runtime directories when clearing all flows", async () => {
     const originalRuntimeScratchRoot = config.runtimeScratchRoot;
-    const originalTestWorkspaceRoot = config.testWorkspaceRoot;
     config.runtimeScratchRoot = tempProjectDir("runtime-scratch-clear");
-    config.testWorkspaceRoot = tempProjectDir("test-workspace-clear");
     const store = createStore(tempDb());
     const app = createApp({ logger: false, store } as any);
     const projectPath = tempProjectDir("clear-flow-project");
@@ -246,18 +230,9 @@ describe("REST API", () => {
         store.createFlow({ name: "Clear Flow 1", description: "", projectId: project.id }),
         store.createFlow({ name: "Clear Flow 2", description: "", projectId: project.id }),
       ];
-      const runtimeDirs = flows.flatMap((flow) => [
-        path.join(config.testWorkspaceRoot, `flow-${flow.id}`),
-        path.join(config.testWorkspaceRoot, "scratch", flow.id),
-        path.join(config.runtimeScratchRoot, flow.id),
-      ]);
-      const orphanRuntimeDirs = [
-        path.join(config.testWorkspaceRoot, "flow-flow-orphan"),
-        path.join(config.testWorkspaceRoot, "scratch", "flow-orphan"),
-        path.join(config.runtimeScratchRoot, "flow-orphan"),
-      ];
-      const projectNamedLikeFlow = path.join(config.testWorkspaceRoot, "flow-demo-project");
-      for (const dir of [...runtimeDirs, ...orphanRuntimeDirs, projectNamedLikeFlow]) {
+      const runtimeDirs = flows.map((flow) => path.join(config.runtimeScratchRoot, flow.id));
+      const orphanRuntimeDirs = [path.join(config.runtimeScratchRoot, "flow-orphan")];
+      for (const dir of [...runtimeDirs, ...orphanRuntimeDirs]) {
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(path.join(dir, "marker.txt"), "runtime");
       }
@@ -268,11 +243,9 @@ describe("REST API", () => {
       expect(store.listFlows()).toEqual([]);
       for (const dir of runtimeDirs) expect(fs.existsSync(dir)).toBe(false);
       for (const dir of orphanRuntimeDirs) expect(fs.existsSync(dir)).toBe(false);
-      expect(fs.existsSync(projectNamedLikeFlow)).toBe(true);
       expect(fs.existsSync(projectPath)).toBe(true);
     } finally {
       config.runtimeScratchRoot = originalRuntimeScratchRoot;
-      config.testWorkspaceRoot = originalTestWorkspaceRoot;
       await app.close();
     }
   });

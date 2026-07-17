@@ -1,8 +1,8 @@
-import os from "node:os";
 import path from "node:path";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../..");
 const workspaceRoot = process.env.SQUADFLOW_WORKSPACE_ROOT ?? repoRoot;
+const outputRoot = process.env.SQUADFLOW_OUTPUT_ROOT ?? path.join(repoRoot, "output");
 
 export const DEFAULT_PROJECT_ID = "proj-default";
 export const DEFAULT_PROJECT_DIRECTORY_NAME = "default_project";
@@ -16,14 +16,14 @@ function envOrDefault(value: string | undefined, fallback: string) {
 export const config = {
   host: process.env.SQUADFLOW_TS_HOST ?? "0.0.0.0",
   port: Number(process.env.SQUADFLOW_TS_PORT ?? "8001"),
-  databasePath: process.env.SQUADFLOW_TS_DB ?? path.join(repoRoot, "data", "squadflow.db"),
-  checkpointPath: process.env.SQUADFLOW_TS_CHECKPOINT_DB ?? path.join(repoRoot, "data", "squadflow_checkpoints.db"),
-  agentRuntimeConfigRoot: process.env.SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT ?? path.join(repoRoot, "data", "agent-runtime"),
-  runtimeScratchRoot: process.env.SQUADFLOW_RUNTIME_SCRATCH_ROOT ?? path.join(os.homedir(), ".squadflow", "scratch"),
+  outputRoot,
+  databasePath: process.env.SQUADFLOW_TS_DB ?? path.join(outputRoot, "data", "squadflow.db"),
+  checkpointPath: process.env.SQUADFLOW_TS_CHECKPOINT_DB ?? path.join(outputRoot, "data", "squadflow_checkpoints.db"),
+  agentRuntimeConfigRoot: process.env.SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT ?? path.join(outputRoot, "data", "agent-runtime"),
+  runtimeScratchRoot: process.env.SQUADFLOW_RUNTIME_SCRATCH_ROOT ?? path.join(outputRoot, "runtime", "scratch"),
   workspaceRoot,
-  testWorkspaceRoot: process.env.SQUADFLOW_TEST_WORKSPACE_ROOT ?? path.join(repoRoot, "testworkspace"),
-  defaultProjectRoot: process.env.SQUADFLOW_DEFAULT_PROJECT_ROOT ?? path.join(os.homedir(), ".squadflow", "workspace"),
-  claudeSettingsPath: envOrDefault(process.env.SQUADFLOW_CLAUDE_SETTINGS, path.join(repoRoot, "data", "claude-settings.json")),
+  defaultProjectRoot: process.env.SQUADFLOW_DEFAULT_PROJECT_ROOT ?? path.join(outputRoot, "workspace"),
+  claudeSettingsPath: envOrDefault(process.env.SQUADFLOW_CLAUDE_SETTINGS, path.join(outputRoot, "settings", "claude.json")),
 };
 
 export function getAgentSettingsPath(role: AgentConfigRole) {

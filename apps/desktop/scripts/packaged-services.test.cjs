@@ -20,7 +20,9 @@ test("builds self-contained service paths and writable application data paths", 
 
   assert.equal(specs[0].modulePath, "/Applications/SquadFlow.app/Contents/Resources/app.asar/local-service/main.js");
   assert.equal(specs[1].modulePath, "/Applications/SquadFlow.app/Contents/Resources/renderer/renderer-service.cjs");
+  assert.equal(specs[0].env.SQUADFLOW_OUTPUT_ROOT, "/Users/test/Library/Application Support/SquadFlow");
   assert.equal(specs[0].env.SQUADFLOW_TS_DB, "/Users/test/Library/Application Support/SquadFlow/data/squadflow.db");
+  assert.equal(specs[0].env.SQUADFLOW_RUNTIME_SCRATCH_ROOT, "/Users/test/Library/Application Support/SquadFlow/runtime/scratch");
   assert.equal(
     specs[0].env.SQUADFLOW_BUNDLED_CODEX_COMMAND,
     "/Applications/SquadFlow.app/Contents/Resources/codex-runtime/darwin-arm64/codex",

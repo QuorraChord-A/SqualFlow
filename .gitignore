@@ -9,31 +9,13 @@ apps/renderer/.next/
 apps/desktop/resources/codex-runtime/*/codex
 apps/desktop/resources/codex-runtime/*/manifest.json
 apps/desktop/.staging/
-.artifacts/
+/.artifacts/
 
 # Local application data
-data/
-testworkspace/
-*.db
-*.db-shm
-*.db-wal
-
-# Test and tool output
-coverage/
-.playwright-cli/
-
-# Environment and local secrets
-.env
-.env.*
-!.env.example
+/output/
 
 # Editors and operating systems
 .DS_Store
-.idea/
-.vscode/
-.claude/
-.codex/
-*.log
 
 # Local agent instructions
 /AGENTS.md

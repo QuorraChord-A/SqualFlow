@@ -4,6 +4,7 @@ const test = require("node:test");
 const {
   PACKAGED_APP_NAME,
   DEVELOPMENT_APP_NAME,
+  DEVELOPMENT_OUTPUT_ROOT,
   configureApplicationPaths,
 } = require("../desktop-paths");
 
@@ -23,21 +24,23 @@ test("isolates development Electron data from the installed application", () => 
 
   const result = configureApplicationPaths({
     app,
+    env: {},
     fsModule: { mkdirSync(value, options) { created.push([value, options]); } },
   });
 
   const expectedUserData = path.join("/Users/test/Library/Application Support", DEVELOPMENT_APP_NAME);
   assert.deepEqual(result, {
     userDataPath: expectedUserData,
-    logsPath: path.join(expectedUserData, "logs"),
+    outputRoot: DEVELOPMENT_OUTPUT_ROOT,
+    logsPath: path.join(DEVELOPMENT_OUTPUT_ROOT, "logs"),
     migratedFrom: [],
   });
   assert.deepEqual(calls, [
     ["name", DEVELOPMENT_APP_NAME],
     ["userData", expectedUserData],
-    ["logs", path.join(expectedUserData, "logs")],
+    ["logs", path.join(DEVELOPMENT_OUTPUT_ROOT, "logs")],
   ]);
-  assert.deepEqual(created, [[path.join(expectedUserData, "logs"), { recursive: true }]]);
+  assert.deepEqual(created, [[path.join(DEVELOPMENT_OUTPUT_ROOT, "logs"), { recursive: true }]]);
 });
 
 test("pins packaged data to SquadFlow and migrates the legacy directory", () => {
@@ -68,6 +71,7 @@ test("pins packaged data to SquadFlow and migrates the legacy directory", () => 
 
   assert.deepEqual(result, {
     userDataPath: expectedUserData,
+    outputRoot: expectedUserData,
     logsPath: path.join(expectedUserData, "logs"),
     migratedFrom: [legacyPath],
   });
@@ -142,6 +146,7 @@ test("respects an explicit packaged user-data-dir without migrating defaults", (
   });
 
   assert.equal(result.userDataPath, explicitUserData);
+  assert.equal(result.outputRoot, explicitUserData);
   assert.deepEqual(result.migratedFrom, []);
   assert.deepEqual(paths, [["userData", explicitUserData]]);
 });

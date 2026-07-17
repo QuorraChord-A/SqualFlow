@@ -75,12 +75,7 @@ function directoryName(localPath: string): string {
 }
 
 async function removeFlowRuntimeDirectories(flowId: string) {
-  const paths = [
-    path.join(config.testWorkspaceRoot, `flow-${flowId}`),
-    path.join(config.testWorkspaceRoot, "scratch", flowId),
-    path.join(config.runtimeScratchRoot, flowId),
-  ];
-  await Promise.all(paths.map((targetPath) => fs.rm(targetPath, { recursive: true, force: true })));
+  await fs.rm(path.join(config.runtimeScratchRoot, flowId), { recursive: true, force: true });
 }
 
 async function removeManyFlowRuntimeDirectories(flowIds: string[]) {
@@ -103,11 +98,7 @@ async function removeChildDirectories(root: string, shouldRemove: (name: string)
 }
 
 async function removeAllFlowRuntimeDirectories() {
-  await Promise.all([
-    removeChildDirectories(config.testWorkspaceRoot, (name) => name.startsWith("flow-flow-")),
-    removeChildDirectories(path.join(config.testWorkspaceRoot, "scratch"), (name) => name.startsWith("flow-")),
-    removeChildDirectories(config.runtimeScratchRoot, (name) => name.startsWith("flow-")),
-  ]);
+  await removeChildDirectories(config.runtimeScratchRoot, (name) => name.startsWith("flow-"));
 }
 
 async function validateProjectDirectory(localPath: string): Promise<boolean> {

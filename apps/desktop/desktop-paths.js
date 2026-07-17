@@ -3,6 +3,7 @@ const path = require("node:path");
 
 const PACKAGED_APP_NAME = "SquadFlow";
 const DEVELOPMENT_APP_NAME = "SquadFlow Development";
+const DEVELOPMENT_OUTPUT_ROOT = path.resolve(__dirname, "../..", "output");
 const LEGACY_PACKAGED_APP_NAMES = ["squadflow-desktop", "@squalflow/desktop"];
 
 function migrateLegacyPackagedUserData({ appDataPath, userDataPath, fsModule }) {
@@ -27,7 +28,7 @@ function migrateLegacyPackagedUserData({ appDataPath, userDataPath, fsModule }) 
   return migratedFrom;
 }
 
-function configureApplicationPaths({ app, fsModule = fs }) {
+function configureApplicationPaths({ app, fsModule = fs, env = process.env }) {
   const appName = app.isPackaged ? PACKAGED_APP_NAME : DEVELOPMENT_APP_NAME;
   app.setName(appName);
   const explicitUserData = app.commandLine?.hasSwitch?.("user-data-dir") === true;
@@ -38,16 +39,20 @@ function configureApplicationPaths({ app, fsModule = fs }) {
   const migratedFrom = app.isPackaged && !explicitUserData
     ? migrateLegacyPackagedUserData({ appDataPath, userDataPath, fsModule })
     : [];
-  const logsPath = path.join(userDataPath, "logs");
+  const outputRoot = app.isPackaged
+    ? userDataPath
+    : env.SQUADFLOW_OUTPUT_ROOT?.trim() || DEVELOPMENT_OUTPUT_ROOT;
+  const logsPath = path.join(outputRoot, "logs");
   fsModule.mkdirSync(logsPath, { recursive: true });
   app.setPath("userData", userDataPath);
   app.setAppLogsPath(logsPath);
-  return { userDataPath, logsPath, migratedFrom };
+  return { userDataPath, outputRoot, logsPath, migratedFrom };
 }
 
 module.exports = {
   PACKAGED_APP_NAME,
   DEVELOPMENT_APP_NAME,
+  DEVELOPMENT_OUTPUT_ROOT,
   LEGACY_PACKAGED_APP_NAMES,
   configureApplicationPaths,
 };

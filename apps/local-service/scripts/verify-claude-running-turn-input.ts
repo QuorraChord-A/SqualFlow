@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import {
   createSdkMcpServer,
@@ -12,10 +14,11 @@ import { z } from "zod";
 import { buildBaseOptions } from "../src/harness/baseHarness.js";
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const repoRoot = path.resolve(process.cwd(), "..");
-const testWorkspaceRoot = path.join(repoRoot, "testworkspace");
+const repoRoot = path.resolve(import.meta.dirname, "../../..");
+const probeWorkspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-claude-probe-"));
+process.once("exit", () => fs.rmSync(probeWorkspaceRoot, { recursive: true, force: true }));
 const claudeSettingsPath = process.env.SQUADFLOW_CLAUDE_SETTINGS
-  ?? path.join(repoRoot, "data", "claude-settings.json");
+  ?? path.join(repoRoot, "output", "settings", "claude.json");
 
 type ProbeResult = {
   firstDone: boolean;
@@ -69,7 +72,7 @@ function baseOptions(input: {
     systemPrompt:
       "You are a deterministic SDK probe. Follow the user's requested output exactly. " +
       "When asked to use the delay tool, you must call mcp__probe__delay before answering.",
-    cwd: testWorkspaceRoot,
+    cwd: probeWorkspaceRoot,
     allowedTools: ["mcp__probe__delay"],
     tools: [],
     disallowedTools: ["Read", "Glob", "Grep", "Write", "Edit", "Bash"],

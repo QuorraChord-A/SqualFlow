@@ -61,7 +61,7 @@ tests/acceptance/ Natural-language desktop acceptance cases
 scripts/         Repository-level setup and development orchestration
 ```
 
-Development data and installed-application data are isolated. The installed app writes mutable data to the system application-data directory named `SquadFlow`, so updating or reinstalling the app does not overwrite it.
+Development data and installed-application data are isolated. Source development writes application-owned mutable data to the ignored root `output/` directory. The installed app writes mutable data to the system application-data directory named `SquadFlow`, so updating or reinstalling the app does not overwrite it.
 
 On macOS, installed-application data is stored at:
 

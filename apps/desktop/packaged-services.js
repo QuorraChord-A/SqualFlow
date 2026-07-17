@@ -15,6 +15,7 @@ function createPackagedServiceSpecs({
   baseEnv = process.env,
 }) {
   const { backend: backendPort, renderer: rendererPort, nextInternal: nextInternalPort } = ports;
+  const outputPath = userDataPath;
   const dataPath = path.join(userDataPath, "data");
   const rendererPath = path.join(resourcesPath, "renderer");
   const backendUrl = `http://127.0.0.1:${backendPort}`;
@@ -33,12 +34,12 @@ function createPackagedServiceSpecs({
         ...sharedEnv,
         SQUADFLOW_TS_HOST: "127.0.0.1",
         SQUADFLOW_TS_PORT: String(backendPort),
+        SQUADFLOW_OUTPUT_ROOT: outputPath,
         SQUADFLOW_TS_DB: path.join(dataPath, "squadflow.db"),
         SQUADFLOW_TS_CHECKPOINT_DB: path.join(dataPath, "squadflow_checkpoints.db"),
         SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT: path.join(dataPath, "agent-runtime"),
-        SQUADFLOW_RUNTIME_SCRATCH_ROOT: path.join(userDataPath, "scratch"),
+        SQUADFLOW_RUNTIME_SCRATCH_ROOT: path.join(outputPath, "runtime", "scratch"),
         SQUADFLOW_WORKSPACE_ROOT: userDataPath,
-        SQUADFLOW_TEST_WORKSPACE_ROOT: path.join(userDataPath, "testworkspace"),
         SQUADFLOW_DEFAULT_PROJECT_ROOT: path.join(userDataPath, "workspace"),
         SQUADFLOW_CLAUDE_SETTINGS: path.join(userDataPath, "settings", "claude.json"),
         SQUADFLOW_BUNDLED_CODEX_COMMAND: path.join(
