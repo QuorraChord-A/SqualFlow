@@ -1,6 +1,7 @@
 'use client';
 
-import { Folder, MoreHorizontal, Pencil, Pin, PinOff, Trash2, XCircle } from 'lucide-react';
+import { Copy, Folder, FolderOpen, MoreHorizontal, Pencil, Pin, PinOff, Trash2, XCircle } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,12 +19,14 @@ import type { SquadFlow } from '../types';
 interface FlowItemProps {
   flow: SquadFlow;
   projectName?: string | null;
+  projectPath?: string | null;
   selected: boolean;
   onClick: () => void;
   onEditFlow?: (flow: SquadFlow) => void;
   onAbortFlow?: (flow: SquadFlow) => void;
   onDeleteFlow?: (flow: SquadFlow) => void;
   onTogglePinned?: (flow: SquadFlow) => void;
+  displayTimestamp?: string;
 }
 
 export function formatRelativeTime(value: string, currentTime = Date.now()) {
@@ -41,16 +44,23 @@ export function formatRelativeTime(value: string, currentTime = Date.now()) {
 export default function FlowItem({
   flow,
   projectName,
+  projectPath,
   selected,
   onClick,
   onEditFlow,
   onAbortFlow,
   onDeleteFlow,
   onTogglePinned,
+  displayTimestamp = flow.updated_at,
 }: FlowItemProps) {
   const isStreaming = Boolean(flow.is_streaming);
   const isRunning = flow.status === 'active';
   const hasUnreadOutput = Boolean(flow.has_unread_messages);
+  const canOpenInFinder = Boolean(
+    projectPath
+    && typeof window !== 'undefined'
+    && window.squadflowDesktopShell?.showItemInFolder,
+  );
 
   const handleMenuAction = (action: 'pin' | 'edit' | 'abort' | 'delete') => {
     switch (action) {
@@ -69,6 +79,16 @@ export default function FlowItem({
     }
   };
 
+  const copyFlowId = async () => {
+    await navigator.clipboard.writeText(flow.id);
+    toast.success('已复制 Flow ID');
+  };
+
+  const openProjectInFinder = () => {
+    if (!projectPath) return;
+    void window.squadflowDesktopShell?.showItemInFolder?.(projectPath, true);
+  };
+
   return (
     <HoverCard>
       <HoverCardTrigger
@@ -78,7 +98,7 @@ export default function FlowItem({
           <div
             role="button"
             tabIndex={0}
-            aria-label={`打开任务：${flow.name}`}
+            aria-label={`打开流程：${flow.name}`}
             onClick={onClick}
             onKeyDown={(event) => {
               if (event.target !== event.currentTarget) return;
@@ -120,8 +140,8 @@ export default function FlowItem({
           {onTogglePinned && (
             <button
               type="button"
-              aria-label={flow.is_pinned ? '取消置顶' : '置顶任务'}
-              title={flow.is_pinned ? '取消置顶' : '置顶任务'}
+              aria-label={flow.is_pinned ? '取消置顶' : '置顶流程'}
+              title={flow.is_pinned ? '取消置顶' : '置顶流程'}
               onClick={(event) => {
                 event.stopPropagation();
                 handleMenuAction('pin');
@@ -155,9 +175,9 @@ export default function FlowItem({
           <DropdownMenuTrigger
             aria-label={`${flow.name} 操作`}
             onClick={(event) => event.stopPropagation()}
-            className="flex h-7 min-w-10 shrink-0 items-center justify-end rounded px-1 text-[11px] text-muted-foreground hover:bg-background/70 hover:text-foreground"
+            className="flex h-7 min-w-10 shrink-0 items-center justify-end rounded px-1 text-[11px] text-muted-foreground transition-[width,min-width,background-color,color] hover:text-foreground group-hover:w-7 group-hover:min-w-7 group-hover:justify-center group-hover:bg-background/70 group-hover:px-0 data-popup-open:w-7 data-popup-open:min-w-7 data-popup-open:justify-center data-popup-open:bg-background/70 data-popup-open:px-0"
           >
-            <span className="group-hover:hidden">{formatRelativeTime(flow.updated_at)}</span>
+            <span className="group-hover:hidden">{formatRelativeTime(displayTimestamp)}</span>
             <MoreHorizontal className="hidden size-4 group-hover:block" />
           </DropdownMenuTrigger>
 
@@ -171,7 +191,7 @@ export default function FlowItem({
                 ) : (
                   <Pin className="mr-2 size-3.5 text-muted-foreground" />
                 )}
-                {flow.is_pinned ? '取消置顶' : '置顶任务'}
+                {flow.is_pinned ? '取消置顶' : '置顶流程'}
               </DropdownMenuItem>
             )}
             {onEditFlow && (
@@ -179,16 +199,30 @@ export default function FlowItem({
                 onClick={(e) => { e.stopPropagation(); handleMenuAction('edit'); }}
               >
                 <Pencil className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
-                修改任务
+                修改流程
               </DropdownMenuItem>
             )}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!canOpenInFinder}
+              onClick={(event) => { event.stopPropagation(); openProjectInFinder(); }}
+            >
+              <FolderOpen className="mr-2 size-3.5 text-muted-foreground" />
+              在 Finder 中打开
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onClick={(event) => { event.stopPropagation(); void copyFlowId(); }}
+            >
+              <Copy className="mr-2 size-3.5 text-muted-foreground" />
+              复制 Flow ID
+            </DropdownMenuItem>
             {onAbortFlow && isRunning && (
               <DropdownMenuItem
                 onClick={(e) => { e.stopPropagation(); handleMenuAction('abort'); }}
                 className="text-status-pending"
               >
                 <XCircle className="w-3.5 h-3.5 mr-2" />
-                终止任务
+                终止流程
               </DropdownMenuItem>
             )}
             {(onTogglePinned || onEditFlow || (onAbortFlow && isRunning)) && onDeleteFlow && (
@@ -200,11 +234,8 @@ export default function FlowItem({
                 onClick={(e) => { e.stopPropagation(); handleMenuAction('delete'); }}
               >
                 <Trash2 className="w-3.5 h-3.5 mr-2" />
-                删除任务
+                删除流程
               </DropdownMenuItem>
-            )}
-            {!onTogglePinned && !onEditFlow && !onAbortFlow && !onDeleteFlow && (
-              <div className="px-3 py-2 text-xs text-muted-foreground">No actions</div>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

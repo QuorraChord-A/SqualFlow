@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
-import { getAgentSettingsPath, type AgentConfigRole } from "../../config.js";
+import { config, getAgentSettingsPath, type AgentConfigRole } from "../../config.js";
 import type { AgentRuntimeRole, RuntimeConfig } from "../../config/agentRuntimeConfig.js";
 import {
   claudeRuntimeModelName,
@@ -40,6 +40,7 @@ type BuildClaudeBaseOptionsInput = {
   sessionId?: string;
   runtimeConfig?: RuntimeConfig;
   modelName?: string;
+  pathToClaudeCodeExecutable?: string;
 };
 
 const permissionGatedClaudeTools = new Set(["Write", "Edit", "Bash"]);
@@ -197,6 +198,7 @@ export function buildClaudeBaseOptions(input: BuildClaudeBaseOptionsInput): Opti
     maxTurns: input.maxTurns,
     resume: input.resume,
     sessionId: input.sessionId,
+    pathToClaudeCodeExecutable: input.pathToClaudeCodeExecutable,
   };
 }
 
@@ -251,6 +253,7 @@ export function buildClaudeLeaderOptions(input: BuildLeaderRuntimeOptionsInput):
     mcpServers: mcpServers ?? {},
     runtimeConfig: input.runtimeConfig,
     modelName: input.modelName,
+    pathToClaudeCodeExecutable: config.claudeCodeExecutable,
   });
 }
 
@@ -276,6 +279,7 @@ export function buildClaudeExpertOptions(input: BuildExpertRuntimeOptionsInput):
     mcpServers: mcpServerConfig ? { "squadflow-browser": mcpServerConfig } : {},
     runtimeConfig: input.runtimeConfig,
     modelName: input.modelName,
+    pathToClaudeCodeExecutable: config.claudeCodeExecutable,
   });
 }
 

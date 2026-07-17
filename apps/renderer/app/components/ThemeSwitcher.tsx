@@ -12,7 +12,6 @@ const THEME_LABELS: Record<ThemeName, string> = {
   system: '跟随系统',
   dark: '深色',
   light: '浅色',
-  'dark-emerald': '极光',
 };
 
 export default function ThemeSwitcher() {

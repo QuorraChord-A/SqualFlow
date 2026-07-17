@@ -117,6 +117,7 @@ export async function testClaudeRuntimeConnection(
         maxTurns: 1,
         persistSession: false,
         abortController,
+        pathToClaudeCodeExecutable: config.claudeCodeExecutable,
       },
     });
 

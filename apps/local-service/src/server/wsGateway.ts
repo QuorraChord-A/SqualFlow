@@ -642,11 +642,26 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
   });
 }
 
-function ensureLeaderSession(flowId: string, connection: WsConnection) {
+function ensureLeaderSession(
+  flowId: string,
+  connection: WsConnection,
+  options: { restartFailed?: boolean } = {},
+) {
   const existing = connection.store
     .listAgentSessions(flowId)
     .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-  if (existing) return existing;
+  if (existing) {
+    if (!options.restartFailed || existing.status !== "failed") return existing;
+
+    const sessionId = randomUUID();
+    const updatedSession = connection.store.updateAgentSessionSession(existing.id, sessionId);
+    const restarted = connection.store.updateAgentSessionStatus(existing.id, "idle");
+    if (!updatedSession || !restarted) {
+      throw new Error(`Unable to restart failed Leader session for Flow ${flowId}`);
+    }
+    connection.store.updateFlow(flowId, { leaderSessionId: sessionId });
+    return restarted;
+  }
 
   const created = connection.store.createAgentSession({
     flowId,
@@ -742,7 +757,6 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
     return;
   }
 
-  const existingLeaderSessionId = flow.leaderSessionId ?? "";
   if (connection.store.listDecisionCards(message.flow_id).some((card) => card.status === "pending")) {
     const error = new LeaderInputRejectedError();
     await connection.send(errorMessage(error.code, error.message, message.flow_id, message.log_id));
@@ -763,7 +777,10 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
     return;
   }
 
-  const leader = ensureLeaderSession(message.flow_id, connection);
+  const failedLeaderSession = connection.store
+    .listAgentSessions(message.flow_id)
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "failed");
+  const leader = ensureLeaderSession(message.flow_id, connection, { restartFailed: true });
   const messageId = message.client_message_id ?? `msg-user-${randomUUID()}`;
   const createdAt = new Date().toISOString();
   const pendingPlanApproval = connection.store.listPlanApprovals(message.flow_id).find((approval) => approval.status === "pending");
@@ -879,7 +896,7 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
     userTurnId: userTurn?.id,
     leaderAgentSessionId: leader.id,
     leaderSessionId: leader.sessionId ?? leader.id,
-    resumeSessionId: existingLeaderSessionId || undefined,
+    resumeSessionId: failedLeaderSession ? undefined : flow.leaderSessionId ?? undefined,
     currentTurnInput: {
       trigger_kind: "user_message",
       user_turn_id: userTurn?.id,

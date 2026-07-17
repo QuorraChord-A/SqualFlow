@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import userEvent from "@testing-library/user-event";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SquadFlow } from "../types";
 import FlowItem from "./FlowItem";
 
@@ -18,6 +19,10 @@ const flow: SquadFlow = {
 };
 
 describe("FlowItem", () => {
+  afterEach(() => {
+    delete window.squadflowDesktopShell;
+  });
+
   it("replaces the blue status dot with a pending spinner when user action is required", () => {
     render(<FlowItem flow={flow} selected={false} onClick={vi.fn()} />);
 
@@ -133,12 +138,41 @@ describe("FlowItem", () => {
   it("shows flow details beside the item on hover", async () => {
     render(<FlowItem flow={flow} projectName="ccdev" selected={false} onClick={vi.fn()} />);
 
-    fireEvent.mouseEnter(screen.getByRole("button", { name: "打开任务：等待确认的 Flow" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "打开流程：等待确认的 Flow" }));
 
     await waitFor(() => {
       expect(screen.getByText("修复登录页")).toBeInTheDocument();
       expect(screen.getByText("clarify")).toBeInTheDocument();
       expect(screen.getByText("ccdev")).toBeInTheDocument();
     });
+  });
+
+  it("keeps the hover action compact and offers Finder plus Flow ID actions", async () => {
+    const user = userEvent.setup();
+    const showItemInFolder = vi.fn().mockResolvedValue(true);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    window.squadflowDesktopShell = { showItemInFolder };
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
+
+    render(
+      <FlowItem
+        flow={flow}
+        projectPath="/tmp/project"
+        selected
+        onClick={vi.fn()}
+        onEditFlow={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "等待确认的 Flow 操作" });
+    expect(trigger).toHaveClass("group-hover:w-7", "group-hover:min-w-7");
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "复制 Flow ID" }));
+    expect(writeText).toHaveBeenCalledWith("flow-1");
+
+    await user.click(trigger);
+    await user.click(await screen.findByRole("menuitem", { name: "在 Finder 中打开" }));
+    expect(showItemInFolder).toHaveBeenCalledWith("/tmp/project", true);
   });
 });

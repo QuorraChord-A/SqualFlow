@@ -390,7 +390,7 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
                 />
               ) : (
                 <div
-                  aria-label="正在加载新建 Flow 默认设置"
+                  aria-label="正在加载新建流程默认设置"
                   className="h-7 w-[112px] rounded-lg bg-ui-control/45"
                 />
               )

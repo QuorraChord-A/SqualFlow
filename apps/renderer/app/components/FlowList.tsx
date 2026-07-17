@@ -50,7 +50,7 @@ export default function FlowList({
           <button
             onClick={onNewFlow}
             className="p-1 rounded hover:bg-primary/10 text-primary hover:text-primary/80 transition-colors"
-            title="新建 Flow"
+            title="新建流程"
           >
             <Plus className="w-4 h-4" />
           </button>

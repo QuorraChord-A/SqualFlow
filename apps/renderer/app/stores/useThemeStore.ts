@@ -1,9 +1,9 @@
 import { create } from 'zustand';
 
-export type ResolvedThemeName = 'dark' | 'light' | 'dark-emerald';
+export type ResolvedThemeName = 'dark' | 'light';
 export type ThemeName = 'system' | ResolvedThemeName;
 
-const AVAILABLE_THEMES: ThemeName[] = ['system', 'dark', 'light', 'dark-emerald'];
+const AVAILABLE_THEMES: ThemeName[] = ['system', 'dark', 'light'];
 const STORAGE_KEY = 'squadflow-theme';
 const DEFAULT_THEME: ThemeName = 'system';
 const SYSTEM_THEME_QUERY = '(prefers-color-scheme: dark)';
@@ -20,7 +20,7 @@ let systemThemeListenerAttached = false;
 
 function getSystemTheme(): ResolvedThemeName {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'dark';
-  return window.matchMedia(SYSTEM_THEME_QUERY).matches ? 'dark' : 'light';
+  return (systemThemeMedia ?? window.matchMedia(SYSTEM_THEME_QUERY)).matches ? 'dark' : 'light';
 }
 
 export function resolveTheme(theme: ThemeName): ResolvedThemeName {

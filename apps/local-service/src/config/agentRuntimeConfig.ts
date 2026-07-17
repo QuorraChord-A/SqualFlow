@@ -59,6 +59,7 @@ type RuntimeConfigIndex = {
 const roleOrder: AgentRuntimeRole[] = ["leader", "coder", "research", "verify", "codereview"];
 const configIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,80}$/;
 const obsoleteDefaultConfigIds = new Set(["backend-agent-sdk", "readonly-agent-sdk"]);
+const legacySeedRuntimeConfigId = "default-agent-sdk";
 
 const initialIndex: RuntimeConfigIndex = {
   version: 1,
@@ -246,6 +247,28 @@ function normalizeRuntimeConfig(value: unknown, fallbackId: string): RuntimeConf
   };
 }
 
+function isLegacySeedRuntimeConfig(value: unknown) {
+  if (!isRecord(value) || value.id !== legacySeedRuntimeConfigId) return false;
+  const models = Array.isArray(value.models) ? value.models : [];
+  const expectedModels = [
+    { id: "mimo-v25", name: "mimo-v2.5" },
+    { id: "opus", name: "opus" },
+  ];
+  return value.fileName === `${legacySeedRuntimeConfigId}.json`
+    && value.name === "项目claudecode配置"
+    && value.sdk === "claudecode"
+    && value.authMode === "apiKey"
+    && stringValue(value.baseUrl) === ""
+    && stringValue(value.apiKey) === ""
+    && models.length === expectedModels.length
+    && expectedModels.every((expected, index) => {
+      const model = isRecord(models[index]) ? models[index] : {};
+      return model.id === expected.id
+        && model.name === expected.name
+        && model.contextWindowK === 200;
+    });
+}
+
 function normalizeIndex(value: unknown): RuntimeConfigIndex {
   const record = isRecord(value) ? value : {};
   const rolesRecord: Record<string, unknown> = isRecord(record.roles) ? { ...record.roles } : {};
@@ -293,20 +316,21 @@ function readJsonSync(filePath: string): unknown | null {
 
 async function ensureInitialized() {
   await fs.mkdir(configsDir(), { recursive: true });
-  if (await readJson(indexPath()) === null) {
-    await writeJson(indexPath(), initialIndex);
-  } else {
-    const index = normalizeIndex(await readJson(indexPath()));
-    let changed = false;
-    for (const role of roleOrder) {
-      if (obsoleteDefaultConfigIds.has(index.roles[role].configId)) {
-        index.roles[role] = { ...index.roles[role], configId: "", modelId: "" };
-        changed = true;
-      }
-    }
-    if (changed) await writeJson(indexPath(), index);
+  const storedIndex = await readJson(indexPath());
+  const index = storedIndex === null ? initialIndex : normalizeIndex(storedIndex);
+  const obsoleteConfigIds = new Set(obsoleteDefaultConfigIds);
+  if (isLegacySeedRuntimeConfig(await readJson(configPath(legacySeedRuntimeConfigId)))) {
+    obsoleteConfigIds.add(legacySeedRuntimeConfigId);
   }
-  await Promise.all([...obsoleteDefaultConfigIds].map(async (configId) => {
+  let indexChanged = storedIndex === null;
+  for (const role of roleOrder) {
+    if (obsoleteConfigIds.has(index.roles[role].configId)) {
+      index.roles[role] = { ...index.roles[role], configId: "", modelId: "" };
+      indexChanged = true;
+    }
+  }
+  if (indexChanged) await writeJson(indexPath(), index);
+  await Promise.all([...obsoleteConfigIds].map(async (configId) => {
     try {
       await fs.unlink(configPath(configId));
     } catch (error) {

@@ -20,7 +20,7 @@ export default function RootLayout({
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         {/* Resolve the saved theme preference before first paint to prevent a theme flash. */}
         <script dangerouslySetInnerHTML={{
-          __html: `(function(){try{var p=localStorage.getItem('squadflow-theme')||'system';var v=['system','dark','light','dark-emerald'];if(v.indexOf(p)<0)p='system';var t=p==='system'?(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;var e=document.documentElement;e.dataset.theme=t;e.dataset.themePreference=p;e.classList.toggle('dark',t!=='light')}catch(e){}})()`
+          __html: `(function(){try{var p=localStorage.getItem('squadflow-theme')||'system';var v=['system','dark','light'];if(v.indexOf(p)<0)p='system';var t=p==='system'?(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):p;var e=document.documentElement;e.dataset.theme=t;e.dataset.themePreference=p;e.classList.toggle('dark',t!=='light')}catch(e){}})()`
         }} />
       </head>
       <body className="h-screen w-screen overflow-hidden">

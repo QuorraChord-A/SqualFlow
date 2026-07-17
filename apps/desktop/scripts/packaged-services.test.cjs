@@ -24,6 +24,10 @@ test("builds self-contained service paths and writable application data paths", 
   assert.equal(specs[0].env.SQUADFLOW_TS_DB, "/Users/test/Library/Application Support/SquadFlow/data/squadflow.db");
   assert.equal(specs[0].env.SQUADFLOW_RUNTIME_SCRATCH_ROOT, "/Users/test/Library/Application Support/SquadFlow/runtime/scratch");
   assert.equal(
+    specs[0].env.SQUADFLOW_BUNDLED_CLAUDE_COMMAND,
+    "/Applications/SquadFlow.app/Contents/Resources/app.asar.unpacked/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude",
+  );
+  assert.equal(
     specs[0].env.SQUADFLOW_BUNDLED_CODEX_COMMAND,
     "/Applications/SquadFlow.app/Contents/Resources/codex-runtime/darwin-arm64/codex",
   );

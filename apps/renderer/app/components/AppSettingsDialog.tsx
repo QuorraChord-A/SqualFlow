@@ -12,6 +12,7 @@ import {
   Eye,
   EyeOff,
   FileCode2,
+  FileText,
   Moon,
   Palette,
   Search,
@@ -32,6 +33,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { MessageResponse } from "@/components/ai-elements-official/message";
 import { useThemeStore, type ThemeName } from "../stores/useThemeStore";
 import { useAppPreferencesStore } from "../stores/useAppPreferencesStore";
 import { useModalStore } from "../stores/useModalStore";
@@ -80,7 +82,6 @@ const THEME_LABELS: Record<ThemeName, string> = {
   system: "跟随系统",
   dark: "深色",
   light: "浅色",
-  "dark-emerald": "极光",
 };
 
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 80;
@@ -306,6 +307,21 @@ function uniqueModels(models: RuntimeModel[]): RuntimeModel[] {
   });
 }
 
+function sortRuntimeModelsDescending(models: RuntimeModel[]): RuntimeModel[] {
+  return [...models].sort((left, right) => {
+    const leftName = left.name.trim();
+    const rightName = right.name.trim();
+    if (!leftName && !rightName) return 0;
+    if (!leftName) return -1;
+    if (!rightName) return 1;
+    return rightName.localeCompare(leftName, 'zh-CN', { numeric: true, sensitivity: 'base' });
+  });
+}
+
+function withSortedModels(config: RuntimeConfig): RuntimeConfig {
+  return { ...config, models: sortRuntimeModelsDescending(config.models) };
+}
+
 function runtimeConfigComparable(config: RuntimeConfig) {
   return {
     name: config.name,
@@ -372,7 +388,7 @@ function GeneralSettings() {
           </div>
           <Select value={theme} onValueChange={(value) => setTheme(value as ThemeName)}>
             <SelectTrigger className="w-full">
-              <SelectValue />
+              <SelectValue>{THEME_LABELS[theme]}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {availableThemes.map((themeName) => (
@@ -550,10 +566,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const SelectedRoleIcon = selectedRole.Icon;
 
   const applySnapshot = (snapshot: { roles: RoleRuntimeBindingDto[]; configs: RuntimeConfig[] }) => {
-    setPersistedRuntimeConfigs(snapshot.configs);
+    const sortedConfigs = snapshot.configs.map(withSortedModels);
+    setPersistedRuntimeConfigs(sortedConfigs);
     setRuntimeConfigs((current) => {
       const drafts = current.filter((config) => isDraftRuntimeConfig(config));
-      return [...snapshot.configs, ...drafts];
+      return [...sortedConfigs, ...drafts];
     });
     setRoleConfigs(roleConfigMap(snapshot.roles));
     setRoleModels(roleModelMap(snapshot.roles));
@@ -710,12 +727,13 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     setIsSaving(true);
     try {
       const snapshot = await deleteAgentRuntimeConfig(targetConfig.id);
-      setRuntimeConfigs(snapshot.configs);
+      const sortedConfigs = snapshot.configs.map(withSortedModels);
+      setRuntimeConfigs(sortedConfigs);
       setRoleConfigs(roleConfigMap(snapshot.roles));
       setRoleModels(roleModelMap(snapshot.roles));
       setRoleEnabled(roleEnabledMap(snapshot.roles));
-      setPersistedRuntimeConfigs(snapshot.configs);
-      setSelectedConfigId(snapshot.configs[0]?.id ?? "");
+      setPersistedRuntimeConfigs(sortedConfigs);
+      setSelectedConfigId(sortedConfigs[0]?.id ?? "");
       setApiKeyVisible(false);
       setLocalAuthStatus(null);
       setConfigPendingDelete(null);
@@ -729,19 +747,19 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
 
   const addModel = () => {
     if (!selectedRuntimeConfig) return;
-    const previousModel = selectedRuntimeConfig.models.at(-1);
-    if (previousModel && !previousModel.name.trim()) {
-      showModelFeedback("请先填写上一行模型名称，再添加新模型。", "error");
+    const unfinishedModel = selectedRuntimeConfig.models.find((model) => !model.name.trim());
+    if (unfinishedModel) {
+      showModelFeedback("请先填写当前未完成的模型名称，再添加新模型。", "error");
       return;
     }
     updateSelectedRuntimeConfig({
       models: [
-        ...selectedRuntimeConfig.models,
         {
           id: `${selectedRuntimeConfig.id}-model-${Date.now()}`,
           name: "",
           contextWindowK: newRuntimeModelContext(selectedRuntimeConfig),
         },
+        ...selectedRuntimeConfig.models,
       ],
     });
     showModelFeedback("已添加模型，保存后写入配置文件。");
@@ -780,10 +798,10 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     const normalizedConfig = {
       ...selectedRuntimeConfig,
       name: selectedRuntimeConfig.name.trim(),
-      models: selectedRuntimeConfig.models.map((model) => modelWithDefaultContext(selectedRuntimeConfig, {
+      models: sortRuntimeModelsDescending(selectedRuntimeConfig.models.map((model) => modelWithDefaultContext(selectedRuntimeConfig, {
         ...model,
         name: model.name.trim(),
-      })),
+      }))),
     };
     setIsSaving(true);
     try {
@@ -797,14 +815,15 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
             models: normalizedConfig.models,
           })
         : await updateAgentRuntimeConfig(normalizedConfig.id, normalizedConfig);
+      const sortedSavedConfig = withSortedModels(savedConfig);
       setRuntimeConfigs((current) => current.map((config) =>
-        config.id === selectedRuntimeConfig.id ? savedConfig : config,
+        config.id === selectedRuntimeConfig.id ? sortedSavedConfig : config,
       ));
       setPersistedRuntimeConfigs((current) => [
-        ...current.filter((config) => config.id !== selectedRuntimeConfig.id && config.id !== savedConfig.id),
-        savedConfig,
+        ...current.filter((config) => config.id !== selectedRuntimeConfig.id && config.id !== sortedSavedConfig.id),
+        sortedSavedConfig,
       ]);
-      setSelectedConfigId(savedConfig.id);
+      setSelectedConfigId(sortedSavedConfig.id);
       try {
         applySnapshot(await fetchAgentRuntimeConfig());
       } catch {
@@ -836,7 +855,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           .filter((model) => model.name.trim())
           .map((model) => [model.name.trim(), model]),
       );
-      const nextModels = uniqueModels(result.models.map((model) => {
+      const nextModels = sortRuntimeModelsDescending(uniqueModels(result.models.map((model) => {
         const existingModel = existingModelsByName.get(model.name.trim());
         return {
           ...existingModel,
@@ -844,7 +863,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           id: existingModel?.id ?? model.id,
           name: model.name,
         };
-      })).filter((model) => model.name.trim());
+      })).filter((model) => model.name.trim()));
       if (nextModels.length === 0) {
         showModelFeedback("Codex app-server 未返回可用模型。", "error");
         return;
@@ -1087,15 +1106,18 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               <div>
                 <div className="text-xs font-medium text-muted-foreground">System Prompt</div>
                 <div className="mt-2 rounded-lg border border-border bg-background/60 px-3 py-3 text-xs leading-5 text-foreground">
-                  {promptPreview(selectedRole.systemPrompt, false)}
+                  <p>{promptPreview(selectedRole.systemPrompt, false)}</p>
                   {selectedRole.systemPrompt.length > SYSTEM_PROMPT_PREVIEW_LENGTH ? (
-                    <button
+                    <Button
                       type="button"
-                      className="ml-2 text-primary hover:underline"
+                      variant="outline"
+                      size="sm"
+                      className="mt-3 h-7 gap-1.5 px-2.5 text-xs"
                       onClick={() => setPromptDialogOpen(true)}
                     >
+                      <FileText className="size-3.5" />
                       展开查看全文
-                    </button>
+                    </Button>
                   ) : null}
                 </div>
               </div>
@@ -1120,12 +1142,17 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           <Dialog open={promptDialogOpen} onOpenChange={setPromptDialogOpen}>
             <DialogContent className="max-h-[min(760px,calc(100vh-3rem))] !max-w-4xl gap-0 overflow-hidden p-0">
               <DialogHeader className="border-b border-border px-5 py-4 pr-12">
-                <DialogTitle>{selectedRole.label} System Prompt</DialogTitle>
+                <DialogTitle className="flex items-center gap-2">
+                  <FileText className="size-4 text-muted-foreground" />
+                  {selectedRole.label} · system-prompt.md
+                </DialogTitle>
               </DialogHeader>
-              <div className="max-h-[calc(min(760px,100vh-3rem)-64px)] overflow-auto px-5 py-4">
-                <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-foreground">
-                  {selectedRole.systemPrompt}
-                </pre>
+              <div className="max-h-[calc(min(760px,100vh-3rem)-64px)] overflow-auto bg-[var(--ui-surface-sunken)] px-6 py-5">
+                <article className="mx-auto max-w-3xl rounded-xl border border-border bg-card px-6 py-5 shadow-sm">
+                  <MessageResponse className="sf-markdown-document max-w-none text-sm leading-6">
+                    {selectedRole.systemPrompt}
+                  </MessageResponse>
+                </article>
               </div>
             </DialogContent>
           </Dialog>

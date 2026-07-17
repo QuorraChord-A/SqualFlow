@@ -24,6 +24,7 @@ export const config = {
   workspaceRoot,
   defaultProjectRoot: process.env.SQUADFLOW_DEFAULT_PROJECT_ROOT ?? path.join(outputRoot, "workspace"),
   claudeSettingsPath: envOrDefault(process.env.SQUADFLOW_CLAUDE_SETTINGS, path.join(outputRoot, "settings", "claude.json")),
+  claudeCodeExecutable: process.env.SQUADFLOW_BUNDLED_CLAUDE_COMMAND?.trim() || undefined,
 };
 
 export function getAgentSettingsPath(role: AgentConfigRole) {

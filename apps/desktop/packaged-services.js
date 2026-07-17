@@ -5,6 +5,17 @@ function platformDirectory(platform, arch) {
   return `${platform === "darwin" ? "darwin" : platform}-${arch}`;
 }
 
+function claudeExecutablePath(resourcesPath, platform, arch) {
+  return path.join(
+    resourcesPath,
+    "app.asar.unpacked",
+    "node_modules",
+    "@anthropic-ai",
+    `claude-agent-sdk-${platformDirectory(platform, arch)}`,
+    platform === "win32" ? "claude.exe" : "claude",
+  );
+}
+
 function createPackagedServiceSpecs({
   appPath,
   resourcesPath,
@@ -42,6 +53,7 @@ function createPackagedServiceSpecs({
         SQUADFLOW_WORKSPACE_ROOT: userDataPath,
         SQUADFLOW_DEFAULT_PROJECT_ROOT: path.join(userDataPath, "workspace"),
         SQUADFLOW_CLAUDE_SETTINGS: path.join(userDataPath, "settings", "claude.json"),
+        SQUADFLOW_BUNDLED_CLAUDE_COMMAND: claudeExecutablePath(resourcesPath, platform, arch),
         SQUADFLOW_BUNDLED_CODEX_COMMAND: path.join(
           resourcesPath,
           "codex-runtime",

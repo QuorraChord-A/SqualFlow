@@ -134,6 +134,20 @@ describe("harness base options", () => {
     expect(options.settings.sandbox?.network?.allowedDomains).toContain("api.anthropic.com");
   });
 
+  it("uses an explicit unpacked Claude executable in packaged runtimes", () => {
+    const executable = "/Applications/SquadFlow.app/Contents/Resources/app.asar.unpacked/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude";
+    const options = buildBaseOptions({
+      systemPrompt: "sys",
+      cwd: "/repo",
+      allowedTools: [],
+      tools: [],
+      settingsPath,
+      pathToClaudeCodeExecutable: executable,
+    });
+
+    expect(options.pathToClaudeCodeExecutable).toBe(executable);
+  });
+
   it("uses safe empty settings when the optional legacy settings file is missing", () => {
     const options = buildBaseOptions({
       systemPrompt: "sys",

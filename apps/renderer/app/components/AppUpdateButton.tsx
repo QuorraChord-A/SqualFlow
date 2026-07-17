@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { Download } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   AlertDialog,
@@ -25,22 +25,6 @@ const INITIAL_STATE: DesktopUpdateState = {
   progress: null,
   error: null,
 };
-
-function statusLine(state: DesktopUpdateState): string {
-  if (!state.enabled) return '当前构建未启用自动更新。';
-  switch (state.status) {
-    case 'checking':
-      return '正在检查更新...';
-    case 'downloading':
-      return `正在下载 ${state.availableVersion ?? '新版本'}${state.progress === null ? '' : `，${state.progress}%`}`;
-    case 'ready':
-      return `已下载 ${state.availableVersion ?? '新版本'}，等待重启安装。`;
-    case 'error':
-      return `更新失败：${state.error ?? '未知错误'}`;
-    default:
-      return '已是最新版本。';
-  }
-}
 
 export default function AppUpdateButton() {
   const [state, setState] = useState<DesktopUpdateState>(INITIAL_STATE);
@@ -120,21 +104,17 @@ export default function AppUpdateButton() {
     );
   }
 
-  const downloading = state.status === 'downloading';
+  if (state.status !== 'downloading') return null;
+
   return (
     <Popover>
       <PopoverTrigger
-        aria-label={downloading
-          ? `正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`
-          : '应用更新'}
-        title="应用更新"
-        className={downloading
-          ? 'flex h-9 min-w-14 shrink-0 items-center justify-center rounded-xl border border-emerald-400/35 bg-emerald-400/15 px-2.5 text-xs font-bold tabular-nums text-emerald-400 transition-colors hover:bg-emerald-400/25'
-          : 'flex size-9 items-center justify-center rounded-xl border border-border/70 bg-card/60 text-muted-foreground transition-colors hover:bg-card hover:text-foreground'}
+        aria-label={`正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`}
+        title="正在下载更新"
+        className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-xl border border-emerald-400/35 bg-emerald-400/15 px-2.5 text-xs font-bold tabular-nums text-emerald-500 transition-colors hover:bg-emerald-400/25"
       >
-        {downloading
-          ? (state.progress === null ? '下载中' : `${state.progress}%`)
-          : <RefreshCw className={`size-4${state.status === 'checking' ? ' animate-spin' : ''}`} />}
+        <Download className="size-3.5" />
+        {state.progress === null ? '下载中' : `${state.progress}%`}
       </PopoverTrigger>
       <PopoverContent align="start" side="top" className="w-72 p-4">
         <div className="space-y-3 text-sm">
@@ -143,9 +123,9 @@ export default function AppUpdateButton() {
             当前版本 {state.currentVersion || '未知'}
           </div>
           <div className="text-xs text-muted-foreground" role="status">
-            {statusLine(state)}
+            正在下载 {state.availableVersion ?? '新版本'}{state.progress === null ? '' : `，${state.progress}%`}
           </div>
-          {downloading && state.progress !== null && (
+          {state.progress !== null && (
             <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
               <div
                 className="h-full rounded-full bg-emerald-400 transition-[width]"
@@ -157,17 +137,6 @@ export default function AppUpdateButton() {
             <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">
               {state.notes}
             </div>
-          )}
-          {state.enabled && !downloading && state.status !== 'checking' && (
-            <button
-              type="button"
-              onClick={() => {
-                void getDesktopUpdateBridge()?.check().catch(() => {});
-              }}
-              className="w-full rounded-lg border border-border/70 bg-card/60 px-2 py-1.5 text-xs text-foreground transition-colors hover:bg-card"
-            >
-              检查更新
-            </button>
           )}
         </div>
       </PopoverContent>

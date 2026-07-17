@@ -23,7 +23,7 @@ export default function DeleteFlowModal({ open, flowName, onClose, onConfirm }: 
     <AlertDialog open={open} onOpenChange={(v) => { if (!v) onClose(); }}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>删除任务</AlertDialogTitle>
+          <AlertDialogTitle>删除流程</AlertDialogTitle>
           <AlertDialogDescription>
             确定要删除 <span className="text-foreground font-medium">&quot;{flowName}&quot;</span> 吗？此操作不可撤销。
           </AlertDialogDescription>

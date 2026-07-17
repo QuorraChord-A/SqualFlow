@@ -75,6 +75,7 @@ export default function Layout() {
   const setBrowserSelectionActiveFlowId = useBrowserSelectionStore((state) => state.setActiveFlowId);
   const setComposerImageActiveFlowId = useComposerImageStore((state) => state.setActiveFlowId);
   const setPlanFeedbackActiveFlowId = usePlanFeedbackStore((state) => state.setActiveFlowId);
+  const themePreference = useThemeStore((state) => state.theme);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
 
   // Dashboard data follows the active flow; during a switch, the previous flow stays mounted under the overlay.
@@ -275,8 +276,8 @@ export default function Layout() {
   }, [isRightPanelOpen]);
 
   useEffect(() => {
-    void window.squadflowDesktopShell?.setTheme?.(resolvedTheme);
-  }, [resolvedTheme]);
+    void window.squadflowDesktopShell?.setTheme?.(themePreference, resolvedTheme);
+  }, [resolvedTheme, themePreference]);
 
   useEffect(() => {
     if (isLeftPanelOpen && leftPanelPreviewOpen) setLeftPanelPreviewOpen(false);
@@ -775,7 +776,7 @@ export default function Layout() {
       <div data-testid="layout-content-column" className="flex min-w-0 flex-1 flex-col">
         {!isRightWorkbenchMaximized ? (
           <TopBar
-            activeTitle={isCreatingTask ? '新建任务' : selectedFlowSummary?.name ?? '选择一个任务'}
+            activeTitle={isCreatingTask ? '新建流程' : selectedFlowSummary?.name ?? '选择一个流程'}
             activeSubtitle={isCreatingTask ? undefined : selectedProject?.name}
             isLeftPanelOpen={isLeftPanelOpen}
           />
@@ -831,17 +832,6 @@ export default function Layout() {
               )}
         </main>
 
-        {/* Status Strip */}
-        {!isRightWorkbenchMaximized ? (
-          <div data-testid="status-strip" className="h-6 border-t border-border flex items-center justify-between px-4 text-[10px] font-mono text-muted-foreground shrink-0">
-            <span>
-              SQUADFLOW v0.1.0{selectedFlowId && !isCreatingTask ? ` · Task: ${selectedFlowId}` : ' · New task'}
-            </span>
-            <span className="flex items-center gap-1.5">
-              READY
-            </span>
-          </div>
-        ) : null}
       </div>
 
       {selectedFlowId && !isCreatingTask && isRightPanelStateCurrent ? <FlowSidePanel

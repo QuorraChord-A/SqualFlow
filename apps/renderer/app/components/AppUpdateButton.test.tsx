@@ -89,26 +89,20 @@ describe('AppUpdateButton', () => {
     expect(screen.getByText('修复若干问题')).toBeInTheDocument();
   });
 
-  it('stays visible when updates are unavailable and explains why', async () => {
-    const user = userEvent.setup();
+  it('stays hidden when automatic updates are unavailable', async () => {
     installBridge({ ...readyState, enabled: false, status: 'idle', notes: null });
 
     render(<AppUpdateButton />);
 
-    await user.click(await screen.findByRole('button', { name: '应用更新' }));
-    expect(await screen.findByText('当前构建未启用自动更新。')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: '检查更新' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole('button')).not.toBeInTheDocument());
   });
 
-  it('offers a manual update check when idle', async () => {
-    const user = userEvent.setup();
-    const bridge = installBridge({ ...readyState, status: 'idle', availableVersion: null, notes: null, progress: null });
+  it('stays hidden after checking confirms the current version is latest', async () => {
+    installBridge({ ...readyState, status: 'idle', availableVersion: null, notes: null, progress: null });
 
     render(<AppUpdateButton />);
 
-    await user.click(await screen.findByRole('button', { name: '应用更新' }));
-    await user.click(await screen.findByRole('button', { name: '检查更新' }));
-    expect(bridge.check).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole('button')).not.toBeInTheDocument());
   });
 
   it('renders nothing outside the desktop shell', async () => {

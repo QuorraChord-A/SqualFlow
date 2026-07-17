@@ -761,7 +761,7 @@ export default function WorkspaceFilesPanel({
             );
           }}
         >
-          在文件管理器中显示
+          在 Finder 中显示
         </button>
         <div className="my-1 h-px bg-border/70" />
         <button

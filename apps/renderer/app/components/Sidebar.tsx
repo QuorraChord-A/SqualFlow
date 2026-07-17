@@ -83,7 +83,7 @@ export default function Sidebar({
           <TooltipTrigger
             data-testid="previous-flow-button"
             type="button"
-            aria-label="切换到前一个任务"
+            aria-label="切换到前一个流程"
             aria-disabled={!canNavigatePreviousFlow}
             onClick={() => {
               if (canNavigatePreviousFlow) onNavigatePreviousFlow?.();
@@ -93,13 +93,13 @@ export default function Sidebar({
           >
             <ArrowLeft className="size-4" />
           </TooltipTrigger>
-          <TooltipContent>前一个任务</TooltipContent>
+          <TooltipContent>前一个流程</TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
             data-testid="next-flow-button"
             type="button"
-            aria-label="切换到后一个任务"
+            aria-label="切换到后一个流程"
             aria-disabled={!canNavigateNextFlow}
             onClick={() => {
               if (canNavigateNextFlow) onNavigateNextFlow?.();
@@ -109,7 +109,7 @@ export default function Sidebar({
           >
             <ArrowRight className="size-4" />
           </TooltipTrigger>
-          <TooltipContent>后一个任务</TooltipContent>
+          <TooltipContent>后一个流程</TooltipContent>
         </Tooltip>
       </div>
       {shouldRenderLayoutSpacer ? (

@@ -32,7 +32,7 @@ contextBridge.exposeInMainWorld("squadflowDesktopBrowser", {
 });
 
 contextBridge.exposeInMainWorld("squadflowDesktopShell", {
-  setTheme: (theme) => ipcRenderer.invoke("desktop-shell:set-theme", theme),
+  setTheme: (theme, resolvedTheme) => ipcRenderer.invoke("desktop-shell:set-theme", theme, resolvedTheme),
   toggleWindowZoom: () => ipcRenderer.invoke("desktop-shell:toggle-window-zoom"),
   showItemInFolder: (targetPath, isDirectory) => ipcRenderer.invoke("desktop-shell:show-item-in-folder", targetPath, Boolean(isDirectory)),
 });

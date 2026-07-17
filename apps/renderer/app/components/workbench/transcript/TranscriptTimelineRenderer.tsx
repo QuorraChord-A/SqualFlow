@@ -48,7 +48,11 @@ export default function TranscriptTimelineRenderer({
 }: TranscriptTimelineRendererProps) {
   return (
     <TranscriptPathProvider rootPath={workspaceRootPath} onOpenWorkspaceFile={onOpenWorkspaceFile}>
-      <div data-testid={dataTestId} data-transcript-activity={dataActivity}>
+      <div
+        data-testid={dataTestId}
+        data-transcript-activity={dataActivity}
+        data-transcript-anchor-id={turnId}
+      >
         <AssistantTurn
           blocks={blocks}
           turnId={turnId}

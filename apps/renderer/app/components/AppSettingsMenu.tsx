@@ -1,6 +1,6 @@
 'use client';
 
-import { Check, Eye, Monitor, Moon, Palette, Settings, SlidersHorizontal, Sparkles, Sun, Trash2 } from 'lucide-react';
+import { Check, Eye, Monitor, Moon, Palette, Settings, SlidersHorizontal, Sun, Trash2 } from 'lucide-react';
 import type { ComponentType } from 'react';
 import { useThemeStore, type ThemeName } from '../stores/useThemeStore';
 import { useAppPreferencesStore } from '../stores/useAppPreferencesStore';
@@ -21,14 +21,12 @@ const THEME_LABELS: Record<ThemeName, string> = {
   system: '跟随系统',
   dark: '深色',
   light: '浅色',
-  'dark-emerald': '极光',
 };
 
 const THEME_ICONS: Record<ThemeName, ComponentType<{ className?: string }>> = {
   system: Monitor,
   dark: Moon,
   light: Sun,
-  'dark-emerald': Sparkles,
 };
 
 interface AppSettingsMenuProps {

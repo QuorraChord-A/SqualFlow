@@ -57,8 +57,8 @@ describe("Sidebar", () => {
     );
 
     const collapseButton = screen.getByRole("button", { name: "隐藏左侧面板" });
-    const previousButton = screen.getByRole("button", { name: "切换到前一个任务" });
-    const nextButton = screen.getByRole("button", { name: "切换到后一个任务" });
+    const previousButton = screen.getByRole("button", { name: "切换到前一个流程" });
+    const nextButton = screen.getByRole("button", { name: "切换到后一个流程" });
     const topRow = collapseButton.parentElement;
 
     expect(topRow).toHaveClass("top-2");
@@ -87,8 +87,8 @@ describe("Sidebar", () => {
       />
     );
 
-    const previousButton = screen.getByRole("button", { name: "切换到前一个任务" });
-    const nextButton = screen.getByRole("button", { name: "切换到后一个任务" });
+    const previousButton = screen.getByRole("button", { name: "切换到前一个流程" });
+    const nextButton = screen.getByRole("button", { name: "切换到后一个流程" });
 
     expect(previousButton).toHaveAttribute("aria-disabled", "true");
     expect(nextButton).toHaveAttribute("aria-disabled", "true");

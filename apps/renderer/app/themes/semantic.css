@@ -43,8 +43,7 @@
   --ui-shadow-dialog: 0 34px 110px rgba(15, 23, 42, 0.22);
 }
 
-[data-theme="dark"],
-[data-theme="dark-emerald"] {
+[data-theme="dark"] {
   --ui-scrim: rgba(0, 0, 0, 0.42);
   --ui-shadow-elevated: 0 20px 56px rgba(0, 0, 0, 0.30);
   --ui-shadow-overlay: 0 22px 70px rgba(0, 0, 0, 0.48);

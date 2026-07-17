@@ -177,7 +177,7 @@ describe("WorkspaceFilesPanel", () => {
     expect(onOpenInBrowser).toHaveBeenCalledWith("file:///tmp/project/README.md");
 
     fireEvent.contextMenu(file, { clientX: 120, clientY: 80 });
-    await user.click(screen.getByRole("menuitem", { name: "在文件管理器中显示" }));
+    await user.click(screen.getByRole("menuitem", { name: "在 Finder 中显示" }));
     expect(showItemInFolder).toHaveBeenCalledWith("/tmp/project/README.md", false);
 
     fireEvent.contextMenu(file, { clientX: 120, clientY: 80 });

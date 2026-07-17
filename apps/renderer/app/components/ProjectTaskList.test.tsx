@@ -75,7 +75,7 @@ describe('ProjectTaskList', () => {
     flowState.setFlowPinned.mockReset();
   });
 
-  it('shows 暂无任务 only for projects that have no tasks', () => {
+  it('shows 暂无流程 only for projects that have no flows', () => {
     projectState.projects = [project('project-empty', 'ccdev'), project('project-used', 'squadflow')];
     flowState.flows = [flow('flow-1', '实现侧边栏', 'project-used')];
 
@@ -83,8 +83,8 @@ describe('ProjectTaskList', () => {
 
     const emptyGroup = screen.getByTestId('project-group-project-empty');
     const usedGroup = screen.getByTestId('project-group-project-used');
-    expect(within(emptyGroup).getByText('暂无任务')).toBeInTheDocument();
-    expect(within(usedGroup).queryByText('暂无任务')).not.toBeInTheDocument();
+    expect(within(emptyGroup).getByText('暂无流程')).toBeInTheDocument();
+    expect(within(usedGroup).queryByText('暂无流程')).not.toBeInTheDocument();
     expect(within(usedGroup).getByText('实现侧边栏')).toBeInTheDocument();
   });
 
@@ -107,8 +107,35 @@ describe('ProjectTaskList', () => {
     const onNewTask = vi.fn();
     renderList({ onNewTask });
 
-    fireEvent.click(screen.getByRole('button', { name: '新建Flow' }));
+    fireEvent.click(screen.getByRole('button', { name: '新建流程' }));
     expect(onNewTask).toHaveBeenCalledTimes(1);
+  });
+
+  it('restores saved organization and sorting without overwriting them with defaults', async () => {
+    localStorage.setItem('squadflow-sidebar-organization', 'chronological');
+    localStorage.setItem('squadflow-sidebar-sort', 'created');
+    projectState.projects = [project('project-a', 'A')];
+    flowState.flows = [
+      flow('flow-older', '较早创建', 'project-a', {
+        created_at: '2026-06-01T10:00:00.000Z',
+        updated_at: '2026-06-30T10:00:00.000Z',
+      }),
+      flow('flow-newer', '较晚创建', 'project-a', {
+        created_at: '2026-06-20T10:00:00.000Z',
+        updated_at: '2026-06-21T10:00:00.000Z',
+      }),
+    ];
+
+    renderList();
+
+    const chronologicalList = await screen.findByTestId('chronological-task-list');
+    await waitFor(() => {
+      expect(within(chronologicalList).getAllByRole('button', { name: /打开流程：/ })
+        .map((item) => item.getAttribute('aria-label')))
+        .toEqual(['打开流程：较晚创建', '打开流程：较早创建']);
+    });
+    expect(localStorage.getItem('squadflow-sidebar-organization')).toBe('chronological');
+    expect(localStorage.getItem('squadflow-sidebar-sort')).toBe('created');
   });
 
   it('separates pinned tasks from project task groups', () => {

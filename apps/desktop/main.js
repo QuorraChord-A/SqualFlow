@@ -40,7 +40,7 @@ const defaultBrowserHomeUrl = pathToFileURL(path.join(__dirname, "assets", "brow
 const browserHomeUrl = configuredBrowserHomeUrl || defaultBrowserHomeUrl;
 const readinessIntervalMs = 1000;
 const readinessTimeoutMs = 1200;
-const minimumLoadingMs = 2500;
+const minimumLoadingMs = 3500;
 let serviceStartAttempted = false;
 const packagedServiceProcesses = [];
 let mainWindow = null;
@@ -107,11 +107,11 @@ function attachWindowSizePersistence(win) {
 
 function desktopThemeBackground(theme) {
   if (theme === "light") return "#ffffff";
-  if (theme === "dark-emerald") return "#102c3d";
   return "#1d1d1f";
 }
 
 function desktopThemeSource(theme) {
+  if (theme === "system") return "system";
   return theme === "light" ? "light" : "dark";
 }
 
@@ -201,112 +201,8 @@ function launchUrl() {
   return url.toString();
 }
 
-function assetDataUrl(fileName) {
-  try {
-    const assetPath = path.join(__dirname, "assets", fileName);
-    const data = fs.readFileSync(assetPath).toString("base64");
-    return `data:image/png;base64,${data}`;
-  } catch {
-    return "";
-  }
-}
-
-function loadingPageUrl() {
-  const html = `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SquadFlow</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #07111d;
-      --line: rgba(148, 163, 184, 0.24);
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-      background:
-        radial-gradient(circle at 30% 18%, rgba(125, 211, 252, 0.16), transparent 34%),
-        radial-gradient(circle at 73% 66%, rgba(52, 211, 153, 0.15), transparent 32%),
-        linear-gradient(135deg, rgba(9, 24, 39, 0.92), rgba(19, 45, 56, 0.98)),
-        var(--bg);
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: -20%;
-      background:
-        linear-gradient(115deg, transparent 24%, rgba(27, 231, 194, 0.24) 45%, rgba(56, 189, 248, 0.16) 58%, transparent 76%);
-      filter: blur(24px);
-      opacity: 0.72;
-      animation: aurora 7s ease-in-out infinite alternate;
-    }
-    main {
-      position: relative;
-      display: grid;
-      justify-items: center;
-    }
-    .icon-shell {
-      width: 142px;
-      height: 142px;
-      padding: 0;
-      border-radius: 36px;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid var(--line);
-      box-shadow: 0 34px 110px rgba(0, 0, 0, 0.42), 0 0 56px rgba(52, 211, 153, 0.14);
-      backdrop-filter: blur(18px);
-      animation: breathe 2.7s ease-in-out infinite;
-      overflow: hidden;
-      position: relative;
-    }
-    .icon-shell::after {
-      content: "";
-      position: absolute;
-      inset: -30%;
-      background: linear-gradient(115deg, transparent 32%, rgba(255,255,255,0.24) 48%, transparent 64%);
-      transform: translateX(-80%) rotate(8deg);
-      animation: iconSweep 2.3s ease-in-out infinite;
-      pointer-events: none;
-    }
-    .app-icon {
-      width: 100%;
-      height: 100%;
-      display: block;
-      object-fit: cover;
-    }
-    @keyframes aurora {
-      0% { transform: translate3d(-3%, 2%, 0) rotate(-4deg); opacity: 0.52; }
-      100% { transform: translate3d(4%, -2%, 0) rotate(3deg); opacity: 0.82; }
-    }
-    @keyframes breathe {
-      0%, 100% { transform: translateY(0) scale(1); }
-      50% { transform: translateY(-3px) scale(1.015); }
-    }
-    @keyframes iconSweep {
-      0%, 30% { transform: translateX(-90%) rotate(8deg); opacity: 0; }
-      48% { opacity: 0.7; }
-      78%, 100% { transform: translateX(90%) rotate(8deg); opacity: 0; }
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <div class="icon-shell" aria-hidden="true">
-      <img class="app-icon" src="${assetDataUrl("icon-loading.png")}" alt="">
-    </div>
-  </main>
-  <script>
-    window.__setLaunchStatus = function() {};
-  </script>
-</body>
-</html>`;
-  return `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+function loadingPagePath() {
+  return path.join(__dirname, "assets", "loading.html");
 }
 
 function updateLoadingStatus(win, status) {
@@ -336,7 +232,7 @@ async function waitForServicesAndLoad(win) {
       backendReady,
       frontendReady,
       message: backendReady && frontendReady
-        ? "准备完成，正在进入新建 Flow。"
+        ? "准备完成，正在进入新建流程。"
         : launchState?.started
           ? "正在准备本地工作台，请稍候。"
           : launchState?.reason === "development_services_missing"
@@ -1513,11 +1409,12 @@ ipcMain.handle("desktop-browser:element-selected", async (event, payload) => {
   return selectedElement;
 });
 
-ipcMain.handle("desktop-shell:set-theme", (event, theme) => {
+ipcMain.handle("desktop-shell:set-theme", (event, theme, resolvedTheme) => {
   const win = requesterWindow(event);
   if (!win || win.isDestroyed()) return null;
   const themeName = String(theme || "");
-  const backgroundColor = desktopThemeBackground(themeName);
+  const resolvedThemeName = resolvedTheme === "light" ? "light" : "dark";
+  const backgroundColor = desktopThemeBackground(resolvedThemeName);
   nativeTheme.themeSource = desktopThemeSource(themeName);
   win.setBackgroundColor(backgroundColor);
   return { backgroundColor, themeSource: nativeTheme.themeSource };
@@ -1543,7 +1440,8 @@ ipcMain.handle("desktop-shell:show-item-in-folder", async (event, targetPath, is
 });
 
 function createWindow() {
-  nativeTheme.themeSource = desktopThemeSource("dark-emerald");
+  nativeTheme.themeSource = desktopThemeSource("system");
+  const initialTheme = nativeTheme.shouldUseDarkColors ? "dark" : "light";
   const savedWindowSize = readWindowSize();
   const win = new BrowserWindow({
     width: savedWindowSize?.width ?? defaultWindowSize.width,
@@ -1553,7 +1451,7 @@ function createWindow() {
     title: "SquadFlow",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 14 },
-    backgroundColor: desktopThemeBackground("dark-emerald"),
+    backgroundColor: desktopThemeBackground(initialTheme),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -1572,7 +1470,7 @@ function createWindow() {
     return { action: "deny" };
   });
 
-  win.loadURL(loadingPageUrl()).then(() => {
+  win.loadFile(loadingPagePath()).then(() => {
     void waitForServicesAndLoad(win);
   });
 

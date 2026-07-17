@@ -20,7 +20,7 @@ vi.mock("./TopBar", () => ({
 
 vi.mock("./Sidebar", () => ({
   default: ({ onNewTask }: { onNewTask: () => void }) => (
-    <button type="button" onClick={onNewTask}>新建Flow</button>
+    <button type="button" onClick={onNewTask}>新建流程</button>
   ),
 }));
 
@@ -147,7 +147,7 @@ describe("Layout new Flow navigation", () => {
     expect(screen.getByTestId("workbench-shell")).toBeVisible();
     expect(screen.getByTestId("leader-chat-panel")).toHaveTextContent("等待风险确认");
 
-    await user.click(screen.getByRole("button", { name: "新建Flow" }));
+    await user.click(screen.getByRole("button", { name: "新建流程" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("new-task-view")).toBeVisible();
@@ -155,7 +155,7 @@ describe("Layout new Flow navigation", () => {
       expect(screen.queryByTestId("flow-switch-loading-overlay")).not.toBeInTheDocument();
       expect(screen.queryByTestId("flow-side-panel")).not.toBeInTheDocument();
     });
-    expect(screen.getByTestId("top-bar")).toHaveTextContent("新建任务");
+    expect(screen.getByTestId("top-bar")).toHaveTextContent("新建流程");
     expect(useFlowStore.getState().selectedFlowId).toBeNull();
   });
 
@@ -171,7 +171,7 @@ describe("Layout new Flow navigation", () => {
 
     render(<Layout />);
     await waitFor(() => expect(fetchMock).toHaveBeenCalledWith("/api/flows/flow-delayed"));
-    await user.click(screen.getByRole("button", { name: "新建Flow" }));
+    await user.click(screen.getByRole("button", { name: "新建流程" }));
     expect(screen.getByTestId("new-task-view")).toBeVisible();
 
     resolveFlow({

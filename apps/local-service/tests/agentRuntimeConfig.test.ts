@@ -6,9 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const tempDirs: string[] = [];
 const originalConfigRoot = process.env.SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT;
 
-async function loadRuntimeConfigModule() {
+async function loadRuntimeConfigModule(setup?: (root: string) => void) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "agent-runtime-config-"));
   tempDirs.push(root);
+  setup?.(root);
   process.env.SQUADFLOW_AGENT_RUNTIME_CONFIG_ROOT = root;
   vi.resetModules();
   return import("../src/config/agentRuntimeConfig.js");
@@ -39,6 +40,53 @@ describe("agent runtime config storage", () => {
     ]);
     expect(snapshot.configs).toEqual([]);
     expect(snapshot.roles.every((role) => role.configId === "" && role.modelId === "")).toBe(true);
+  });
+
+  it("removes the exact legacy seeded provider without deleting user-created configs", async () => {
+    const { readAgentRuntimeConfigSnapshot } = await loadRuntimeConfigModule((root) => {
+      fs.mkdirSync(path.join(root, "configs"), { recursive: true });
+      fs.writeFileSync(path.join(root, "index.json"), `${JSON.stringify({
+        version: 1,
+        roles: {
+          leader: { enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
+          coder: { enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
+          research: { enabled: false, configId: "", modelId: "" },
+          verify: { enabled: true, configId: "", modelId: "" },
+          codereview: { enabled: true, configId: "", modelId: "" },
+        },
+      }, null, 2)}\n`);
+      fs.writeFileSync(path.join(root, "configs", "default-agent-sdk.json"), `${JSON.stringify({
+        id: "default-agent-sdk",
+        fileName: "default-agent-sdk.json",
+        name: "项目claudecode配置",
+        sdk: "claudecode",
+        authMode: "apiKey",
+        baseUrl: "",
+        apiKey: "",
+        models: [
+          { id: "mimo-v25", name: "mimo-v2.5", contextWindowK: 200 },
+          { id: "opus", name: "opus", contextWindowK: 200 },
+        ],
+      }, null, 2)}\n`);
+      fs.writeFileSync(path.join(root, "configs", "user-config.json"), `${JSON.stringify({
+        id: "user-config",
+        fileName: "user-config.json",
+        name: "我的配置",
+        sdk: "codex",
+        authMode: "inherited",
+        baseUrl: "",
+        apiKey: "",
+        models: [{ id: "gpt-5", name: "gpt-5" }],
+      }, null, 2)}\n`);
+    });
+
+    const snapshot = await readAgentRuntimeConfigSnapshot();
+
+    expect(snapshot.configs.map((config) => config.id)).toEqual(["user-config"]);
+    expect(snapshot.roles.find((role) => role.role === "leader")).toMatchObject({
+      configId: "user-config",
+      modelId: "gpt-5",
+    });
   });
 
   it("uses a UUID config id and filename for newly created runtime configs", async () => {

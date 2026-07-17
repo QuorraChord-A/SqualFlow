@@ -75,7 +75,7 @@ declare global {
   interface Window {
     squadflowDesktopBrowser?: DesktopBrowserBridge;
     squadflowDesktopShell?: {
-      setTheme?: (theme: string) => Promise<{ backgroundColor: string; themeSource?: string } | null>;
+      setTheme?: (theme: string, resolvedTheme?: string) => Promise<{ backgroundColor: string; themeSource?: string } | null>;
       toggleWindowZoom?: () => Promise<{ maximized: boolean } | null>;
       showItemInFolder?: (targetPath: string, isDirectory: boolean) => Promise<unknown>;
     };

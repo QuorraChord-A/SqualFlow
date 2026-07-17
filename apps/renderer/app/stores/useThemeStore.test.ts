@@ -45,7 +45,6 @@ describe('useThemeStore', () => {
       'system',
       'dark',
       'light',
-      'dark-emerald',
     ]);
   });
 
@@ -71,14 +70,41 @@ describe('useThemeStore', () => {
   });
 
   it('keeps an explicit theme when the OS theme changes', () => {
-    useThemeStore.getState().setTheme('dark-emerald');
+    useThemeStore.getState().setTheme('dark');
     emitSystemThemeChange(false);
 
     expect(useThemeStore.getState()).toEqual(expect.objectContaining({
-      theme: 'dark-emerald',
-      resolvedTheme: 'dark-emerald',
+      theme: 'dark',
+      resolvedTheme: 'dark',
     }));
-    expect(document.documentElement.dataset.theme).toBe('dark-emerald');
-    expect(localStorage.getItem('squadflow-theme')).toBe('dark-emerald');
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(localStorage.getItem('squadflow-theme')).toBe('dark');
+  });
+
+  it('returns from an explicit light theme to the current system theme', () => {
+    systemPrefersDark = true;
+    useThemeStore.getState().setTheme('light');
+
+    useThemeStore.getState().setTheme('system');
+
+    expect(useThemeStore.getState()).toEqual(expect.objectContaining({
+      theme: 'system',
+      resolvedTheme: 'dark',
+    }));
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(document.documentElement.dataset.themePreference).toBe('system');
+    expect(localStorage.getItem('squadflow-theme')).toBe('system');
+  });
+
+  it('falls back to the system theme when the removed aurora preference is stored', () => {
+    localStorage.setItem('squadflow-theme', 'dark-emerald');
+
+    initTheme();
+
+    expect(useThemeStore.getState()).toEqual(expect.objectContaining({
+      theme: 'system',
+      resolvedTheme: 'light',
+    }));
+    expect(localStorage.getItem('squadflow-theme')).toBe('system');
   });
 });

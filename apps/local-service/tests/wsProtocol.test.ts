@@ -1949,6 +1949,66 @@ describe("Fastify app and websocket gateway", () => {
     );
   });
 
+  it("starts a fresh Leader runtime session when retrying a failed flow", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-retry-failed-leader",
+      workspaceId: "ws-default",
+      name: "Retry Failed Leader",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const failedLeader = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: null,
+      taskId: null,
+      expertId: "exp-leader",
+      sessionId: "sdk-session-that-never-started",
+      displayName: "Leader",
+      status: "failed",
+    });
+    store.updateFlow(flow.id, { leaderSessionId: failedLeader.sessionId });
+    const capturedTurns: Array<{ leaderSessionId?: string; resumeSessionId?: string }> = [];
+    const connection: WsConnection = {
+      clientId: "client-retry",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(),
+      sessionHistoryLoader: async () => [],
+      leaderRuntime: {
+        runLeaderTurn: async (turn) => {
+          capturedTurns.push({
+            leaderSessionId: turn.leaderSessionId,
+            resumeSessionId: turn.resumeSessionId,
+          });
+        },
+      },
+      send: async () => {},
+    };
+
+    await handleWsClientMessage(JSON.stringify({
+      data: {
+        type: "flow:message",
+        flow_id: flow.id,
+        content: "重新开始",
+        client_message_id: "client-msg-retry",
+      },
+    }), connection);
+
+    const restartedLeader = store.getAgentSession(failedLeader.id)!;
+    expect(restartedLeader.sessionId).not.toBe("sdk-session-that-never-started");
+    expect(restartedLeader.status).toBe("idle");
+    expect(store.getFlow(flow.id)?.leaderSessionId).toBe(restartedLeader.sessionId);
+    expect(capturedTurns).toEqual([{
+      leaderSessionId: restartedLeader.sessionId,
+      resumeSessionId: undefined,
+    }]);
+  });
+
   it("rejects flow messages when the flow leader model is not configured", async () => {
     const store = createStore(":memory:");
     store.migrate();

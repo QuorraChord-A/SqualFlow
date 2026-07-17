@@ -12,7 +12,6 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
-  Plus,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
@@ -84,6 +83,7 @@ export default function ProjectTaskList({
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [organization, setOrganization] = useState<SidebarOrganization>('project');
   const [sort, setSort] = useState<SidebarSort>('updated');
+  const [preferencesHydrated, setPreferencesHydrated] = useState(false);
   const previousExpandedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -93,23 +93,18 @@ export default function ProjectTaskList({
       'project',
     ));
     setSort(readStoredPreference(SORT_STORAGE_KEY, ['created', 'updated'] as const, 'updated'));
+    setPreferencesHydrated(true);
   }, []);
 
   useEffect(() => {
+    if (!preferencesHydrated) return;
     try {
       localStorage.setItem(ORGANIZATION_STORAGE_KEY, organization);
-    } catch {
-      // Keep the current session preference when storage is unavailable.
-    }
-  }, [organization]);
-
-  useEffect(() => {
-    try {
       localStorage.setItem(SORT_STORAGE_KEY, sort);
     } catch {
       // Keep the current session preference when storage is unavailable.
     }
-  }, [sort]);
+  }, [organization, preferencesHydrated, sort]);
 
   const defaultProject = useMemo(
     () => projects.find((project) => project.is_default) ?? null,
@@ -211,12 +206,14 @@ export default function ProjectTaskList({
       key={flow.id}
       flow={flow}
       projectName={projects.find((project) => project.id === flow.project_id)?.name ?? (flow.project_id ? null : '默认项目')}
+      projectPath={projects.find((project) => project.id === flow.project_id)?.local_path ?? (flow.project_id ? null : defaultProject?.local_path)}
       selected={selectedFlowId === flow.id}
       onClick={() => onSelectTask(flow)}
       onAbortFlow={onAbortFlow}
       onEditFlow={onEditFlow}
       onDeleteFlow={onDeleteFlow}
       onTogglePinned={(target) => void setFlowPinned(target.id, !target.is_pinned)}
+      displayTimestamp={sort === 'created' ? flow.created_at : flow.updated_at}
     />
   );
 
@@ -318,10 +315,9 @@ export default function ProjectTaskList({
         <button
           type="button"
           onClick={onNewTask}
-          className="flex w-full items-center gap-2 rounded-lg bg-sidebar-accent px-3 py-2 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent/80"
+          className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-sidebar-foreground/35 bg-sidebar px-3 text-sm font-semibold text-sidebar-foreground shadow-sm ring-1 ring-inset ring-sidebar-foreground/5 transition-[background-color,border-color,transform,box-shadow] hover:-translate-y-px hover:border-sidebar-foreground/55 hover:bg-sidebar-accent hover:shadow-md active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
         >
-          <Plus className="size-4" />
-          新建Flow
+          新建流程
         </button>
       </div>
 
@@ -333,7 +329,7 @@ export default function ProjectTaskList({
             </div>
             <div>
               {pinnedFlows.length === 0
-                ? <div className="px-2.5 py-1 text-xs text-muted-foreground/70">暂无置顶任务</div>
+                ? <div className="px-2.5 py-1 text-xs text-muted-foreground/70">暂无置顶流程</div>
                 : pinnedFlows.map(renderTask)}
             </div>
           </section>
@@ -349,7 +345,7 @@ export default function ProjectTaskList({
             ) : organization === 'chronological' ? (
               <div data-testid="chronological-task-list">
                 {sortTasks(regularFlows, sort).length === 0
-                  ? <div className="px-2.5 py-2 text-xs text-muted-foreground">暂无任务</div>
+                  ? <div className="px-2.5 py-2 text-xs text-muted-foreground">暂无流程</div>
                   : sortTasks(regularFlows, sort).map(renderTask)}
               </div>
             ) : (
@@ -416,7 +412,7 @@ export default function ProjectTaskList({
                           <div className="ml-3 border-l border-sidebar-border pl-1.5">
                           {projectFlows.length === 0 ? (
                             <div className="px-3 py-2 text-xs text-muted-foreground">
-                              {allProjectFlows.length > 0 ? '任务已置顶' : '暂无任务'}
+                              {allProjectFlows.length > 0 ? '流程已置顶' : '暂无流程'}
                             </div>
                           ) : (
                             projectFlows.map(renderTask)

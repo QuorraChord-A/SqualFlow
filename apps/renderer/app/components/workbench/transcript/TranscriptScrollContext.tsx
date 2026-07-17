@@ -1,5 +1,5 @@
 import type React from "react";
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { useStickToBottomContext } from "use-stick-to-bottom";
 
@@ -15,11 +15,71 @@ const TranscriptScrollContext = createContext<TranscriptScrollContextValue>({
   registerThread: () => {},
 });
 
-export function TranscriptScrollProvider({ children }: { children: React.ReactNode }) {
+export type TranscriptScrollMemory = {
+  anchorId: string | null;
+  anchorOffset: number;
+  scrollTop: number;
+  followBottom: boolean;
+};
+
+const TRANSCRIPT_ANCHOR_SELECTOR = "[data-transcript-anchor-id]";
+const BOTTOM_THRESHOLD_PX = 32;
+
+function transcriptAnchors(scrollElement: HTMLElement) {
+  return Array.from(scrollElement.querySelectorAll<HTMLElement>(TRANSCRIPT_ANCHOR_SELECTOR));
+}
+
+export function captureTranscriptScrollMemory(scrollElement: HTMLElement): TranscriptScrollMemory {
+  const viewport = scrollElement.getBoundingClientRect();
+  const anchor = transcriptAnchors(scrollElement).find((element) => {
+    const rect = element.getBoundingClientRect();
+    return rect.bottom > viewport.top + 0.5 && rect.top < viewport.bottom - 0.5;
+  });
+  const anchorRect = anchor?.getBoundingClientRect();
+  return {
+    anchorId: anchor?.dataset.transcriptAnchorId ?? null,
+    anchorOffset: anchorRect ? anchorRect.top - viewport.top : 0,
+    scrollTop: scrollElement.scrollTop,
+    followBottom: scrollElement.scrollHeight - scrollElement.scrollTop - scrollElement.clientHeight <= BOTTOM_THRESHOLD_PX,
+  };
+}
+
+export function restoreTranscriptScrollMemory(scrollElement: HTMLElement, memory: TranscriptScrollMemory): boolean {
+  if (!memory.anchorId) {
+    scrollElement.scrollTop = memory.scrollTop;
+    return false;
+  }
+  const anchor = transcriptAnchors(scrollElement).find(
+    (element) => element.dataset.transcriptAnchorId === memory.anchorId,
+  );
+  if (!anchor) {
+    scrollElement.scrollTop = memory.scrollTop;
+    return false;
+  }
+  const viewport = scrollElement.getBoundingClientRect();
+  const currentOffset = anchor.getBoundingClientRect().top - viewport.top;
+  scrollElement.scrollTop += currentOffset - memory.anchorOffset;
+  return true;
+}
+
+export function TranscriptScrollProvider({
+  children,
+  flowId = null,
+  isLoadingHistory = false,
+}: {
+  children: React.ReactNode;
+  flowId?: string | null;
+  isLoadingHistory?: boolean;
+}) {
   const { scrollRef, scrollToBottom, stopScroll = () => {} } = useStickToBottomContext();
   const [thread, setThread] = useState<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
+  const flowScrollMemoryRef = useRef(new Map<string, TranscriptScrollMemory>());
+  const loadingFlowIdRef = useRef<string | null>(null);
+  const loadedFlowIdRef = useRef<string | null>(null);
+  const restoringFlowRef = useRef(false);
+  const restoreFrameRef = useRef<number | null>(null);
 
   const restoreAnchor = useCallback(() => {
     const anchor = anchorRef.current;
@@ -54,6 +114,54 @@ export function TranscriptScrollProvider({ children }: { children: React.ReactNo
     };
   }, [restoreAnchor, scrollRef, thread]);
 
+  useEffect(() => {
+    const scrollElement = scrollRef?.current;
+    if (!scrollElement || !thread || !flowId) return;
+    const remember = () => {
+      if (restoringFlowRef.current || loadedFlowIdRef.current !== flowId) return;
+      flowScrollMemoryRef.current.set(flowId, captureTranscriptScrollMemory(scrollElement));
+    };
+    scrollElement.addEventListener("scroll", remember, { passive: true });
+    return () => scrollElement.removeEventListener("scroll", remember);
+  }, [flowId, scrollRef, thread]);
+
+  useLayoutEffect(() => {
+    if (!flowId) {
+      loadedFlowIdRef.current = null;
+      loadingFlowIdRef.current = null;
+      return;
+    }
+    if (isLoadingHistory) {
+      loadedFlowIdRef.current = null;
+      loadingFlowIdRef.current = flowId;
+      return;
+    }
+    if (loadingFlowIdRef.current !== flowId) return;
+    loadingFlowIdRef.current = null;
+    if (restoreFrameRef.current !== null) window.cancelAnimationFrame(restoreFrameRef.current);
+    restoreFrameRef.current = window.requestAnimationFrame(() => {
+      restoreFrameRef.current = null;
+      const scrollElement = scrollRef?.current;
+      const memory = flowScrollMemoryRef.current.get(flowId);
+      restoringFlowRef.current = true;
+      if (!scrollElement || !memory || memory.followBottom) {
+        scrollToBottom({ animation: "instant" });
+      } else {
+        restoreTranscriptScrollMemory(scrollElement, memory);
+      }
+      loadedFlowIdRef.current = flowId;
+      window.requestAnimationFrame(() => {
+        restoringFlowRef.current = false;
+      });
+    });
+    return () => {
+      if (restoreFrameRef.current !== null) {
+        window.cancelAnimationFrame(restoreFrameRef.current);
+        restoreFrameRef.current = null;
+      }
+    };
+  }, [flowId, isLoadingHistory, scrollRef, scrollToBottom]);
+
   const toggle = useCallback(<T extends HTMLElement>(event: React.MouseEvent<T>, change: () => void) => {
     const element = event.currentTarget;
     anchorRef.current = { element, top: element.getBoundingClientRect().top };
@@ -65,8 +173,16 @@ export function TranscriptScrollProvider({ children }: { children: React.ReactNo
   const follow = useCallback(() => {
     anchorRef.current = null;
     programmaticScrollTopRef.current = null;
+    if (flowId) {
+      flowScrollMemoryRef.current.set(flowId, {
+        anchorId: null,
+        anchorOffset: 0,
+        scrollTop: scrollRef?.current?.scrollTop ?? 0,
+        followBottom: true,
+      });
+    }
     scrollToBottom({ animation: "instant" });
-  }, [scrollToBottom]);
+  }, [flowId, scrollRef, scrollToBottom]);
 
   return (
     <TranscriptScrollContext.Provider value={{ toggle, follow, registerThread: setThread }}>

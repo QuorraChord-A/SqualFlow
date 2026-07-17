@@ -1,7 +1,8 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AppSettingsDialog from "./AppSettingsDialog";
+import { useThemeStore } from "../stores/useThemeStore";
 
 const apiMocks = vi.hoisted(() => ({
   fetchAgentRuntimeConfig: vi.fn(),
@@ -66,6 +67,15 @@ describe("AppSettingsDialog", () => {
   beforeEach(() => {
     Object.values(apiMocks).forEach((mock) => mock.mockReset());
     apiMocks.fetchExperts.mockResolvedValue([]);
+    useThemeStore.setState({ theme: "system", resolvedTheme: "dark" });
+  });
+
+  it("shows the selected theme in Chinese instead of its internal value", () => {
+    render(<AppSettingsDialog open onOpenChange={vi.fn()} />);
+
+    const themeSelect = screen.getByRole("combobox");
+    expect(themeSelect).toHaveTextContent("跟随系统");
+    expect(themeSelect).not.toHaveTextContent("system");
   });
 
   it("does not render role switches with initial defaults while agent settings are loading", async () => {
@@ -87,6 +97,31 @@ describe("AppSettingsDialog", () => {
     });
     expect(screen.getByText("调研 Expert")).toBeInTheDocument();
     expect(screen.getByLabelText("调研 Expert 状态")).toBeChecked();
+  });
+
+  it("opens the full system prompt as a styled Markdown document", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
+    apiMocks.fetchExperts.mockResolvedValue([{
+      id: "exp-leader",
+      role: "leader",
+      name: "Leader",
+      system_prompt: "# Leader Prompt\n\n- 保持任务边界清晰。\n- 在关键节点向用户追问。\n\n## 工作方式\n\n先理解目标，再拆解计划，最后汇总结果。\n\n### 约束\n\n保持上下文清晰，不做无关修改，并在完成后给出可验证结论。",
+      builtin_tools: [],
+      mcp_tools: [],
+      created_at: "2026-01-01T00:00:00.000Z",
+      updated_at: "2026-01-01T00:00:00.000Z",
+    }]);
+
+    render(<AppSettingsDialog open onOpenChange={vi.fn()} initialSection="agents" />);
+
+    const expandButton = await screen.findByRole("button", { name: "展开查看全文" });
+    expect(expandButton).toHaveClass("border");
+    await user.click(expandButton);
+
+    expect(screen.getByRole("heading", { name: "Leader · system-prompt.md" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Leader Prompt" })).toBeInTheDocument();
+    expect(screen.getByText("保持任务边界清晰。")).toBeInTheDocument();
   });
 
   it("binds a role to a provider model through the grouped picker", async () => {
@@ -254,6 +289,33 @@ describe("AppSettingsDialog", () => {
     expect(screen.getByText("/tmp/.claude.json")).toBeInTheDocument();
   });
 
+  it("orders provider models descending and inserts a new model on the first row", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
+
+    render(
+      <AppSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        initialSection="agents"
+        initialAgentTab="runtime_configs"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
+    });
+
+    const modelValues = () => screen.getAllByText("模型名称").map((label) => (
+      within(label.closest("label") as HTMLLabelElement).getByRole("textbox") as HTMLInputElement
+    ).value);
+
+    expect(modelValues()).toEqual(["opus", "mimo-v2.5"]);
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    expect(modelValues()).toEqual(["", "opus", "mimo-v2.5"]);
+  });
+
   it("refreshes and tests models for Codex local auth configs", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
@@ -312,9 +374,10 @@ describe("AppSettingsDialog", () => {
     expect(screen.getByDisplayValue("gpt-5.5")).toBeInTheDocument();
     expect(screen.getByText(/已刷新 2 个 Codex 可用模型/)).toBeInTheDocument();
 
-    const testButtons = screen.getAllByRole("button", { name: "测试" });
-    expect(testButtons.some((button) => !button.hasAttribute("disabled"))).toBe(true);
-    await user.click(testButtons.at(-1)!);
+    const latestModelInput = screen.getByDisplayValue("gpt-5.5");
+    const latestModelRow = latestModelInput.closest("div.grid");
+    expect(latestModelRow).not.toBeNull();
+    await user.click(within(latestModelRow as HTMLElement).getByRole("button", { name: "测试" }));
 
     await waitFor(() => {
       expect(apiMocks.testAgentRuntimeConnection).toHaveBeenCalledWith("codex-local", {

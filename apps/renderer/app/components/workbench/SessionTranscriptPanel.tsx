@@ -506,12 +506,14 @@ function imageAttachmentLabel(image: MessageImageAttachment, index: number) {
 }
 
 function UserMessage({
+  anchorId,
   text,
   createdAt,
   browserAttachments = [],
   imageAttachments = [],
   statusLabel = null,
 }: {
+  anchorId: string;
   text: string;
   createdAt?: unknown;
   browserAttachments?: BrowserElementAttachment[];
@@ -566,7 +568,7 @@ function UserMessage({
   }, [text]);
 
   return (
-    <div data-testid="chat-message-user" className={styles.userRow}>
+    <div data-testid="chat-message-user" data-transcript-anchor-id={anchorId} className={styles.userRow}>
       <div className={styles.userMessageGroup}>
         {displayImageAttachments.length > 0 || browserAttachments.length > 0 ? (
           <div className={styles.browserCommentThumbs}>
@@ -915,7 +917,6 @@ function SessionTranscriptContent({
   statusDividerAt?: string | null;
   workspaceRootPath?: string | null;
 }) {
-  const wasLoadingRef = useRef(false);
   const lastFollowRequestKeyRef = useRef(followRequestKey);
   const { follow, registerThread } = useTranscriptScroll();
   const { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByUserTurnId } = useCardMaps(
@@ -1044,13 +1045,6 @@ function SessionTranscriptContent({
     isAwaitingResponse && !durablePlanFallback && !activeAssistantMessage && lastVisibleMessage?.role !== "assistant";
 
   useEffect(() => {
-    if (wasLoadingRef.current && !isLoadingHistory) {
-      follow();
-    }
-    wasLoadingRef.current = isLoadingHistory;
-  }, [follow, isLoadingHistory]);
-
-  useEffect(() => {
     if (followRequestKey === undefined || followRequestKey === lastFollowRequestKeyRef.current) return;
     lastFollowRequestKeyRef.current = followRequestKey;
     follow();
@@ -1129,6 +1123,7 @@ function SessionTranscriptContent({
               return (
                 <UserMessage
                   key={msg.id}
+                  anchorId={msg.id}
                   text={messageText(msg)}
                   createdAt={messageTimestampValue(msg)}
                   browserAttachments={browserAttachmentsFromMessage(msg)}
@@ -1171,6 +1166,7 @@ function SessionTranscriptContent({
               return (
                 <UserMessage
                   key={msg.id}
+                  anchorId={msg.id}
                   text={messageText(msg)}
                   createdAt={messageTimestampValue(msg)}
                   browserAttachments={browserAttachmentsFromMessage(msg)}
@@ -1544,7 +1540,7 @@ export default function SessionTranscriptPanel({
       resize="instant"
       initial="instant"
     >
-      <TranscriptScrollProvider>
+      <TranscriptScrollProvider flowId={flowId} isLoadingHistory={isLoadingHistory}>
         <SessionTranscriptContent
         messages={transcript.messages}
         historyBoundaries={transcript.historyBoundaries}
