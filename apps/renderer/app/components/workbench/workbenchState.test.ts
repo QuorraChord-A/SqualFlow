@@ -8,12 +8,15 @@ import {
   hasWorkbenchContent,
   openBrowserWorkbenchTab,
   openDynamicWorkbenchTab,
+  openOrchestrationPlanWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   openWorkspaceFilesWorkbenchTab,
   parseRightPanelState,
   rightPanelStorageKey,
   serializeRightPanelState,
+  syncOrchestrationPlanWorkbenchTab,
 } from "./workbenchState";
+import { orchestrationPlanFixture } from "../orchestration/orchestrationTestFixture";
 
 function agentSession(id: string, expertId: string): AgentSession {
   return {
@@ -242,6 +245,76 @@ describe("workbenchState", () => {
     expect(state.tab).toBe("dynamic");
     expect(state.activeDynamicTabId).toBe("browser");
     expect(state.dynamicTabs).toEqual([{ type: "browser", title: "浏览器" }]);
+  });
+
+  it("reuses one plan tab when another orchestration plan is opened", () => {
+    const first = orchestrationPlanFixture;
+    const second = {
+      ...orchestrationPlanFixture,
+      plan_id: "plan-2",
+      revision: {
+        ...orchestrationPlanFixture.revision,
+        plan_revision_id: "revision-plan-2",
+        title: "第二份计划",
+      },
+    };
+    let state = openOrchestrationPlanWorkbenchTab(createInitialRightPanelState(), first);
+    state = openOrchestrationPlanWorkbenchTab(state, second);
+
+    expect(state.dynamicTabs.filter((tab) => tab.type === "orchestration_plan")).toEqual([
+      expect.objectContaining({ plan_id: "plan-2", plan_revision_id: "revision-plan-2", title: "第二份计划" }),
+    ]);
+    expect(state.activeDynamicTabId).toBe("orchestration_plan:revision-plan-2");
+  });
+
+  it("moves an open plan tab to a newly submitted revision of the same plan", () => {
+    const revisionTwo = {
+      ...orchestrationPlanFixture,
+      revision: {
+        ...orchestrationPlanFixture.revision,
+        plan_revision_id: "revision-2",
+        revision_number: 2,
+        title: "成员邀请编排计划 v2",
+      },
+    };
+    const state = openOrchestrationPlanWorkbenchTab(createInitialRightPanelState(), orchestrationPlanFixture);
+    const next = syncOrchestrationPlanWorkbenchTab(state, revisionTwo);
+
+    expect(next.activeDynamicTabId).toBe("orchestration_plan:revision-2");
+    expect(next.dynamicTabs).toEqual([
+      expect.objectContaining({ plan_revision_id: "revision-2", title: "成员邀请编排计划 v2" }),
+    ]);
+  });
+
+  it("restores legacy persisted state with only the active plan tab", () => {
+    const restored = parseRightPanelState(JSON.stringify({
+      isOpen: true,
+      autoFollowAgentDispatch: true,
+      state: {
+        tab: "dynamic",
+        activeDynamicTabId: "orchestration_plan:revision-2",
+        activeWorkspaceFilePath: null,
+        collapsedSections: { team: false, artifacts: false, tasks: false },
+        isMaximized: false,
+        dynamicTabs: [
+          {
+            type: "orchestration_plan",
+            plan_revision_id: "revision-1",
+            title: "计划 v1",
+          },
+          {
+            type: "orchestration_plan",
+            plan_revision_id: "revision-2",
+            title: "计划 v2",
+          },
+        ],
+      },
+    }));
+
+    expect(restored?.state.activeDynamicTabId).toBe("orchestration_plan:revision-2");
+    expect(restored?.state.dynamicTabs).toEqual([
+      expect.objectContaining({ plan_revision_id: "revision-2", title: "计划 v2" }),
+    ]);
   });
 
   it("serializes and restores Flow Expert tabs", () => {

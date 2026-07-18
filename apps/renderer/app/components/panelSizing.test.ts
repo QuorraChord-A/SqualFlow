@@ -5,6 +5,7 @@ import {
   collapseLeftPanelWidths,
   getMaxLeftPanelWidth,
   getMinimumChatWidth,
+  DEFAULT_RIGHT_PANEL_WIDTH,
   MIN_LEFT_PANEL_WIDTH,
   MIN_RIGHT_PANEL_WIDTH,
   normalizePanelWidths,
@@ -13,6 +14,10 @@ import {
 } from "./panelSizing";
 
 describe("panel sizing", () => {
+  it("starts the right workbench wide enough for structured reviews", () => {
+    expect(DEFAULT_RIGHT_PANEL_WIDTH).toBe(720);
+  });
+
   it("caps the left panel at thirty percent while preserving chat space", () => {
     expect(getMaxLeftPanelWidth(1440)).toBe(432);
     expect(clampLeftPanelWidth(600, 1440, 620)).toBe(388);

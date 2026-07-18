@@ -527,9 +527,11 @@ function DynamicTabContent({
     );
   }
   if (tab.type === "orchestration_plan") {
-    const plan = workbench.orchestration_plan?.revision.plan_revision_id === tab.plan_revision_id
-      ? workbench.orchestration_plan
-      : tab.plan ?? workbench.orchestration_plan;
+    const currentPlan = workbench.orchestration_plan;
+    const tabPlanId = tab.plan_id ?? tab.plan?.plan_id;
+    const plan = currentPlan && currentPlan.plan_id === tabPlanId
+      ? currentPlan
+      : tab.plan ?? currentPlan;
     if (!plan) return null;
     return <OrchestrationPlanPanel flowId={flowId ?? plan.flow_id} initialPlan={plan} onApprove={(target) => {
       if (!target.approval) return;

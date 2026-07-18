@@ -3,7 +3,7 @@ export const MIN_CHAT_WIDTH_RATIO = 0.3;
 export const MIN_LEFT_PANEL_WIDTH = 208;
 export const MAX_LEFT_PANEL_WIDTH_RATIO = 0.3;
 export const MIN_RIGHT_PANEL_WIDTH = 320;
-export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
+export const DEFAULT_RIGHT_PANEL_WIDTH = 720;
 export const PANEL_DRAG_COLLAPSE_RATIO = 0.3;
 
 function clamp(value: number, min: number, max: number) {

@@ -84,12 +84,12 @@ describe("WorkspaceFilesPanel", () => {
     expect(await screen.findByRole("treeitem", { name: "展开目录 src" })).toBeInTheDocument();
     expect(screen.getByTestId("workspace-files-shell")).toHaveAttribute("data-tree-visible", "true");
     expect(screen.getByTestId("workspace-file-preview-pane")).toBeInTheDocument();
-    expect(screen.getByTestId("workspace-file-preview-pane")).toHaveStyle({ minWidth: "192px" });
+    expect(screen.getByTestId("workspace-file-preview-pane")).toHaveStyle({ minWidth: "280px" });
     expect(screen.getByTestId("workspace-file-tree")).toBeInTheDocument();
     expect(screen.getByTestId("workspace-file-tree-drawer")).toHaveStyle({
       width: "320px",
-      minWidth: "192px",
-      maxWidth: "min(60%, calc(100% - 192px))",
+      minWidth: "220px",
+      maxWidth: "min(60%, calc(100% - 280px))",
     });
     expect(screen.getByRole("button", { name: "隐藏文件列表" })).toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "当前文件路径" })).toHaveTextContent("project");
@@ -236,8 +236,8 @@ describe("WorkspaceFilesPanel", () => {
     expect(screen.getByTestId("workspace-file-tree")).toBeInTheDocument();
     expect(screen.getByTestId("workspace-file-tree-drawer")).toHaveStyle({
       width: "320px",
-      minWidth: "192px",
-      maxWidth: "min(60%, calc(100% - 192px))",
+      minWidth: "220px",
+      maxWidth: "min(60%, calc(100% - 280px))",
     });
   });
 
@@ -380,12 +380,12 @@ describe("WorkspaceFilesPanel", () => {
     expect(screen.queryByTestId("mock-file-preview")).not.toBeInTheDocument();
     expect(screen.getByText("从工作区目录树中选择文件")).toBeInTheDocument();
     expect(screen.getByTestId("workspace-file-preview-pane")).toBeInTheDocument();
-    expect(screen.getByTestId("workspace-file-preview-pane")).toHaveStyle({ minWidth: "192px" });
+    expect(screen.getByTestId("workspace-file-preview-pane")).toHaveStyle({ minWidth: "280px" });
     expect(screen.getByTestId("workspace-file-tree")).toBeInTheDocument();
     expect(screen.getByTestId("workspace-file-tree-drawer")).toHaveStyle({
       width: "320px",
-      minWidth: "192px",
-      maxWidth: "min(60%, calc(100% - 192px))",
+      minWidth: "220px",
+      maxWidth: "min(60%, calc(100% - 280px))",
     });
 
     await user.click(screen.getByRole("button", { name: "隐藏文件列表" }));

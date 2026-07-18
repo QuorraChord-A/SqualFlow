@@ -111,8 +111,8 @@ function fileIcon(filePath: string): ReactNode {
   return <File className="size-4 shrink-0 text-muted-foreground" />;
 }
 
-const MIN_TREE_WIDTH = 192;
-const MIN_FILE_PREVIEW_WIDTH = MIN_TREE_WIDTH;
+const MIN_TREE_WIDTH = 220;
+const MIN_FILE_PREVIEW_WIDTH = 280;
 const MAX_TREE_WIDTH_RATIO = 0.6;
 
 function treeMinWidth(containerWidth = 0) {

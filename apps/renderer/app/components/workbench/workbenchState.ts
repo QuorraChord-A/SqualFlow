@@ -7,7 +7,7 @@ export type DynamicWorkbenchTab =
   | { type: "expert_chat"; flow_expert_id: string; agent_session_id?: string | null; title: string }
   | { type: "spec_preview"; spec_revision_id: string; title: string }
   | { type: "artifact_preview"; artifact_id: string; title: string }
-  | { type: "orchestration_plan"; plan_revision_id: string; title: string; plan?: OrchestrationPlanView }
+  | { type: "orchestration_plan"; plan_id?: string; plan_revision_id: string; title: string; plan?: OrchestrationPlanView }
   | { type: "workspace_file_preview"; path: string | null; title: string; tabId?: string }
   | { type: "browser"; title: string };
 
@@ -93,10 +93,19 @@ export function parseRightPanelState(raw: string | null): PersistedRightPanelSta
     if (!candidate || typeof candidate !== "object") return null;
 
     const tab = candidate.tab === "dynamic" || candidate.tab === "files" || candidate.tab === "review" ? candidate.tab : "overview";
-    const parsedDynamicTabs = Array.isArray(candidate.dynamicTabs)
+    const parsedDynamicTabsBeforePlanDedupe = Array.isArray(candidate.dynamicTabs)
       ? candidate.dynamicTabs.filter(isDynamicWorkbenchTab)
         .map((item) => isWorkspaceFileWorkbenchTab(item) ? normalizeWorkspaceFileTab(item) : item)
       : [];
+    const activePlanTab = parsedDynamicTabsBeforePlanDedupe.find(
+      (item) => item.type === "orchestration_plan" && dynamicWorkbenchTabId(item) === candidate.activeDynamicTabId,
+    );
+    const latestPlanTab = parsedDynamicTabsBeforePlanDedupe.filter((item) => item.type === "orchestration_plan").at(-1);
+    const retainedPlanTab = activePlanTab ?? latestPlanTab;
+    const parsedDynamicTabs = [
+      ...parsedDynamicTabsBeforePlanDedupe.filter((item) => item.type !== "orchestration_plan"),
+      ...(retainedPlanTab ? [retainedPlanTab] : []),
+    ];
     const legacyWorkspaceFileTabs = parsedDynamicTabs.filter(isWorkspaceFileWorkbenchTab);
     const primaryWorkspaceFileTab = legacyWorkspaceFileTabs.find(
       (item): item is WorkspaceFileWorkbenchTab => isWorkspaceFileWorkbenchTab(item) && isPrimaryWorkspaceFileTab(item),
@@ -196,7 +205,47 @@ export function openBrowserWorkbenchTab(state: RightPanelState): RightPanelState
 }
 
 export function openOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {
-  return openDynamicWorkbenchTab(state, { type: "orchestration_plan", plan_revision_id: plan.revision.plan_revision_id, title: plan.revision.title, plan });
+  const tab: DynamicWorkbenchTab = {
+    type: "orchestration_plan",
+    plan_id: plan.plan_id,
+    plan_revision_id: plan.revision.plan_revision_id,
+    title: plan.revision.title,
+    plan,
+  };
+  return {
+    ...state,
+    tab: "dynamic",
+    activeDynamicTabId: dynamicWorkbenchTabId(tab),
+    dynamicTabs: [...state.dynamicTabs.filter((item) => item.type !== "orchestration_plan"), tab],
+  };
+}
+
+export function syncOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {
+  const existing = state.dynamicTabs.find((item) =>
+    item.type === "orchestration_plan" && (item.plan_id ?? item.plan?.plan_id) === plan.plan_id
+  );
+  if (!existing || existing.type !== "orchestration_plan") return state;
+  if (
+    existing.plan_revision_id === plan.revision.plan_revision_id
+    && existing.title === plan.revision.title
+    && existing.plan === plan
+  ) return state;
+
+  const nextTab: DynamicWorkbenchTab = {
+    type: "orchestration_plan",
+    plan_id: plan.plan_id,
+    plan_revision_id: plan.revision.plan_revision_id,
+    title: plan.revision.title,
+    plan,
+  };
+  const existingId = dynamicWorkbenchTabId(existing);
+  return {
+    ...state,
+    activeDynamicTabId: state.activeDynamicTabId === existingId
+      ? dynamicWorkbenchTabId(nextTab)
+      : state.activeDynamicTabId,
+    dynamicTabs: state.dynamicTabs.map((item) => item === existing ? nextTab : item),
+  };
 }
 
 export function openWorkspaceFileWorkbenchTab(state: RightPanelState, path: string): RightPanelState {

@@ -24,6 +24,7 @@ import {
   parseRightPanelState,
   rightPanelStorageKey,
   serializeRightPanelState,
+  syncOrchestrationPlanWorkbenchTab,
 } from './workbench/workbenchState';
 import { useFlowStore } from '../stores/useFlowStore';
 import { useProjectStore } from '../stores/useProjectStore';
@@ -274,6 +275,12 @@ export default function Layout() {
   useEffect(() => {
     isRightPanelOpenRef.current = isRightPanelOpen;
   }, [isRightPanelOpen]);
+
+  useEffect(() => {
+    const plan = workbench.orchestration_plan;
+    if (!plan || !selectedFlowId || rightPanelFlowId !== selectedFlowId || plan.flow_id !== selectedFlowId) return;
+    setRightPanelState((state) => syncOrchestrationPlanWorkbenchTab(state, plan));
+  }, [rightPanelFlowId, selectedFlowId, workbench.orchestration_plan]);
 
   useEffect(() => {
     void window.squadflowDesktopShell?.setTheme?.(themePreference, resolvedTheme);
