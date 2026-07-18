@@ -429,6 +429,37 @@ type HistorySegment = {
   messages: ChatUIMessage[];
 };
 
+function leaderSdkSessionIds(
+  events: ReturnType<Store["listEventLog"]>,
+  agentSessionId: string,
+  currentSessionId: string,
+): string[] {
+  const sessionIds = new Set<string>();
+  for (const event of events) {
+    if (event.agentSessionId !== agentSessionId) continue;
+    let payload: Record<string, unknown> | null = null;
+    try {
+      const parsed = JSON.parse(event.payloadJson) as unknown;
+      payload = isRecord(parsed) ? parsed : null;
+    } catch {
+      payload = null;
+    }
+    const sessionId = event.eventType === "agent_session.turn_completed"
+      ? optionalString(payload?.sdk_session_id)
+      : undefined;
+    if (sessionId) sessionIds.add(sessionId);
+  }
+  sessionIds.add(currentSessionId);
+  return [...sessionIds];
+}
+
+function namespaceHistoricalMessages(messages: ChatUIMessage[], sessionId: string): ChatUIMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    id: `history-${sessionId}-${message.id}`,
+  }));
+}
+
 function flattenFlowExpertHistorySegments(segments: HistorySegment[]) {
   const unique = new Map<string, ChatUIMessage>();
   const boundaries: HistoryBoundary[] = [];
@@ -597,19 +628,38 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
     if (running) {
       history = running.history;
     } else {
-      const localHistory = connection.chatJournal.getHistory(message.flow_id, sessionId);
-      try {
-        history = await loadSessionHistory(connection, message.flow_id, sessionId, agentSession);
-      } catch (error) {
-        return sessionHistoryUnavailable(message, error);
+      const eventLog = connection.store.listEventLog(message.flow_id);
+      const sessionIds = agentSession?.expertId === "exp-leader" && agentSession.taskId === null
+        ? leaderSdkSessionIds(eventLog, agentSession.id, sessionId)
+        : [sessionId];
+      const historySegments: ChatUIMessage[][] = [];
+      for (const historySessionId of sessionIds) {
+        const localHistory = connection.chatJournal.getHistory(message.flow_id, historySessionId);
+        let sessionHistory: ChatUIMessage[];
+        try {
+          sessionHistory = await loadSessionHistory(
+            connection,
+            message.flow_id,
+            historySessionId,
+            agentSession,
+          );
+        } catch (error) {
+          return sessionHistoryUnavailable(message, error);
+        }
+        if (agentSession) {
+          const timings = persistedTurnTimings(eventLog, historySessionId);
+          sessionHistory = mergeTurnTimings(sessionHistory, timings);
+        }
+        if (!isCompletedHistoryComplete(sessionHistory, localHistory)) {
+          return sessionHistoryIncomplete(message);
+        }
+        historySegments.push(
+          historySessionId === sessionId
+            ? sessionHistory
+            : namespaceHistoricalMessages(sessionHistory, historySessionId),
+        );
       }
-      if (agentSession) {
-        const timings = persistedTurnTimings(connection.store.listEventLog(agentSession.flowId), sessionId);
-        history = mergeTurnTimings(history, timings);
-      }
-      if (!isCompletedHistoryComplete(history, localHistory)) {
-        return sessionHistoryIncomplete(message);
-      }
+      history = historySegments.flat();
     }
   }
 

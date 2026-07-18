@@ -2009,6 +2009,193 @@ describe("Fastify app and websocket gateway", () => {
     }]);
   });
 
+  it("preserves completed Leader history after a failed runtime session is restarted", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-restarted-leader-history",
+      workspaceId: "ws-default",
+      name: "Restarted Leader History",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: null,
+      taskId: null,
+      expertId: "exp-leader",
+      sessionId: "sdk-old",
+      displayName: "Leader",
+      status: "failed",
+      runtimeSdk: "claudecode",
+    })!;
+    store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
+    store.appendEventLog({
+      flowId: flow.id,
+      agentSessionId: leader.id,
+      eventType: "agent_session.turn_completed",
+      payload: {
+        message_id: "assistant-old",
+        agent_session_id: leader.id,
+        sdk_session_id: "sdk-old",
+      },
+    });
+
+    const requestedSessions: string[] = [];
+    const sent: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-restarted-history",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(),
+      sessionHistoryLoader: async (sessionId) => {
+        requestedSessions.push(sessionId);
+        return [
+          {
+            id: "msg-0",
+            role: "user",
+            parts: [{ type: "text", text: sessionId === "sdk-old" ? "旧问题" : "新问题" }],
+            content: sessionId === "sdk-old" ? "旧问题" : "新问题",
+          },
+          {
+            id: "msg-1",
+            role: "assistant",
+            parts: [{ type: "text", text: sessionId === "sdk-old" ? "旧回复" : "新回复" }],
+            content: sessionId === "sdk-old" ? "旧回复" : "新回复",
+          },
+        ];
+      },
+      leaderRuntime: { runLeaderTurn: async () => undefined },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:message",
+      flow_id: flow.id,
+      content: "新问题",
+      client_message_id: "client-msg-new-session",
+    } }), connection);
+    const restarted = store.getAgentSession(leader.id)!;
+    store.updateAgentSessionStatus(leader.id, "completed");
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "session:get",
+      flow_id: flow.id,
+      agent_session_id: leader.id,
+    } }), connection);
+
+    const response = sent.find((message) =>
+      (message as { type?: string }).type === "session:transcript_snapshot"
+    ) as { data: { messages: Array<{ id: string; content: string }> } };
+    expect(restarted.sessionId).not.toBe("sdk-old");
+    expect(requestedSessions).toEqual(["sdk-old", restarted.sessionId]);
+    expect(response.data.messages.map((message) => message.content)).toEqual([
+      "旧问题",
+      "旧回复",
+      "新问题",
+      "新回复",
+    ]);
+    expect(new Set(response.data.messages.map((message) => message.id)).size).toBe(4);
+  });
+
+  it("uses only the live journal while a restarted Leader session is running", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-running-restarted-leader",
+      workspaceId: "ws-default",
+      name: "Running Restarted Leader",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: null,
+      taskId: null,
+      expertId: "exp-leader",
+      sessionId: "sdk-current",
+      displayName: "Leader",
+      status: "streaming",
+      runtimeSdk: "claudecode",
+    })!;
+    store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
+    store.appendEventLog({
+      flowId: flow.id,
+      agentSessionId: leader.id,
+      eventType: "agent_session.turn_completed",
+      payload: {
+        agent_session_id: leader.id,
+        sdk_session_id: "sdk-old",
+      },
+    });
+
+    const chatJournal = new ChatJournal();
+    chatJournal.recordUserMessage(
+      flow.id,
+      leader.sessionId!,
+      "正在运行的问题",
+      "msg-user-current",
+    );
+    chatJournal.record(flow.id, leader.sessionId!, {
+      type: "start",
+      messageId: "msg-assistant-current",
+      startedAt: "2026-07-17T17:00:00.000Z",
+    });
+    chatJournal.record(flow.id, leader.sessionId!, {
+      type: "text-start",
+      messageId: "msg-assistant-current",
+      id: "text-current",
+    });
+    chatJournal.record(flow.id, leader.sessionId!, {
+      type: "text-delta",
+      messageId: "msg-assistant-current",
+      id: "text-current",
+      delta: "正在输出",
+    });
+
+    const requestedSessions: string[] = [];
+    const sent: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-running-restarted-leader",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal,
+      sessionHistoryLoader: async (sessionId) => {
+        requestedSessions.push(sessionId);
+        throw new Error("SDK history must not be read while running");
+      },
+      leaderRuntime: { runLeaderTurn: async () => undefined },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "session:get",
+      flow_id: flow.id,
+      agent_session_id: leader.id,
+    } }), connection);
+
+    const response = sent.at(-1) as {
+      type: string;
+      data: { messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }> }> };
+    };
+    expect(requestedSessions).toEqual([]);
+    expect(response.type).toBe("session:transcript_snapshot");
+    expect(response.data.messages).toEqual([
+      expect.objectContaining({ id: "msg-user-current", role: "user" }),
+      expect.objectContaining({
+        id: "msg-assistant-current",
+        role: "assistant",
+        parts: [expect.objectContaining({ type: "text", text: "正在输出" })],
+      }),
+    ]);
+  });
+
   it("rejects flow messages when the flow leader model is not configured", async () => {
     const store = createStore(":memory:");
     store.migrate();
