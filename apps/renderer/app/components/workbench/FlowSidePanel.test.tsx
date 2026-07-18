@@ -180,7 +180,7 @@ describe("FlowSidePanel", () => {
     const filesTab = screen.getByRole("tab", { name: "文件" });
     expect(filesTab).toHaveAttribute("aria-selected", "false");
     expect(filesTab.querySelector("svg")).toBeNull();
-    expect(screen.getByRole("tab", { name: "审核" })).toHaveAttribute("aria-selected", "false");
+    expect(screen.queryByRole("tab", { name: "审核" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加工作台功能" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "任务" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "专家" })).not.toBeInTheDocument();
@@ -188,9 +188,14 @@ describe("FlowSidePanel", () => {
     expect(screen.queryByRole("tab", { name: "阶段" })).not.toBeInTheDocument();
   });
 
-  it("renders the review tab from workbench review data", () => {
+  it("renders review data in a dynamic tab", () => {
     renderPanel(
-      { ...createInitialRightPanelState(), tab: "review" },
+      {
+        ...createInitialRightPanelState(),
+        tab: "dynamic",
+        activeDynamicTabId: "review",
+        dynamicTabs: [{ type: "review", title: "审核" }],
+      },
       vi.fn(),
       {
         ...workbench,
@@ -390,6 +395,20 @@ describe("FlowSidePanel", () => {
 
     expect(screen.queryByRole("menuitem", { name: "文件" })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "浏览器" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "审核" })).toBeInTheDocument();
+  });
+
+  it("opens an audit workbench tab from the add menu", () => {
+    const states: RightPanelState[] = [];
+    renderPanel(createInitialRightPanelState(), (state) => states.push(state));
+
+    fireEvent.click(screen.getByRole("button", { name: "添加工作台功能" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "审核" }));
+
+    const lastState = states.at(-1);
+    expect(lastState?.tab).toBe("dynamic");
+    expect(lastState?.activeDynamicTabId).toBe("review");
+    expect(lastState?.dynamicTabs).toContainEqual({ type: "review", title: "审核" });
   });
 
   it("opens a browser workbench tab from the add menu while Files is open", () => {

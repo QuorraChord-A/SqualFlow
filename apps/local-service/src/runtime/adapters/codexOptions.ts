@@ -5,6 +5,7 @@ import type { MessageImageAttachment } from "../../protocol/wsMessages.js";
 import type { RuntimeCapability } from "../capabilities.js";
 import {
   codexAppServerBaseArgs,
+  codexPoolTempDir,
   resolveCodexRuntimeProfile,
   withCodexRuntimeProfileEnv,
   type CodexRuntimeProfile,
@@ -79,13 +80,25 @@ export function normalizeCodexBaseUrl(baseUrl: string): string {
   return trimmed.endsWith("/responses") ? trimmed.slice(0, -"/responses".length) : trimmed;
 }
 
+const CODEX_TRANSPORT_DEBUG_ENV = "SQUADFLOW_CODEX_TRANSPORT_DEBUG";
+const CODEX_TRANSPORT_LOG_FILTER = "codex_api=debug,codex_http_client=debug,codex_app_server_transport=debug";
+
+function withCodexTransportDebug(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (env[CODEX_TRANSPORT_DEBUG_ENV]?.trim() !== "1") return env;
+  const current = env.RUST_LOG?.trim();
+  return {
+    ...env,
+    RUST_LOG: current ? `${current},${CODEX_TRANSPORT_LOG_FILTER}` : CODEX_TRANSPORT_LOG_FILTER,
+  };
+}
+
 function codexEnv(runtimeConfig: RuntimeConfig | undefined): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  if (!runtimeConfig) return env;
+  if (!runtimeConfig) return withCodexTransportDebug(env);
   if (runtimeConfig.authMode === "inherited") {
     delete env.CODEX_ACCESS_TOKEN;
     delete env.OPENAI_API_KEY;
-    return env;
+    return withCodexTransportDebug(env);
   }
   if (runtimeConfig.authMode === "apiKey") {
     const keyName = codexApiKeyEnvName(runtimeConfig);
@@ -95,7 +108,7 @@ function codexEnv(runtimeConfig: RuntimeConfig | undefined): NodeJS.ProcessEnv {
     const accessToken = runtimeConfig.apiKey.trim();
     if (accessToken) env.CODEX_ACCESS_TOKEN = accessToken;
   }
-  return env;
+  return withCodexTransportDebug(env);
 }
 
 export function codexApiKeyEnvName(runtimeConfig: RuntimeConfig): string {
@@ -191,6 +204,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
       "sandbox_workspace_write.writable_roots": [
         path.resolve(input.cwd),
         ...(scratchDir ? [scratchDir] : []),
+        codexPoolTempDir(runtimeConfig?.authMode === "inherited" ? "official" : "custom"),
       ],
     },
     env,

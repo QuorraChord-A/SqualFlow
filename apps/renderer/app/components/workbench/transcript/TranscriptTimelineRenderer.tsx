@@ -21,6 +21,7 @@ type TranscriptTimelineRendererProps = {
   turnTiming?: TurnTiming | null;
   showReasoning?: boolean;
   beforeFooter?: ReactNode;
+  thinkingLabel?: string;
   workspaceRootPath?: string | null;
   onOpenWorkspaceFile?: (path: string) => void;
   "data-testid"?: string;
@@ -41,6 +42,7 @@ export default function TranscriptTimelineRenderer({
   turnTiming,
   showReasoning = true,
   beforeFooter,
+  thinkingLabel,
   workspaceRootPath,
   onOpenWorkspaceFile,
   "data-testid": dataTestId,
@@ -67,6 +69,7 @@ export default function TranscriptTimelineRenderer({
           turnTiming={turnTiming}
           showReasoning={showReasoning}
           beforeFooter={beforeFooter}
+          thinkingLabel={thinkingLabel}
         />
       </div>
     </TranscriptPathProvider>

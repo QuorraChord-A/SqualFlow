@@ -7,6 +7,7 @@ import TopBar from './TopBar';
 import Sidebar from './Sidebar';
 import NewFlowModal from './NewFlowModal';
 import NewTaskView from './NewTaskView';
+import type { RiskMode } from './ComposerModeMenu';
 import DeleteFlowModal from './DeleteFlowModal';
 import ClearAllFlowsModal from './ClearAllFlowsModal';
 import AbortFlowModal from './AbortFlowModal';
@@ -20,6 +21,7 @@ import {
   expertChatTabFromDispatchEvent,
   openDynamicWorkbenchTab,
   openOrchestrationPlanWorkbenchTab,
+  openReviewWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   parseRightPanelState,
   rightPanelStorageKey,
@@ -72,6 +74,7 @@ export default function Layout() {
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>('general');
   const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab>('role_assignment');
   const [initialMessagesByFlow, setInitialMessagesByFlow] = useState<Record<string, UIMessage[]>>({});
+  const [initialPlanModeByFlow, setInitialPlanModeByFlow] = useState<Record<string, RiskMode>>({});
   const [leaderComposerDraftByFlow, setLeaderComposerDraftByFlow] = useState<Record<string, string>>({});
   const setBrowserSelectionActiveFlowId = useBrowserSelectionStore((state) => state.setActiveFlowId);
   const setComposerImageActiveFlowId = useComposerImageStore((state) => state.setActiveFlowId);
@@ -713,11 +716,7 @@ export default function Layout() {
       playRightPanelDrawerAnimation('enter');
     }
     setIsRightPanelOpen(true);
-    setRightPanelState((state) => ({
-      ...state,
-      tab: "review",
-      activeDynamicTabId: null,
-    }));
+    setRightPanelState((state) => openReviewWorkbenchTab(state));
   };
   const openOrchestrationPlan = (plan: OrchestrationPlanView) => {
     if (!isRightPanelOpen) {
@@ -803,6 +802,15 @@ export default function Layout() {
                         flowId={selectedFlowId}
                         leaderAgentSessionId={leaderAgentSessionId}
                         initialOptimisticMessages={initialMessagesByFlow[selectedFlowId] ?? []}
+                        initialPlanModeReturnRiskMode={initialPlanModeByFlow[selectedFlowId] ?? null}
+                        onInitialPlanModeResolved={() => {
+                          setInitialPlanModeByFlow((current) => {
+                            if (!(selectedFlowId in current)) return current;
+                            const next = { ...current };
+                            delete next[selectedFlowId];
+                            return next;
+                          });
+                        }}
                         flowStatus={dashboard.flowStatus || selectedFlowSummary?.status}
                         decisionCardStatuses={decisionCardStatuses}
                         decisionCardAnswers={decisionCardAnswers}
@@ -828,11 +836,17 @@ export default function Layout() {
               ) : (
                 <NewTaskView
                   onOpenModelSettings={() => openSettings('agents', 'runtime_configs')}
-                  onTaskCreated={(flowId, initialMessage) => {
+                  onTaskCreated={(flowId, initialMessage, initialPlanModeReturnRiskMode) => {
                     setInitialMessagesByFlow((current) => ({
                       ...current,
                       [flowId]: [initialMessage],
                     }));
+                    if (initialPlanModeReturnRiskMode) {
+                      setInitialPlanModeByFlow((current) => ({
+                        ...current,
+                        [flowId]: initialPlanModeReturnRiskMode,
+                      }));
+                    }
                     setIsCreatingTask(false);
                   }}
                 />
@@ -870,6 +884,16 @@ export default function Layout() {
             flowId={selectedFlowId}
             leaderAgentSessionId={leaderAgentSessionId}
             initialOptimisticMessages={selectedFlowId ? initialMessagesByFlow[selectedFlowId] ?? [] : []}
+            initialPlanModeReturnRiskMode={selectedFlowId ? initialPlanModeByFlow[selectedFlowId] ?? null : null}
+            onInitialPlanModeResolved={() => {
+              if (!selectedFlowId) return;
+              setInitialPlanModeByFlow((current) => {
+                if (!(selectedFlowId in current)) return current;
+                const next = { ...current };
+                delete next[selectedFlowId];
+                return next;
+              });
+            }}
             flowStatus={dashboard.flowStatus || selectedFlowSummary?.status}
             decisionCardStatuses={decisionCardStatuses}
             decisionCardAnswers={decisionCardAnswers}

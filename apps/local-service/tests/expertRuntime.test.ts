@@ -727,6 +727,37 @@ describe("ExpertRuntime", () => {
     expect(desktopBridge.getLease()).toBeNull();
   });
 
+  it("closes a completed streaming query so the runtime lease can be reused", async () => {
+    const store = tempStore();
+    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const close = vi.fn();
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "result",
+            subtype: "success",
+            session_id: "sdk-reusable-expert",
+            is_error: false,
+          };
+        },
+        close,
+      }) }),
+    });
+
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: task.id,
+      agentSessionId: session.id,
+    });
+
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
   it("releases the browser lease held by an AgentSession when its turn fails", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");

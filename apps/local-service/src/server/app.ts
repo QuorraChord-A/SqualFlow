@@ -23,6 +23,13 @@ import { registerHttpRoutes } from "./httpRoutes.js";
 import { recoverPendingDecisionCardLeaderInputs, registerWsGateway, type SessionHistoryLoader } from "./wsGateway.js";
 import { errorDiagnostic } from "../observability/operationalLogger.js";
 import { clearNativeRuntimeSessionFiles } from "../protocol/runtimeMessageProtocolMigration.js";
+import { createAgentRuntimeAdapter } from "../runtime/adapters/factory.js";
+import {
+  CodexAppServerPool,
+  codexPoolKindForRuntimeConfig,
+  createCodexPoolProcessOptionsResolver,
+} from "../runtime/adapters/codexAppServerPool.js";
+import { readAgentRuntimeConfigSnapshotSync } from "../config/agentRuntimeConfig.js";
 
 type CreateAppOptions = {
   databasePath?: string;
@@ -113,6 +120,20 @@ export function createApp(options: CreateAppOptions = {}) {
   const chatJournal = options.chatJournal ?? new ChatJournal();
   const contextCompactions = new ContextCompactionState();
   const mcpBridgeRegistry = new McpBridgeRegistry();
+  const codexAppServerPool = options.runtimeAdapterFactory
+    ? null
+    : new CodexAppServerPool({
+        resolveProcessOptions: createCodexPoolProcessOptionsResolver({
+          getRuntimeConfigs: () => readAgentRuntimeConfigSnapshotSync().configs,
+          mcpCredential: mcpBridgeRegistry.credentials(),
+        }),
+      });
+  const runtimeAdapterFactory = options.runtimeAdapterFactory ?? ((input) => createAgentRuntimeAdapter({
+    ...input,
+    codexClientFactory: input.sdk === "codex" && codexAppServerPool
+      ? codexAppServerPool.clientFactory(codexPoolKindForRuntimeConfig(input.runtimeConfig))
+      : undefined,
+  }));
   const desktopBridge = new DesktopBridge();
   let leaderRuntime: LeaderRuntime;
   let expertRuntime: ExpertRuntime;
@@ -150,7 +171,7 @@ export function createApp(options: CreateAppOptions = {}) {
     store,
     eventBus,
     chatJournal,
-    runtimeAdapterFactory: options.runtimeAdapterFactory,
+    runtimeAdapterFactory,
     mcpBridgeRegistry,
     desktopBridge,
     logger: app.log,
@@ -162,7 +183,7 @@ export function createApp(options: CreateAppOptions = {}) {
     store,
     eventBus,
     chatJournal,
-    runtimeAdapterFactory: options.runtimeAdapterFactory,
+    runtimeAdapterFactory,
     agentDispatcher,
     contextCompactions,
     mcpBridgeRegistry,
@@ -243,17 +264,27 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.addHook("onClose", async () => {
-    await expertRuntime.close?.();
-    await leaderRuntime.close?.();
+    const runtimeResults = await Promise.allSettled([
+      expertRuntime.close?.(),
+      leaderRuntime.close?.(),
+    ]);
+    codexAppServerPool?.close();
     await mcpBridgeRegistry.close();
     if (!options.store) store.sqlite.close();
+    const failedRuntime = runtimeResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failedRuntime) throw failedRuntime.reason;
   });
 
   app.register(websocket);
   app.after(() => {
     registerMcpBridgeRoutes(app, mcpBridgeRegistry);
     registerDesktopWsGateway(app, desktopBridge);
-    registerHttpRoutes(app, { store, leaderRuntime, contextCompactions });
+    registerHttpRoutes(app, {
+      store,
+      leaderRuntime,
+      contextCompactions,
+      onRuntimeConfigChanged: () => codexAppServerPool?.invalidate("custom"),
+    });
     registerWsGateway(app, {
       eventBus,
       chatJournal,

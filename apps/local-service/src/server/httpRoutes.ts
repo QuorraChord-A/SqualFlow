@@ -43,6 +43,7 @@ type RegisterHttpRoutesDeps = {
   store: Store;
   leaderRuntime: Pick<LeaderRuntime, "compactContext">;
   contextCompactions: ContextCompactionState;
+  onRuntimeConfigChanged?: () => void;
 };
 
 const execFileAsync = promisify(execFile);
@@ -537,6 +538,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
   app.post("/api/agent-runtime-config/configs", async (request, reply) => {
     try {
       const runtimeConfig = await createRuntimeConfig(bodyRecord(request));
+      deps.onRuntimeConfigChanged?.();
       reply.code(201);
       return runtimeConfig;
     } catch (error) {
@@ -549,6 +551,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
     try {
       const runtimeConfig = await updateRuntimeConfig(paramsId(request, "configId"), bodyRecord(request));
       if (!runtimeConfig) return reply.code(404).send({ detail: "Runtime config not found" });
+      deps.onRuntimeConfigChanged?.();
       return runtimeConfig;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to update runtime config";
@@ -560,6 +563,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
     try {
       const snapshot = await deleteRuntimeConfig(paramsId(request, "configId"));
       if (!snapshot) return reply.code(404).send({ detail: "Runtime config not found" });
+      deps.onRuntimeConfigChanged?.();
       return snapshot;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to delete runtime config";

@@ -169,9 +169,64 @@ function cloneMessagesWithOptimistic(state: TranscriptState, messages: UIMessage
   const optimistic = state.messages.filter((message) =>
     message.role === "user"
     && !snapshotIds.has(message.id)
-    && !snapshotUserSignatures.has(userMessageSignature(message)),
+    // Modern optimistic messages carry their client id and timestamp. Only
+    // use the old text-signature fallback for legacy messages without a
+    // timestamp; otherwise two legitimate consecutive prompts with the same
+    // text would collapse into one.
+    && ((message as { createdAt?: unknown }).createdAt != null || !snapshotUserSignatures.has(userMessageSignature(message))),
   );
-  return optimistic.length > 0 ? [...optimistic.map(cloneUiMessage), ...snapshot] : snapshot;
+  if (optimistic.length === 0) return snapshot;
+
+  const optimisticIds = new Set(optimistic.map((message) => message.id));
+  const beforeByAnchor = new Map<string, UIMessage[]>();
+  const afterByAnchor = new Map<string, UIMessage[]>();
+  const unanchored: UIMessage[] = [];
+
+  const addToBucket = (buckets: Map<string, UIMessage[]>, anchorId: string, message: UIMessage) => {
+    const bucket = buckets.get(anchorId) ?? [];
+    bucket.push(cloneUiMessage(message));
+    buckets.set(anchorId, bucket);
+  };
+
+  for (let index = 0; index < state.messages.length; index += 1) {
+    const message = state.messages[index];
+    if (!message || !optimisticIds.has(message.id)) continue;
+
+    let previousAnchorId: string | null = null;
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const candidate = state.messages[cursor];
+      if (candidate && snapshotIds.has(candidate.id)) {
+        previousAnchorId = candidate.id;
+        break;
+      }
+    }
+    if (previousAnchorId) {
+      addToBucket(afterByAnchor, previousAnchorId, message);
+      continue;
+    }
+
+    let nextAnchorId: string | null = null;
+    for (let cursor = index + 1; cursor < state.messages.length; cursor += 1) {
+      const candidate = state.messages[cursor];
+      if (candidate && snapshotIds.has(candidate.id)) {
+        nextAnchorId = candidate.id;
+        break;
+      }
+    }
+    if (nextAnchorId) {
+      addToBucket(beforeByAnchor, nextAnchorId, message);
+    } else {
+      unanchored.push(cloneUiMessage(message));
+    }
+  }
+
+  const merged = [...unanchored];
+  for (const message of snapshot) {
+    merged.push(...(beforeByAnchor.get(message.id) ?? []));
+    merged.push(message);
+    merged.push(...(afterByAnchor.get(message.id) ?? []));
+  }
+  return merged;
 }
 
 function findPartIndex(parts: UIMessage["parts"], predicate: (part: AnyPart) => boolean): number {

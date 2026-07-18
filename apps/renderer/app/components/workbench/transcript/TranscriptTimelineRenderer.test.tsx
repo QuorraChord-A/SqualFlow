@@ -998,7 +998,7 @@ describe("TranscriptTimelineRenderer", () => {
       expect(screen.getByText("已工作 5 秒")).toBeVisible();
     });
 
-    it("shows 工作中 X 秒 while a turn is running", () => {
+    it("keeps the pre-output phase in thinking without a work header", () => {
       const startedAt = new Date(Date.now() - 2000).toISOString();
       const turnTiming: TurnTiming = {
         startedAt,
@@ -1008,7 +1008,65 @@ describe("TranscriptTimelineRenderer", () => {
 
       render(
         <TranscriptTimelineRenderer
-          blocks={[]}
+          blocks={[{ id: "thinking-1", type: "thinking" }]}
+          flowId="flow-1"
+          decisionCardsById={new Map()}
+          specCardsById={new Map()}
+          onSpecOpen={() => {}}
+          activity="waiting"
+          turnTiming={turnTiming}
+        />,
+      );
+
+      expect(screen.getByText("正在思考")).toBeVisible();
+      expect(screen.queryByText(/工作中 \d 秒/)).toBeNull();
+    });
+
+    it("shows the accumulated work header after the first text appears", () => {
+      const startedAt = new Date(Date.now() - 2000).toISOString();
+      const turnTiming: TurnTiming = {
+        startedAt,
+        finishedAt: null,
+        durationMs: null,
+      };
+      const blocks: TranscriptBlock[] = [{ id: "text-1", type: "text", text: "开始处理。", streaming: true }];
+
+      render(
+        <TranscriptTimelineRenderer
+          blocks={blocks}
+          flowId="flow-1"
+          decisionCardsById={new Map()}
+          specCardsById={new Map()}
+          onSpecOpen={() => {}}
+          activity="text"
+          turnTiming={turnTiming}
+        />,
+      );
+
+      const workLabel = screen.getByText(/工作中 \d 秒/);
+      expect(workLabel.className).toContain("animatedStatusText");
+      expect(screen.getByText("开始处理。")).toBeVisible();
+      expect(screen.queryByText("正在思考")).toBeNull();
+    });
+
+    it("shows the accumulated work header after the first MCP tool call", () => {
+      const startedAt = new Date(Date.now() - 2000).toISOString();
+      const turnTiming: TurnTiming = {
+        startedAt,
+        finishedAt: null,
+        durationMs: null,
+      };
+      const blocks: TranscriptBlock[] = [buildActiveGroup([{
+        toolCallId: "tool-1",
+        toolName: "mcp__squadflow-leader__submit_orchestration_plan",
+        state: "running",
+        input: {},
+        output: null,
+      }], "running", "tool-1")];
+
+      render(
+        <TranscriptTimelineRenderer
+          blocks={blocks}
           flowId="flow-1"
           decisionCardsById={new Map()}
           specCardsById={new Map()}
@@ -1019,34 +1077,7 @@ describe("TranscriptTimelineRenderer", () => {
       );
 
       expect(screen.getByText(/工作中 \d 秒/)).toBeVisible();
-    });
-
-    it("applies animated status styling only while the turn is running", () => {
-      const startedAt = new Date(Date.now() - 2000).toISOString();
-      const turnTiming: TurnTiming = {
-        startedAt,
-        finishedAt: null,
-        durationMs: null,
-      };
-      const blocks: TranscriptBlock[] = [{ id: "thinking-1", type: "thinking" }];
-
-      render(
-        <TranscriptTimelineRenderer
-          blocks={blocks}
-          flowId="flow-1"
-          decisionCardsById={new Map()}
-          specCardsById={new Map()}
-          onSpecOpen={() => {}}
-          activity="waiting"
-          turnTiming={turnTiming}
-        />,
-      );
-
-      const workLabel = screen.getByText(/工作中 \d 秒/);
-      expect(workLabel.className).toContain("animatedStatusText");
-
-      const thinkingLabel = screen.getByText("正在思考");
-      expect(thinkingLabel.className).toContain("animatedStatusText");
+      expect(screen.queryByText("正在思考")).toBeNull();
     });
 
     it("does not animate finished work header text", () => {

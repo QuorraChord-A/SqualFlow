@@ -97,6 +97,10 @@ export function withCodexRuntimeProfileEnv(
   };
 }
 
+export function codexPoolTempDir(kind: "official" | "custom") {
+  return path.join(config.runtimeScratchRoot, "codex-pool", kind);
+}
+
 function bundledCodexCommand(env: NodeJS.ProcessEnv): string {
   const explicit = env.SQUADFLOW_BUNDLED_CODEX_COMMAND?.trim() || env.SQUADFLOW_CODEX_COMMAND?.trim();
   if (explicit) return explicit;

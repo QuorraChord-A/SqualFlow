@@ -12,6 +12,7 @@ import {
   extractMessageFlowExpertId,
 } from "./transcriptUtils";
 import TranscriptTimelineRenderer from "./transcript/TranscriptTimelineRenderer";
+import ThinkingIndicator from "./transcript/ThinkingIndicator";
 import {
   buildTranscriptTimeline,
   readHistoryTurnTiming,
@@ -74,6 +75,7 @@ export type UserTurnDisplay = {
   activeDurationMs: number;
   completedAt: string | null;
   workRootPath?: string | null;
+  specRequested?: boolean;
 };
 
 export function shouldBatchTranscriptEvent(event: TranscriptEvent) {
@@ -885,6 +887,7 @@ function SessionTranscriptContent({
   statusDividerAnimated,
   statusDividerAt,
   workspaceRootPath,
+  thinkingLabel,
 }: {
   messages: UIMessage[];
   historyBoundaries: HistorySessionBoundary[];
@@ -916,6 +919,7 @@ function SessionTranscriptContent({
   statusDividerAnimated?: boolean;
   statusDividerAt?: string | null;
   workspaceRootPath?: string | null;
+  thinkingLabel?: string | null;
 }) {
   const lastFollowRequestKeyRef = useRef(followRequestKey);
   const { follow, registerThread } = useTranscriptScroll();
@@ -1240,6 +1244,7 @@ function SessionTranscriptContent({
                 beforeFooter={reviewForTurn ? <UserTurnReviewSummaryCard review={reviewForTurn} onOpenReview={onOpenReview} /> : undefined}
                 data-testid="chat-message-assistant"
                 data-transcript-activity={activeInGroup ? activity ?? undefined : undefined}
+                thinkingLabel={activeInGroup ? thinkingLabel ?? undefined : undefined}
               />
             );
           })}
@@ -1247,10 +1252,7 @@ function SessionTranscriptContent({
             {showThinkingIndicator && (
               <div data-testid="chat-message-assistant" data-transcript-activity="waiting">
                 <div className={styles.assistant}>
-                  <div className={styles.thinkingRow}>
-                    <span className={styles.rowSpinner} role="status" />
-                    正在思考
-                  </div>
+                  <ThinkingIndicator label={thinkingLabel ?? undefined} />
                 </div>
               </div>
             )}
@@ -1300,6 +1302,7 @@ export default function SessionTranscriptPanel({
   const [transcript, dispatchTranscript] = useReducer(transcriptReducer, emptyTranscriptState);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [historyLoadVersion, setHistoryLoadVersion] = useState(0);
+  const [runtimeTransportLabel, setRuntimeTransportLabel] = useState<string | null>(null);
   const prevFlowIdRef = useRef<string | null>(null);
   const prevFlowExpertIdRef = useRef<string | null>(null);
   const prevAgentSessionIdRef = useRef<string | null>(null);
@@ -1398,6 +1401,7 @@ export default function SessionTranscriptPanel({
       pendingHistoryRequestRef.current = null;
       cancelPendingEventFlush();
       clearFinishResyncTimers();
+      setRuntimeTransportLabel(null);
       dispatchTranscript({ type: "reset" });
     } else if (agentSessionId !== prevSessionId) {
       prevAgentSessionIdRef.current = agentSessionId;
@@ -1408,6 +1412,7 @@ export default function SessionTranscriptPanel({
       if (agentSessionId !== null && lastRealAgentSessionId !== null && lastRealAgentSessionId !== agentSessionId) {
         fetchedSessionRef.current = null;
         cancelPendingEventFlush();
+        setRuntimeTransportLabel(null);
         dispatchTranscript({ type: "reset" });
       }
       if (agentSessionId !== null) {
@@ -1451,6 +1456,17 @@ export default function SessionTranscriptPanel({
       const activeAgentSessionId = activeAgentSessionIdRef.current;
       if (msg.flow_id !== activeFlowId) return;
 
+      if (msg.type === "runtime:transport") {
+        if (activeFlowExpertId) {
+          if (msg.flow_expert_id !== activeFlowExpertId) return;
+        } else {
+          if (msg.flow_expert_id) return;
+          if (activeAgentSessionId && msg.agent_session_id !== activeAgentSessionId) return;
+        }
+        setRuntimeTransportLabel(msg.data.state === "clear" ? null : msg.data.message ?? "Codex 网络连接正在恢复");
+        return;
+      }
+
       if (msg.type === "flow:decision_card_resolved" && !activeFlowExpertId) {
         const cardId = typeof msg.data?.card_id === "string" ? msg.data.card_id : "";
         if (cardId) {
@@ -1484,6 +1500,7 @@ export default function SessionTranscriptPanel({
       }
 
       if (msg.type === "session:event" && String(msg.data?.status ?? "") === "interrupted") {
+        setRuntimeTransportLabel(null);
         flushPendingEvents();
         dispatchTranscript({ type: "finish-active", finishedAt: new Date().toISOString() });
         wsClient.sendSessionGet(activeFlowId, "", activeAgentSessionId ?? undefined, activeFlowExpertId ?? undefined);
@@ -1494,6 +1511,7 @@ export default function SessionTranscriptPanel({
       if (msg.type === "flow_expert:event" && activeFlowExpertId) {
         const expertStatus = String(msg.data?.status ?? "");
         if (["completed", "failed"].includes(expertStatus)) {
+          setRuntimeTransportLabel(null);
           wsClient.sendSessionGet(activeFlowId, "", activeAgentSessionId ?? undefined, activeFlowExpertId);
         }
         return;
@@ -1589,6 +1607,7 @@ export default function SessionTranscriptPanel({
         statusDividerAnimated={statusDividerAnimated}
         statusDividerAt={statusDividerAt}
         workspaceRootPath={workspaceRootPath}
+        thinkingLabel={runtimeTransportLabel}
       />
       </TranscriptScrollProvider>
     </StickToBottom>

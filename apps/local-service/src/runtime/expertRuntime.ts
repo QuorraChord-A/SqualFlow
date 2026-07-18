@@ -39,7 +39,7 @@ import { WsPusher } from "../ws/pusher.js";
 import type { McpBridgeRegistry } from "../mcp/mcpBridgeRegistry.js";
 import type { DesktopBridge } from "../server/desktopBridge.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
-import type { RuntimeDiagnosticEvent } from "./adapters/runtimeAdapter.js";
+import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
 import { BROWSER_MCP_TOOL_PREFIX, createBrowserMcpServer, createBrowserToolHandlers } from "../mcp/browserServer.js";
 import { buildPlatformEvent, computeFlowSig, parseMessageSegments } from "../protocol/platformEvent.js";
 
@@ -111,20 +111,6 @@ export type CreateExpertRuntimeInput = {
   onTaskFinished?: (event: ExpertTaskFinishedEvent) => Promise<void> | void;
   logger?: OperationalLogger;
 };
-
-function logRuntimeDiagnostic(
-  logger: OperationalLogger | undefined,
-  context: Record<string, unknown>,
-  event: RuntimeDiagnosticEvent,
-) {
-  if (!logger) return;
-  const fields = { ...context, ...event };
-  if (event.type === "foreign_thread_notification") {
-    logger.warn(fields, "runtime received notification for a different SDK session");
-    return;
-  }
-  logger.info(fields, "runtime provider diagnostic");
-}
 
 function parseToolList(value: string | null | undefined) {
   if (!value) return [];
@@ -716,6 +702,7 @@ class FlowExpertWorker {
     } finally {
       this.closed = true;
       this.stopPeriodicContextUsageCapture();
+      this.query?.close?.();
       this.finalizeClosedWorker();
     }
   }
@@ -932,6 +919,7 @@ class FlowExpertWorker {
 class FlowExpertWorkerRegistry {
   private readonly workers = new Map<string, FlowExpertWorker>();
   private readonly startingWorkers = new Map<string, Promise<FlowExpertWorker>>();
+  private readonly browserTurnContexts = new Map<string, BrowserTurnContext>();
 
   constructor(
     private readonly deps: CreateExpertRuntimeInput,
@@ -1001,6 +989,7 @@ class FlowExpertWorkerRegistry {
     await Promise.all([...this.workers.values()].map((worker) => worker.close()));
     this.workers.clear();
     this.startingWorkers.clear();
+    this.browserTurnContexts.clear();
   }
 
   private async getOrCreateWorker(input: {
@@ -1062,7 +1051,9 @@ class FlowExpertWorkerRegistry {
       runtimeConfig: expertRuntimeConfig.config,
     });
     const needsBrowserTools = mcpTools.some((tool) => tool.startsWith(BROWSER_MCP_TOOL_PREFIX));
-    const browserTurnContext: BrowserTurnContext = { agentSessionId: null, scratchDir };
+    const browserTurnContext = this.browserTurnContexts.get(input.flowExpert.id)
+      ?? { agentSessionId: null, scratchDir };
+    this.browserTurnContexts.set(input.flowExpert.id, browserTurnContext);
     const permissionScopeContext: ExpertPermissionScopeContext = {
       flowId: input.task.flowId,
       userTurnId: input.task.userTurnId,
@@ -1071,15 +1062,19 @@ class FlowExpertWorkerRegistry {
     };
     let browserMcpBinding: { mcpServerConfig: unknown; close: () => Promise<void> | void } | undefined;
     if (needsBrowserTools && this.deps.desktopBridge) {
-      const browserServer = createBrowserMcpServer(createBrowserToolHandlers({
+      const browserToolHandlers = createBrowserToolHandlers({
         desktopBridge: this.deps.desktopBridge,
         holderName: input.expert.name,
         flowId: input.task.flowId,
         getAgentSessionId: () => browserTurnContext.agentSessionId,
         getScratchDir: () => browserTurnContext.scratchDir,
-      }));
+      });
+      const createBrowserServer = () => createBrowserMcpServer(browserToolHandlers);
+      const browserServer = createBrowserServer();
       browserMcpBinding = await runtimeAdapter.prepareExpertMcpServer({
         server: browserServer,
+        serverFactory: createBrowserServer,
+        bindingKey: `expert-browser:${input.flowExpert.id}`,
         bridgeRegistry: this.deps.mcpBridgeRegistry,
       });
     }
@@ -1129,14 +1124,19 @@ class FlowExpertWorkerRegistry {
         }
         return result;
       },
-      diagnostics: (event) => logRuntimeDiagnostic(this.deps.logger, {
-        runtimeRole: "expert",
-        flowId: permissionScopeContext.flowId,
-        userTurnId: permissionScopeContext.userTurnId,
-        taskId: permissionScopeContext.taskId,
-        flowExpertId: input.flowExpert.id,
-        agentSessionId: permissionScopeContext.agentSessionId,
-      }, event),
+      diagnostics: (event) => reportRuntimeDiagnostic({
+        logger: this.deps.logger,
+        eventBus: this.deps.eventBus,
+        context: {
+          runtimeRole: "expert",
+          flowId: permissionScopeContext.flowId,
+          userTurnId: permissionScopeContext.userTurnId,
+          taskId: permissionScopeContext.taskId,
+          flowExpertId: input.flowExpert.id,
+          agentSessionId: permissionScopeContext.agentSessionId,
+        },
+        event,
+      }),
     });
     const initialSessionId = input.flowExpert.sdkSessionId
       ?? input.agentSession.sessionId

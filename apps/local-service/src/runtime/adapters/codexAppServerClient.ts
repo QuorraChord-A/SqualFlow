@@ -8,6 +8,7 @@ export type CodexAppServerClientOptions = {
   args?: string[];
   env?: NodeJS.ProcessEnv;
   cwd?: string;
+  onStderrLine?: (line: string) => void;
 };
 
 export type CodexAppServerTransport = {
@@ -33,6 +34,7 @@ export class CodexAppServerClient implements CodexAppServerTransport {
   private readonly pending = new Map<string | number, PendingRequest>();
   private readonly events: CodexJsonRpcMessage[] = [];
   private eventWaiter: ((value: IteratorResult<CodexJsonRpcMessage>) => void) | null = null;
+  private stderrRemainder = "";
 
   constructor(private readonly options: CodexAppServerClientOptions = {}) {}
 
@@ -99,8 +101,17 @@ export class CodexAppServerClient implements CodexAppServerTransport {
     this.proc.once("error", (error) => {
       this.fail(error);
     });
-    this.proc.stderr.on("data", () => {
+    this.proc.stderr.on("data", (chunk) => {
       // app-server stderr is diagnostic-only; JSON-RPC data stays on stdout.
+      // Keep the callback optional so normal runs do not add another logging sink.
+      if (!this.options.onStderrLine) return;
+      const text = `${this.stderrRemainder}${String(chunk)}`;
+      const lines = text.split(/\r?\n/);
+      this.stderrRemainder = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) this.options.onStderrLine(trimmed);
+      }
     });
     this.rl = readline.createInterface({ input: this.proc.stdout });
     this.rl.on("line", (line) => this.handleLine(line));

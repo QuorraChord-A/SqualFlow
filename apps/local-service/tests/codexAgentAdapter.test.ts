@@ -144,33 +144,37 @@ describe("Codex runtime adapter", () => {
 
   it("reports the formal thread and foreign thread notifications without recording payload content", async () => {
     const diagnostics = vi.fn();
+    let clientOptions: CodexAppServerClientOptions | null = null;
     const adapter = createCodexAgentRuntimeAdapter({
-      clientFactory: () => ({
-        start: async () => {},
-        request: async (method) => {
-          if (method === "thread/start") return { thread: { id: "thread-expected" } };
-          if (method === "turn/start") return { turn: { id: "turn-1" } };
-          throw new Error(`unexpected request: ${method}`);
-        },
-        notify: () => {},
-        respond: () => {},
-        close: () => {},
-        notifications: async function* () {
-          yield {
-            method: "thread/tokenUsage/updated",
-            params: {
-              threadId: "thread-foreign",
-              turnId: "turn-foreign",
-              tokenUsage: { last: { totalTokens: 10 } },
-              content: "sensitive payload must not be copied into diagnostics",
-            },
-          };
-          yield {
-            method: "turn/completed",
-            params: { threadId: "thread-expected", turn: { id: "turn-1", status: "completed" } },
-          };
-        },
-      }),
+      clientFactory: (options) => {
+        clientOptions = options;
+        return {
+          start: async () => {},
+          request: async (method) => {
+            if (method === "thread/start") return { thread: { id: "thread-expected" } };
+            if (method === "turn/start") return { turn: { id: "turn-1" } };
+            throw new Error(`unexpected request: ${method}`);
+          },
+          notify: () => {},
+          respond: () => {},
+          close: () => {},
+          notifications: async function* () {
+            yield {
+              method: "thread/tokenUsage/updated",
+              params: {
+                threadId: "thread-foreign",
+                turnId: "turn-foreign",
+                tokenUsage: { last: { totalTokens: 10 } },
+                content: "sensitive payload must not be copied into diagnostics",
+              },
+            };
+            yield {
+              method: "turn/completed",
+              params: { threadId: "thread-expected", turn: { id: "turn-1", status: "completed" } },
+            };
+          },
+        };
+      },
     });
     const options = adapter.buildExpertOptions({
       role: "backend",
@@ -200,7 +204,120 @@ describe("Codex runtime adapter", () => {
       observedSessionId: "thread-foreign",
       turnId: "turn-1",
     });
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_transport_stage",
+      stage: "client_ready",
+      transport: "stdio",
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_transport_stage",
+      stage: "turn_ack",
+      transport: "stdio",
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_transport_stage",
+      stage: "first_notification",
+      method: "thread/tokenUsage/updated",
+      transport: "stdio",
+    }));
+    clientOptions?.onStderrLine?.("authorization: secret-value");
+    clientOptions?.onStderrLine?.("target=codex_api::endpoint::responses_websocket connecting");
+    clientOptions?.onStderrLine?.('{"target":"codex_api::endpoint::responses_websocket","fields":{"message":"success","headers":"cookie=private-cookie"}}');
+    clientOptions?.onStderrLine?.("Reconnecting... 2/5");
+    clientOptions?.onStderrLine?.("request timed out; retry 3/5");
+    clientOptions?.onStderrLine?.("falling back to HTTP transport");
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_transport_observed",
+      transport: "responses_websocket",
+      message: expect.stringContaining("responses_websocket"),
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_transport_observed",
+      transport: "responses_http",
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_connection_status",
+      state: "reconnecting",
+      attempt: 2,
+      maxAttempts: 5,
+      message: "Codex WebSocket 正在重连（2/5）",
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_connection_status",
+      state: "timeout",
+      attempt: 3,
+      maxAttempts: 5,
+      message: "Codex WebSocket 连接超时，正在重试（3/5）",
+    }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_connection_status",
+      state: "fallback_https",
+      message: "Codex WebSocket 不可用，已切换到 HTTPS",
+    }));
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("secret-value");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private-cookie");
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("sensitive payload");
+  });
+
+  it("reports structured retry status and clears it on the first provider output", async () => {
+    const diagnostics = vi.fn();
+    const adapter = createCodexAgentRuntimeAdapter({
+      clientFactory: () => ({
+        start: async () => {},
+        request: async (requestMethod) => {
+          if (requestMethod === "thread/start") return { thread: { id: "thread-retry" } };
+          if (requestMethod === "turn/start") return { turn: { id: "turn-retry" } };
+          throw new Error(`unexpected request: ${requestMethod}`);
+        },
+        notify: () => {},
+        respond: () => {},
+        close: () => {},
+        notifications: async function* () {
+          yield {
+            method: "error",
+            params: {
+              threadId: "thread-retry",
+              turnId: "turn-retry",
+              willRetry: true,
+              error: { message: "Reconnecting... 1/5", additionalDetails: null },
+            },
+          };
+          yield {
+            method: "item/agentMessage/delta",
+            params: { threadId: "thread-retry", turnId: "turn-retry", itemId: "item-1", delta: "ok" },
+          };
+          yield {
+            method: "turn/completed",
+            params: { threadId: "thread-retry", turn: { id: "turn-retry", status: "completed" } },
+          };
+        },
+      }),
+    });
+    const options = adapter.buildExpertOptions({
+      role: "backend",
+      systemPrompt: "expert",
+      cwd: "/tmp/project",
+      capabilities: ["read"],
+      mcpTools: [],
+      runtimeConfig: runtimeConfig(),
+      diagnostics,
+    });
+
+    for await (const event of adapter.runQuery({ prompt: adapter.createSingleTextInput("hello"), options })) {
+      if (event.type === "turn_completed") break;
+    }
+
+    const statuses = diagnostics.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.type === "provider_connection_status");
+    expect(statuses).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: "reconnecting", attempt: 1, maxAttempts: 5 }),
+      expect.objectContaining({ state: "clear" }),
+    ]));
+    const reconnectIndex = statuses.findIndex((event) => event.state === "reconnecting");
+    expect(reconnectIndex).toBeGreaterThanOrEqual(0);
+    expect(statuses.findIndex((event, index) => index > reconnectIndex && event.state === "clear"))
+      .toBeGreaterThan(reconnectIndex);
   });
 
   it("normalizes Responses endpoint URLs to provider base URLs", () => {
@@ -1299,19 +1416,30 @@ describe("Codex runtime adapter", () => {
 
   it("prepares Leader MCP as an HTTP bridge inside the Codex adapter", async () => {
     const adapter = createCodexAgentRuntimeAdapter();
+    const serverFactory = () => ({ close: async () => {} }) as any;
+    const registerCalls: Array<{ namePrefix?: string; options?: Record<string, unknown> }> = [];
     const binding = await adapter.prepareLeaderMcpServer({
       server: { close: async () => {} } as any,
+      serverFactory,
+      bindingKey: "leader:agent-session-1",
       bridgeRegistry: {
-        register: async () => ({
-          id: "leader-test",
-          url: "http://127.0.0.1:8001/api/mcp/leader/leader-test",
-          bearerToken: "secret-token",
-          bearerTokenEnvVar: "SQUADFLOW_LEADER_MCP_TOKEN_TEST",
-          close: async () => {},
-        }),
+        register: async (_server: unknown, namePrefix?: string, options?: Record<string, unknown>) => {
+          registerCalls.push({ namePrefix, options });
+          return {
+            id: "leader-test",
+            url: "http://127.0.0.1:8001/api/mcp/leader/leader-test",
+            bearerToken: "secret-token",
+            bearerTokenEnvVar: "SQUADFLOW_LEADER_MCP_TOKEN_TEST",
+            close: async () => {},
+          };
+        },
       } as any,
     });
 
+    expect(registerCalls).toEqual([{
+      namePrefix: "leader",
+      options: { stableKey: "leader:agent-session-1", createServer: serverFactory },
+    }]);
     expect(binding.mcpServerConfig).toEqual({
       type: "http",
       name: "squadflow-leader",
@@ -1323,12 +1451,15 @@ describe("Codex runtime adapter", () => {
 
   it("prepares Expert MCP (browser) as an HTTP bridge with the browser name prefix inside the Codex adapter", async () => {
     const adapter = createCodexAgentRuntimeAdapter();
-    const registerCalls: Array<{ namePrefix?: string }> = [];
+    const serverFactory = () => ({ close: async () => {} }) as any;
+    const registerCalls: Array<{ namePrefix?: string; options?: Record<string, unknown> }> = [];
     const binding = await adapter.prepareExpertMcpServer({
       server: { close: async () => {} } as any,
+      serverFactory,
+      bindingKey: "expert-browser:flow-expert-1",
       bridgeRegistry: {
-        register: async (_server: unknown, namePrefix?: string) => {
-          registerCalls.push({ namePrefix });
+        register: async (_server: unknown, namePrefix?: string, options?: Record<string, unknown>) => {
+          registerCalls.push({ namePrefix, options });
           return {
             id: "browser-test",
             url: "http://127.0.0.1:8001/api/mcp/bridge/browser-test",
@@ -1340,7 +1471,10 @@ describe("Codex runtime adapter", () => {
       } as any,
     });
 
-    expect(registerCalls).toEqual([{ namePrefix: "browser" }]);
+    expect(registerCalls).toEqual([{
+      namePrefix: "browser",
+      options: { stableKey: "expert-browser:flow-expert-1", createServer: serverFactory },
+    }]);
     expect(binding.mcpServerConfig).toEqual({
       type: "http",
       name: "squadflow-browser",

@@ -6,6 +6,8 @@ import type { BuildExpertRuntimeOptionsInput } from "../src/runtime/adapters/run
 const originalExternalCodexCommand = process.env.SQUADFLOW_EXTERNAL_CODEX_COMMAND;
 const originalOpenAiApiKey = process.env.OPENAI_API_KEY;
 const originalCodexRuntimeMode = process.env.SQUADFLOW_CODEX_RUNTIME_MODE;
+const originalTransportDebug = process.env.SQUADFLOW_CODEX_TRANSPORT_DEBUG;
+const originalRustLog = process.env.RUST_LOG;
 
 afterEach(() => {
   if (originalExternalCodexCommand === undefined) {
@@ -23,6 +25,16 @@ afterEach(() => {
   } else {
     process.env.SQUADFLOW_CODEX_RUNTIME_MODE = originalCodexRuntimeMode;
   }
+  if (originalTransportDebug === undefined) {
+    delete process.env.SQUADFLOW_CODEX_TRANSPORT_DEBUG;
+  } else {
+    process.env.SQUADFLOW_CODEX_TRANSPORT_DEBUG = originalTransportDebug;
+  }
+  if (originalRustLog === undefined) {
+    delete process.env.RUST_LOG;
+  } else {
+    process.env.RUST_LOG = originalRustLog;
+  }
 });
 
 function baseInput(overrides: Partial<BuildExpertRuntimeOptionsInput> = {}): BuildExpertRuntimeOptionsInput {
@@ -38,7 +50,7 @@ function baseInput(overrides: Partial<BuildExpertRuntimeOptionsInput> = {}): Bui
 }
 
 describe("buildCodexExpertOptions browser MCP config", () => {
-  it("removes implicit temp roots and only grants the project plus managed scratch as writable roots", () => {
+  it("grants the project, per-flow scratch, and shared pooled Codex temp as writable roots", () => {
     const options = buildCodexExpertOptions(baseInput({
       cwd: "/repo/project",
       scratchDir: "/managed/scratch",
@@ -49,8 +61,12 @@ describe("buildCodexExpertOptions browser MCP config", () => {
     expect(options.config).toEqual(expect.objectContaining({
       "sandbox_workspace_write.exclude_tmpdir_env_var": true,
       "sandbox_workspace_write.exclude_slash_tmp": true,
-      "sandbox_workspace_write.writable_roots": ["/repo/project", "/managed/scratch"],
     }));
+    expect(options.config["sandbox_workspace_write.writable_roots"]).toEqual([
+      "/repo/project",
+      "/managed/scratch",
+      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/custom$/),
+    ]);
     expect(options.env).toMatchObject({
       TMPDIR: "/managed/scratch",
       TMP: "/managed/scratch",
@@ -113,6 +129,20 @@ describe("buildCodexExpertOptions browser MCP config", () => {
     expect(options.modelProvider).toBe("openai");
     expect(options.config.model_reasoning_effort).toBeUndefined();
     expect(Object.keys(options.config).some((key) => key.startsWith("model_providers."))).toBe(false);
+    expect(options.config["sandbox_workspace_write.writable_roots"]).toContainEqual(
+      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/official$/),
+    );
+  });
+
+  it("enables opt-in Codex transport diagnostics without changing normal runs", () => {
+    process.env.SQUADFLOW_CODEX_TRANSPORT_DEBUG = "1";
+    process.env.RUST_LOG = "codex_app_server=info";
+    const options = buildCodexExpertOptions(baseInput());
+
+    expect(options.env.RUST_LOG).toContain("codex_app_server=info");
+    expect(options.env.RUST_LOG).toContain("codex_api=debug");
+    expect(options.env.RUST_LOG).toContain("codex_http_client=debug");
+    expect(options.env.RUST_LOG).toContain("codex_app_server_transport=debug");
   });
 
   it("passes Codex reasoning effort through config", () => {

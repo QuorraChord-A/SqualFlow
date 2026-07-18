@@ -1,7 +1,7 @@
 import type { AgentSession } from "../../hooks/useFlowExperts";
 import type { OrchestrationPlanView } from "../../types/orchestration";
 
-export type RightPanelTab = "overview" | "files" | "review" | "dynamic";
+export type RightPanelTab = "overview" | "files" | "dynamic";
 
 export type DynamicWorkbenchTab =
   | { type: "expert_chat"; flow_expert_id: string; agent_session_id?: string | null; title: string }
@@ -9,6 +9,7 @@ export type DynamicWorkbenchTab =
   | { type: "artifact_preview"; artifact_id: string; title: string }
   | { type: "orchestration_plan"; plan_id?: string; plan_revision_id: string; title: string; plan?: OrchestrationPlanView }
   | { type: "workspace_file_preview"; path: string | null; title: string; tabId?: string }
+  | { type: "review"; title: string }
   | { type: "browser"; title: string };
 
 export function dynamicWorkbenchTabId(tab: DynamicWorkbenchTab) {
@@ -16,6 +17,7 @@ export function dynamicWorkbenchTabId(tab: DynamicWorkbenchTab) {
   if (tab.type === "spec_preview") return `spec_preview:${tab.spec_revision_id}`;
   if (tab.type === "artifact_preview") return `artifact_preview:${tab.artifact_id}`;
   if (tab.type === "orchestration_plan") return `orchestration_plan:${tab.plan_revision_id}`;
+  if (tab.type === "review") return "review";
   if (tab.type === "browser") return "browser";
   return `workspace_file_preview:${tab.tabId ?? tab.path ?? "open-file"}`;
 }
@@ -74,6 +76,9 @@ function isDynamicWorkbenchTab(value: unknown): value is DynamicWorkbenchTab {
   if (candidate.type === "workspace_file_preview") {
     return (typeof candidate.path === "string" || candidate.path === null) && typeof candidate.title === "string";
   }
+  if (candidate.type === "review") {
+    return typeof candidate.title === "string";
+  }
   if (candidate.type === "browser") {
     return typeof candidate.title === "string";
   }
@@ -92,11 +97,20 @@ export function parseRightPanelState(raw: string | null): PersistedRightPanelSta
     const candidate = parsed.state;
     if (!candidate || typeof candidate !== "object") return null;
 
-    const tab = candidate.tab === "dynamic" || candidate.tab === "files" || candidate.tab === "review" ? candidate.tab : "overview";
+    const rawTab = (candidate as unknown as { tab?: unknown }).tab;
+    const legacyReviewSelected = rawTab === "review";
+    const tab: RightPanelTab = rawTab === "dynamic" || rawTab === "files"
+      ? rawTab
+      : legacyReviewSelected
+        ? "dynamic"
+        : "overview";
     const parsedDynamicTabsBeforePlanDedupe = Array.isArray(candidate.dynamicTabs)
       ? candidate.dynamicTabs.filter(isDynamicWorkbenchTab)
         .map((item) => isWorkspaceFileWorkbenchTab(item) ? normalizeWorkspaceFileTab(item) : item)
       : [];
+    if (legacyReviewSelected && !parsedDynamicTabsBeforePlanDedupe.some((item) => item.type === "review")) {
+      parsedDynamicTabsBeforePlanDedupe.push({ type: "review", title: "审核" });
+    }
     const activePlanTab = parsedDynamicTabsBeforePlanDedupe.find(
       (item) => item.type === "orchestration_plan" && dynamicWorkbenchTabId(item) === candidate.activeDynamicTabId,
     );
@@ -121,7 +135,9 @@ export function parseRightPanelState(raw: string | null): PersistedRightPanelSta
         : activeLegacyWorkspaceFileTab?.path ?? primaryWorkspaceFileTab?.path ?? null;
     const activeDynamicTabId = tab === "dynamic"
       ? (
-      typeof candidate.activeDynamicTabId === "string" && allowedIds.has(candidate.activeDynamicTabId)
+      legacyReviewSelected
+        ? "review"
+        : typeof candidate.activeDynamicTabId === "string" && allowedIds.has(candidate.activeDynamicTabId)
         ? candidate.activeDynamicTabId
         : null
       )
@@ -202,6 +218,10 @@ export function openWorkspaceFilesWorkbenchTab(state: RightPanelState): RightPan
 
 export function openBrowserWorkbenchTab(state: RightPanelState): RightPanelState {
   return openDynamicWorkbenchTab(state, { type: "browser", title: "浏览器" });
+}
+
+export function openReviewWorkbenchTab(state: RightPanelState): RightPanelState {
+  return openDynamicWorkbenchTab(state, { type: "review", title: "审核" });
 }
 
 export function openOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {

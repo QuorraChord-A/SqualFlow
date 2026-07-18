@@ -9,6 +9,7 @@ import {
   openBrowserWorkbenchTab,
   openDynamicWorkbenchTab,
   openOrchestrationPlanWorkbenchTab,
+  openReviewWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   openWorkspaceFilesWorkbenchTab,
   parseRightPanelState,
@@ -245,6 +246,29 @@ describe("workbenchState", () => {
     expect(state.tab).toBe("dynamic");
     expect(state.activeDynamicTabId).toBe("browser");
     expect(state.dynamicTabs).toEqual([{ type: "browser", title: "浏览器" }]);
+  });
+
+  it("opens one review dynamic tab and reuses it", () => {
+    let state = openReviewWorkbenchTab(createInitialRightPanelState());
+    state = openReviewWorkbenchTab(state);
+
+    expect(state.tab).toBe("dynamic");
+    expect(state.activeDynamicTabId).toBe("review");
+    expect(state.dynamicTabs).toEqual([{ type: "review", title: "审核" }]);
+  });
+
+  it("migrates the legacy fixed review tab to a dynamic review tab", () => {
+    const restored = parseRightPanelState(JSON.stringify({
+      isOpen: true,
+      state: {
+        ...createInitialRightPanelState(),
+        tab: "review",
+      },
+    }));
+
+    expect(restored?.state.tab).toBe("dynamic");
+    expect(restored?.state.activeDynamicTabId).toBe("review");
+    expect(restored?.state.dynamicTabs).toEqual([{ type: "review", title: "审核" }]);
   });
 
   it("reuses one plan tab when another orchestration plan is opened", () => {

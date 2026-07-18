@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import type { UIMessage } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WsInMessage } from "../../lib/ws";
-import SessionTranscriptPanel, { ensureDurablePlanCard, formatMessageTimestamp, interleaveStatusDivider, reconcileDurablePlanCard, shouldBatchTranscriptEvent } from "./SessionTranscriptPanel";
+import SessionTranscriptPanel, { ensureDurablePlanCard, formatMessageTimestamp, interleaveStatusDivider, reconcileDurablePlanCard, shouldBatchTranscriptEvent, type UserTurnDisplay } from "./SessionTranscriptPanel";
 import { orchestrationPlanFixture } from "../orchestration/orchestrationTestFixture";
 import { resetCollapseStoreForTests } from "./transcript/useCollapse";
 
@@ -339,6 +339,41 @@ describe("SessionTranscriptPanel", () => {
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
     expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", "leader-1");
+  });
+
+  it("shows live Codex reconnect status in place of the thinking label and clears it after recovery", () => {
+    render(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-1"
+        readonly
+        isAwaitingResponse
+      />,
+    );
+
+    expect(screen.getByText("正在思考")).toBeInTheDocument();
+    emit({
+      type: "runtime:transport",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: {
+        state: "reconnecting",
+        message: "Codex WebSocket 正在重连（2/5）",
+        attempt: 2,
+        max_attempts: 5,
+        runtime_role: "leader",
+      },
+    });
+    expect(screen.getByText("Codex WebSocket 正在重连（2/5）")).toBeInTheDocument();
+    expect(screen.queryByText("正在思考")).not.toBeInTheDocument();
+
+    emit({
+      type: "runtime:transport",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: { state: "clear", runtime_role: "leader" },
+    });
+    expect(screen.getByText("正在思考")).toBeInTheDocument();
   });
 
   it("renders the real permission-denied session part as rejected, not executed", async () => {
@@ -1750,7 +1785,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("已工作 3 秒")).toBeInTheDocument();
   });
 
-  it("hides the 已工作 X 秒 header for a finished turn that only replied with text", () => {
+  it("shows the 已工作 X 秒 header for a finished turn after its first text", () => {
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
     emit({
@@ -1775,64 +1810,72 @@ describe("SessionTranscriptPanel", () => {
     });
 
     expect(screen.getByText("hello")).toBeInTheDocument();
-    expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
+    expect(screen.getByText("已工作 3 秒")).toBeInTheDocument();
   });
 
   it("keeps the original start time through text and tool events", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date"] });
-    const startTime = Date.now();
-    vi.setSystemTime(startTime);
+    try {
+      const startTime = Date.now();
+      vi.setSystemTime(startTime);
 
-    render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
+      render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
-    emit({
-      type: "session:chat_event",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: { event: { type: "start", messageId: "a1", startedAt: new Date(startTime - 5000).toISOString() } },
-    });
+      emit({
+        type: "session:chat_event",
+        flow_id: "flow-1",
+        agent_session_id: "leader-1",
+        data: { event: { type: "start", messageId: "a1", startedAt: new Date(startTime - 5000).toISOString() } },
+      });
 
-    expect(screen.getByText("工作中 5 秒")).toBeInTheDocument();
+      expect(screen.getByText("正在思考")).toBeInTheDocument();
+      expect(screen.queryByText(/^工作中/)).not.toBeInTheDocument();
 
-    act(() => {
-      vi.advanceTimersByTime(1100);
-    });
+      act(() => {
+        vi.advanceTimersByTime(1100);
+      });
 
-    emit({
-      type: "session:chat_event",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: { event: { type: "text-start", id: "text-1" } },
-    });
-    emit({
-      type: "session:chat_event",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: { event: { type: "text-delta", id: "text-1", delta: "继续处理" } },
-    });
-    emit({
-      type: "session:chat_event",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: { event: { type: "tool-input-start", toolCallId: "tool-1", toolName: "Read" } },
-    });
+      emit({
+        type: "session:chat_event",
+        flow_id: "flow-1",
+        agent_session_id: "leader-1",
+        data: { event: { type: "text-start", id: "text-1" } },
+      });
+      emit({
+        type: "session:chat_event",
+        flow_id: "flow-1",
+        agent_session_id: "leader-1",
+        data: { event: { type: "text-delta", id: "text-1", delta: "继续处理" } },
+      });
+      emit({
+        type: "session:chat_event",
+        flow_id: "flow-1",
+        agent_session_id: "leader-1",
+        data: { event: { type: "tool-input-start", toolCallId: "tool-1", toolName: "Read" } },
+      });
 
-    expect(screen.getByText("工作中 6 秒")).toBeInTheDocument();
+      act(() => {
+        // Streaming text/tool updates are intentionally merged once per
+        // animation frame; advance that frame before asserting the UI.
+        vi.advanceTimersByTime(16);
+      });
+      expect(screen.getByText("工作中 6 秒")).toBeInTheDocument();
 
-    act(() => {
-      vi.setSystemTime(startTime + 7200);
-    });
+      act(() => {
+        vi.setSystemTime(startTime + 7200);
+      });
 
-    emit({
-      type: "session:chat_event",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: { event: { type: "finish", durationMs: 7200 } },
-    });
+      emit({
+        type: "session:chat_event",
+        flow_id: "flow-1",
+        agent_session_id: "leader-1",
+        data: { event: { type: "finish", durationMs: 7200 } },
+      });
 
-    expect(screen.getByText("已工作 7 秒")).toBeInTheDocument();
-
-    vi.useRealTimers();
+      expect(screen.getByText("已工作 7 秒")).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders transcript content without overflow-y-hidden", () => {
@@ -2158,6 +2201,103 @@ describe("SessionTranscriptPanel", () => {
     await waitFor(() => expect(screen.getByText("Leader says hi")).toBeInTheDocument());
     const text = container.textContent || "";
     expect(text.indexOf("你好")).toBeLessThan(text.indexOf("Leader says hi"));
+  });
+
+  it("keeps an immediately submitted next turn after the completed turn it follows", async () => {
+    const previousUser = {
+      ...userMessage("msg-user-previous", "上一轮问题"),
+      createdAt: "2026-07-18T06:10:45.876Z",
+    } as UIMessage;
+    const previousAssistant = {
+      ...message("msg-assistant-previous", "上一轮回复"),
+      createdAt: "2026-07-18T06:10:45.899Z",
+      metadata: {
+        turnTiming: {
+          startedAt: "2026-07-18T06:10:45.899Z",
+          finishedAt: "2026-07-18T06:10:50.291Z",
+          durationMs: 4392,
+        },
+      },
+    } as UIMessage;
+    const previousTurn: UserTurnDisplay = {
+      id: "turn-previous",
+      triggerMessageId: previousUser.id,
+      status: "completed",
+      startedAt: "2026-07-18T06:10:45.876Z",
+      activeStartedAt: null,
+      activeDurationMs: 4392,
+      completedAt: "2026-07-18T06:10:50.291Z",
+    };
+    const nextUser = {
+      ...userMessage("msg-user-next", "下一轮立即发送"),
+      createdAt: "2026-07-18T06:10:50.314Z",
+    } as UIMessage;
+    const nextTurn: UserTurnDisplay = {
+      id: "turn-next",
+      triggerMessageId: nextUser.id,
+      status: "active",
+      startedAt: "2026-07-18T06:10:50.314Z",
+      activeStartedAt: "2026-07-18T06:10:50.314Z",
+      activeDurationMs: 0,
+      completedAt: null,
+    };
+
+    const { container, rerender } = render(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-1"
+        readonly
+        userTurns={[previousTurn]}
+      />,
+    );
+
+    emit({
+      type: "session:transcript_snapshot",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: { cursor: 10, messages: [previousUser, previousAssistant] },
+    });
+    await waitFor(() => expect(screen.getByText("上一轮回复")).toBeInTheDocument());
+
+    rerender(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-1"
+        readonly
+        optimisticMessages={[nextUser]}
+        userTurns={[previousTurn, nextTurn]}
+        isAwaitingResponse
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("下一轮立即发送")).toBeInTheDocument());
+
+    // A completion resync can arrive after the next message was submitted,
+    // but before the next assistant turn starts. It must not move the local
+    // message ahead of the completed snapshot it originally followed.
+    emit({
+      type: "session:transcript_snapshot",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: { cursor: 11, messages: [previousUser, previousAssistant] },
+    });
+    emit({
+      type: "session:transcript_event",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: {
+        cursor: 12,
+        event: {
+          type: "turn-started",
+          messageId: "msg-assistant-next",
+          startedAt: "2026-07-18T06:10:50.337Z",
+        },
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText("正在思考")).toBeInTheDocument());
+    const text = container.textContent ?? "";
+    expect(text.indexOf("上一轮回复")).toBeLessThan(text.indexOf("下一轮立即发送"));
+    expect(text.indexOf("下一轮立即发送")).toBeLessThan(text.lastIndexOf("正在思考"));
   });
 
   it("renders annotation previews from user-message metadata", async () => {

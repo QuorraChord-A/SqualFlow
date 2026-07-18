@@ -50,6 +50,8 @@ export interface LeaderChatPanelProps {
   flowId: string | null;
   leaderAgentSessionId: string | null;
   initialOptimisticMessages?: UIMessage[];
+  initialPlanModeReturnRiskMode?: RiskMode | null;
+  onInitialPlanModeResolved?: () => void;
   flowStatus?: string;
   decisionCardStatuses: Record<string, "pending" | "resolved" | "cancelled">;
   decisionCardAnswers: Record<string, Record<string, string | string[]>>;
@@ -82,6 +84,7 @@ type UserTurnWire = {
   active_duration_ms?: number | null;
   completed_at?: string | null;
   work_root_path?: string | null;
+  input_snapshot_json?: string | null;
 };
 
 type PendingGuideMessage = {
@@ -101,6 +104,45 @@ type LeaderMessageOptions = {
   planFeedback?: PlanFeedbackDraft[];
   reuseActiveUserTurn?: boolean;
 };
+
+const acceptedPlanApprovalStatuses = new Set(["approved", "auto_approved"]);
+const pendingPlanRevisionStatuses = new Set(["generating", "pending", "pending_approval", "feedback_pending"]);
+
+function hasPendingPlanWorkflow(
+  specCards: Record<string, SpecCardState>,
+  plans: OrchestrationPlanView[],
+) {
+  if (Object.values(specCards).some((card) => card.status === "pending")) return true;
+  return plans.some((plan) => {
+    const approvalStatus = plan.approval?.status;
+    return approvalStatus === "pending"
+      || approvalStatus === "feedback_pending"
+      || pendingPlanRevisionStatuses.has(plan.revision.status);
+  });
+}
+
+function planApprovalEventField(data: unknown, camelName: string, snakeName: string) {
+  if (!data || typeof data !== "object") return undefined;
+  const record = data as Record<string, unknown>;
+  return record[camelName] ?? record[snakeName];
+}
+
+function planApprovalBelongsToSession(
+  data: unknown,
+  startedAt: number | null,
+  userTurnId: string | null,
+) {
+  const eventUserTurnId = planApprovalEventField(data, "userTurnId", "user_turn_id");
+  if (userTurnId && typeof eventUserTurnId === "string") return eventUserTurnId === userTurnId;
+  const createdAt = planApprovalEventField(data, "createdAt", "created_at");
+  if (startedAt !== null && typeof createdAt === "string") {
+    const timestamp = Date.parse(createdAt);
+    if (Number.isFinite(timestamp)) return timestamp >= startedAt - 2_000;
+  }
+  // A plan approval event without either identity is still useful for a newly
+  // entered plan mode, but it cannot match a session already tied to a turn.
+  return !userTurnId;
+}
 
 function outgoingAttachmentsForMessage(options: Pick<
   LeaderMessageOptions,
@@ -170,6 +212,13 @@ function normalizeUserTurn(value: unknown): UserTurnDisplay | null {
   const turn = value as UserTurnWire;
   const id = turn.user_turn_id ?? turn.id;
   if (!id || !turn.trigger_message_id) return null;
+  let specRequested = false;
+  try {
+    const snapshot = JSON.parse(turn.input_snapshot_json ?? "{}") as { spec_requested?: unknown };
+    specRequested = snapshot.spec_requested === true;
+  } catch {
+    // Invalid legacy snapshots must not prevent the turn from rendering.
+  }
   return {
     id,
     triggerMessageId: turn.trigger_message_id,
@@ -179,6 +228,7 @@ function normalizeUserTurn(value: unknown): UserTurnDisplay | null {
     activeDurationMs: typeof turn.active_duration_ms === "number" ? turn.active_duration_ms : 0,
     completedAt: turn.completed_at ?? null,
     workRootPath: turn.work_root_path?.trim() || undefined,
+    specRequested,
   };
 }
 
@@ -432,6 +482,8 @@ export default function LeaderChatPanel({
   flowId,
   leaderAgentSessionId,
   initialOptimisticMessages = [],
+  initialPlanModeReturnRiskMode = null,
+  onInitialPlanModeResolved,
   flowStatus,
   decisionCardStatuses,
   decisionCardAnswers,
@@ -459,6 +511,7 @@ export default function LeaderChatPanel({
   const [userTurns, setUserTurns] = useState<UserTurnDisplay[]>([]);
   const [followRequestKey, setFollowRequestKey] = useState(0);
   const [specRequested, setSpecRequested] = useState(false);
+  const [planModeLocked, setPlanModeLocked] = useState(false);
   const [riskMode, setRiskMode] = useState<RiskMode>(initialRiskMode);
   const [planApproval, setPlanApproval] = useState<PlanApproval>(initialPlanApproval);
   const [settingsUpdating, setSettingsUpdating] = useState(false);
@@ -482,6 +535,12 @@ export default function LeaderChatPanel({
   const restoredQueueNeedsFlowStateRef = useRef(false);
   const restoredQueueObservedWaitingRef = useRef(false);
   const pendingGuidesRef = useRef(new Map<string, PendingGuideMessage>());
+  const planModeReturnRiskModeRef = useRef<RiskMode>(initialRiskMode);
+  const planModeReturnRiskModeSetRef = useRef(false);
+  const planModeStartedAtRef = useRef<number | null>(null);
+  const planModeUserTurnIdRef = useRef<string | null>(null);
+  const planModeResolvedRevisionIdRef = useRef<string | null>(null);
+  const planModeResolvedRef = useRef(false);
   const settingsMutationRef = useRef({ flowId, requestId: 0, pending: false });
   if (settingsMutationRef.current.flowId !== flowId) {
     settingsMutationRef.current = {
@@ -506,6 +565,62 @@ export default function LeaderChatPanel({
     updateFlowQueue(flowId, updater);
   }, [flowId, updateFlowQueue]);
 
+  const mergedUserTurns = useMemo(
+    () => userTurns.reduce((merged, turn) => mergeUserTurn(merged, turn), dashboardUserTurns),
+    [dashboardUserTurns, userTurns],
+  );
+
+  const enterPlanMode = useCallback((userTurnId?: string | null) => {
+    if (!planModeLocked) {
+      planModeResolvedRevisionIdRef.current = null;
+      planModeResolvedRef.current = false;
+    }
+    if (!planModeReturnRiskModeSetRef.current) {
+      planModeReturnRiskModeRef.current = riskMode;
+      planModeReturnRiskModeSetRef.current = true;
+    }
+    if (planModeStartedAtRef.current === null) planModeStartedAtRef.current = Date.now();
+    if (userTurnId) planModeUserTurnIdRef.current = userTurnId;
+    setSpecRequested(true);
+    setPlanModeLocked(true);
+  }, [planModeLocked, riskMode]);
+
+  const exitPlanMode = useCallback((resolvedRevisionId?: string | null) => {
+    const restoreRiskMode = planModeReturnRiskModeRef.current;
+    setSpecRequested(false);
+    setPlanModeLocked(false);
+    setRiskMode(restoreRiskMode);
+    planModeReturnRiskModeSetRef.current = false;
+    planModeStartedAtRef.current = null;
+    planModeUserTurnIdRef.current = null;
+    planModeResolvedRevisionIdRef.current = resolvedRevisionId ?? null;
+    planModeResolvedRef.current = true;
+    onInitialPlanModeResolved?.();
+  }, [onInitialPlanModeResolved]);
+
+  const handleSpecChange = useCallback((requested: boolean) => {
+    if (requested) {
+      if (!planModeLocked) {
+        planModeResolvedRevisionIdRef.current = null;
+        planModeResolvedRef.current = false;
+      }
+      if (!planModeReturnRiskModeSetRef.current) {
+        planModeReturnRiskModeRef.current = riskMode;
+        planModeReturnRiskModeSetRef.current = true;
+      }
+      setSpecRequested(true);
+      return;
+    }
+    // Before the first plan message is accepted the user may change their mind.
+    // Once it is sent, approval (or an explicit stop) owns the transition back.
+    if (!planModeLocked) {
+      setSpecRequested(false);
+      planModeReturnRiskModeSetRef.current = false;
+      planModeStartedAtRef.current = null;
+      planModeUserTurnIdRef.current = null;
+    }
+  }, [planModeLocked, riskMode]);
+
   useEffect(() => {
     setOptimisticMessages([]);
     setGuidedMessages([]);
@@ -519,12 +634,19 @@ export default function LeaderChatPanel({
     setSettingsUpdating(false);
     setRuntimeSelectionUpdating(false);
     setSpecRequested(false);
+    setPlanModeLocked(false);
+    planModeReturnRiskModeRef.current = initialRiskMode;
+    planModeReturnRiskModeSetRef.current = false;
+    planModeStartedAtRef.current = null;
+    planModeUserTurnIdRef.current = null;
+    planModeResolvedRevisionIdRef.current = null;
+    planModeResolvedRef.current = false;
     const restoredMessages = flowId ? hydrateFlowQueue(flowId) : EMPTY_RUNNING_QUEUE;
     const restoredKnownRunning = flowId ? hydrateKnownRunningFlow(flowId) : false;
     restoredQueueNeedsFlowStateRef.current = restoredMessages.length > 0 || restoredKnownRunning;
     restoredQueueObservedWaitingRef.current = false;
     pendingGuidesRef.current.clear();
-  }, [flowId, hydrateFlowQueue, hydrateKnownRunningFlow]);
+  }, [flowId, hydrateFlowQueue, hydrateKnownRunningFlow, initialRiskMode]);
 
   useEffect(() => {
     if (dashboardUserTurns.length > 0) {
@@ -534,11 +656,92 @@ export default function LeaderChatPanel({
 
   useEffect(() => {
     setRiskMode(initialRiskMode);
-  }, [flowId, initialRiskMode]);
+    if (!planModeLocked) {
+      planModeReturnRiskModeRef.current = initialRiskMode;
+      planModeReturnRiskModeSetRef.current = false;
+    }
+  }, [flowId, initialRiskMode, planModeLocked]);
 
   useEffect(() => {
     setPlanApproval(initialPlanApproval);
   }, [flowId, initialPlanApproval]);
+
+  useEffect(() => {
+    if (!flowId || initialPlanModeReturnRiskMode === null || planModeResolvedRef.current) return;
+    planModeReturnRiskModeRef.current = initialPlanModeReturnRiskMode;
+    planModeReturnRiskModeSetRef.current = true;
+    if (planModeStartedAtRef.current === null) planModeStartedAtRef.current = Date.now();
+    setSpecRequested(true);
+    setPlanModeLocked(true);
+  }, [flowId, initialPlanModeReturnRiskMode]);
+
+  useEffect(() => {
+    if (!flowId) return;
+
+    const pendingSpec = Object.values(specCards).find((card) => card.status === "pending");
+    const pendingPlan = orchestrationPlans.find((plan) => {
+      const approvalStatus = plan.approval?.status;
+      return approvalStatus === "pending"
+        || approvalStatus === "feedback_pending"
+        || pendingPlanRevisionStatuses.has(plan.revision.status);
+    });
+    const pendingWorkflow = hasPendingPlanWorkflow(specCards, orchestrationPlans);
+    const openSpecTurn = mergedUserTurns.find((turn) =>
+      (turn.status === "active" || turn.status === "waiting_user") && turn.specRequested
+    );
+
+    const pendingPlanWasJustResolved = Boolean(
+      pendingPlan
+      && planModeResolvedRevisionIdRef.current === pendingPlan.revision.plan_revision_id,
+    );
+
+    if (
+      !planModeResolvedRef.current
+      && (initialPlanModeReturnRiskMode !== null || openSpecTurn || pendingWorkflow)
+      && !pendingPlanWasJustResolved
+    ) {
+      if (!planModeReturnRiskModeSetRef.current) {
+        planModeReturnRiskModeRef.current = initialRiskMode;
+        planModeReturnRiskModeSetRef.current = true;
+      }
+      if (planModeStartedAtRef.current === null) {
+        const createdAt = pendingPlan?.revision.created_at || pendingPlan?.approval?.created_at;
+        const parsedCreatedAt = createdAt ? Date.parse(createdAt) : NaN;
+        planModeStartedAtRef.current = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now();
+      }
+      if (pendingSpec?.user_turn_id) planModeUserTurnIdRef.current = pendingSpec.user_turn_id;
+      if (pendingPlan?.user_turn_id) planModeUserTurnIdRef.current = pendingPlan.user_turn_id;
+      if (openSpecTurn?.id) planModeUserTurnIdRef.current = openSpecTurn.id;
+      setSpecRequested(true);
+      setPlanModeLocked(true);
+      return;
+    }
+
+    if (!planModeLocked) return;
+    const acceptedPlan = orchestrationPlans.find((plan) => {
+      const status = plan.approval?.status;
+      return typeof status === "string"
+        && acceptedPlanApprovalStatuses.has(status)
+        && planApprovalBelongsToSession(
+          {
+            userTurnId: plan.user_turn_id,
+            createdAt: plan.approval?.created_at ?? plan.revision.created_at,
+          },
+          planModeStartedAtRef.current,
+          planModeUserTurnIdRef.current,
+        );
+    });
+    if (acceptedPlan) exitPlanMode(acceptedPlan.revision.plan_revision_id);
+  }, [
+    exitPlanMode,
+    flowId,
+    initialPlanModeReturnRiskMode,
+    initialRiskMode,
+    mergedUserTurns,
+    orchestrationPlans,
+    planModeLocked,
+    specCards,
+  ]);
 
   useEffect(() => {
     if (!flowId) return;
@@ -587,8 +790,36 @@ export default function LeaderChatPanel({
         setFlowStateConfirmed(true);
         const turn = normalizeUserTurn(msg.data);
         if (turn) {
+          if (
+            planModeLocked
+            && planModeUserTurnIdRef.current === null
+            && planModeStartedAtRef.current !== null
+            && turn.startedAt
+            && Date.parse(turn.startedAt) >= planModeStartedAtRef.current - 2_000
+          ) {
+            planModeUserTurnIdRef.current = turn.id;
+          }
           setKnownRunningFlow(flowId, turn.status === "active");
           setUserTurns((prev) => mergeUserTurn(prev, turn));
+        }
+        return;
+      }
+
+      if (msg.type === "plan_approval:event") {
+        if (msg.flow_id !== flowId) return;
+        const approvalStatus = planApprovalEventField(msg.data, "status", "status");
+        if (
+          planModeLocked
+          && typeof approvalStatus === "string"
+          && acceptedPlanApprovalStatuses.has(approvalStatus)
+          && planApprovalBelongsToSession(
+            msg.data,
+            planModeStartedAtRef.current,
+            planModeUserTurnIdRef.current,
+          )
+        ) {
+          const revisionId = planApprovalEventField(msg.data, "planRevisionId", "plan_revision_id");
+          exitPlanMode(typeof revisionId === "string" ? revisionId : null);
         }
         return;
       }
@@ -641,15 +872,11 @@ export default function LeaderChatPanel({
     });
 
     return unsubscribe;
-  }, [flowId, leaderAgentSessionId, setKnownRunningFlow]);
+  }, [exitPlanMode, flowId, leaderAgentSessionId, planModeLocked, setKnownRunningFlow]);
 
   const transcriptOptimisticMessages = useMemo(
     () => [...initialOptimisticMessages, ...optimisticMessages, ...guidedMessages],
     [guidedMessages, initialOptimisticMessages, optimisticMessages],
-  );
-  const mergedUserTurns = useMemo(
-    () => userTurns.reduce((merged, turn) => mergeUserTurn(merged, turn), dashboardUserTurns),
-    [dashboardUserTurns, userTurns],
   );
   const isAuthoritativelyIdle = flowStateConfirmed && flowStatus === "idle" && !knownRunningFlow;
   const isStreaming = status === "streaming" && !isAuthoritativelyIdle;
@@ -717,7 +944,7 @@ export default function LeaderChatPanel({
   }, [flowId, leaderAgentSessionId]);
 
   const handleRiskModeChange = useCallback(async (next: RiskMode) => {
-    if (!flowId || next === riskMode || settingsMutationRef.current.pending) return;
+    if (!flowId || planModeLocked || next === riskMode || settingsMutationRef.current.pending) return;
     const previous = riskMode;
     const requestId = settingsMutationRef.current.requestId + 1;
     settingsMutationRef.current = { flowId, requestId, pending: true };
@@ -742,7 +969,7 @@ export default function LeaderChatPanel({
         setSettingsUpdating(false);
       }
     }
-  }, [flowId, riskMode]);
+  }, [flowId, planModeLocked, riskMode]);
 
   const handlePlanApprovalChange = useCallback(async (next: PlanApproval) => {
     if (!flowId || next === planApproval || settingsMutationRef.current.pending) return;
@@ -836,6 +1063,10 @@ export default function LeaderChatPanel({
           ? `网页圈选评论（${options.browserElementAttachments.length} 条）`
           : text);
 
+      // Lock the mode before the WS send so an immediate plan event cannot
+      // race the local transition back to the previous risk mode.
+      if (options.specRequested) enterPlanMode(activeUserTurn?.id);
+
       const logId = wsClient.genLogId();
       const clientMessageId = `msg-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const createdAt = new Date();
@@ -889,7 +1120,7 @@ export default function LeaderChatPanel({
       });
       return true;
     },
-    [activeUserTurn, flowId, leaderModelConfigured, setKnownRunningFlow],
+    [activeUserTurn, enterPlanMode, flowId, leaderModelConfigured, setKnownRunningFlow],
   );
 
   useEffect(() => {
@@ -946,12 +1177,13 @@ export default function LeaderChatPanel({
 
   const handleComposerSend = useCallback((text: string, options: LeaderMessageOptions = {}): Promise<boolean> | boolean => {
     if (runtimeSelectionUpdating) return false;
+    if (options.specRequested) enterPlanMode(activeUserTurn?.id);
     if (shouldQueueNewMessage) {
       enqueueMessage(text, options);
       return true;
     }
     return sendMessage(text, options);
-  }, [enqueueMessage, runtimeSelectionUpdating, sendMessage, shouldQueueNewMessage]);
+  }, [activeUserTurn, enqueueMessage, enterPlanMode, runtimeSelectionUpdating, sendMessage, shouldQueueNewMessage]);
 
   const handleComposerSendWithAttachments = useCallback(async (text: string): Promise<boolean> => {
     const content = text;
@@ -967,7 +1199,6 @@ export default function LeaderChatPanel({
       outgoingAttachments,
       specRequested,
     }));
-    if (sent !== false) setSpecRequested(false);
     if (sent !== false && (browserElementAttachments.length > 0 || imageAttachments.length > 0 || planFeedback.length > 0)) {
       if (browserElementAttachments.length > 0) {
         clearBrowserElementAttachments();
@@ -1021,8 +1252,9 @@ export default function LeaderChatPanel({
     }
     if (message.imageAttachments?.length) addImageAttachments(message.imageAttachments);
     if (message.planFeedback?.length) setPlanFeedback(message.planFeedback);
-    setSpecRequested(Boolean(message.specRequested));
-  }, [addImageAttachments, handleComposerValueChange, setBrowserElementAttachments, setPlanFeedback, updateQueuedMessages]);
+    if (message.specRequested) enterPlanMode();
+    else if (!planModeLocked) setSpecRequested(false);
+  }, [addImageAttachments, enterPlanMode, handleComposerValueChange, planModeLocked, setBrowserElementAttachments, setPlanFeedback, updateQueuedMessages]);
 
   const handleDeleteQueuedMessage = useCallback((messageId: string) => {
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== messageId));
@@ -1033,6 +1265,7 @@ export default function LeaderChatPanel({
     wsClient.sendUserTurnCancel(flowId, activeUserTurn.id);
     setStatus("ready");
     setKnownRunningFlow(flowId, false);
+    exitPlanMode();
     updateQueuedMessages(() => []);
     pendingGuidesRef.current.clear();
     handleComposerValueChange("");
@@ -1044,7 +1277,7 @@ export default function LeaderChatPanel({
         completedAt: new Date().toISOString(),
       }));
     }
-  }, [activeUserTurn, flowId, handleComposerValueChange, setKnownRunningFlow, updateQueuedMessages]);
+  }, [activeUserTurn, exitPlanMode, flowId, handleComposerValueChange, setKnownRunningFlow, updateQueuedMessages]);
 
   const handleGuideQueuedMessage = useCallback((message: RunningQueuedMessage) => {
     if (!flowId || !leaderModelConfigured) return;
@@ -1154,8 +1387,9 @@ export default function LeaderChatPanel({
       specRequested={specRequested}
       riskMode={riskMode}
       planApproval={planApproval}
+      planModeLocked={planModeLocked}
       disabled={!flowId || settingsUpdating}
-      onSpecChange={setSpecRequested}
+      onSpecChange={handleSpecChange}
       onRiskModeChange={handleRiskModeChange}
       onPlanApprovalChange={handlePlanApprovalChange}
     />
@@ -1163,7 +1397,12 @@ export default function LeaderChatPanel({
   const composer = (
     <div
       data-testid="leader-chat-composer"
-      className={isCompactComposer ? "pointer-events-auto mx-auto w-full max-w-full" : "pointer-events-none absolute inset-x-0 bottom-4 z-20"}
+      data-layout={hasPendingDecisionCards && !isCompactComposer ? "docked" : "overlay"}
+      className={isCompactComposer
+        ? "pointer-events-auto mx-auto w-full max-w-full"
+        : hasPendingDecisionCards
+          ? "pointer-events-none relative z-20 shrink-0 pb-4"
+          : "pointer-events-none absolute inset-x-0 bottom-4 z-20"}
     >
       <div className={isCompactComposer ? "mx-auto w-full" : "pointer-events-auto mx-auto w-full max-w-full space-y-3"}>
         {hasPendingDecisionCards ? (
@@ -1250,7 +1489,7 @@ export default function LeaderChatPanel({
           onOpenPlan={onOpenPlan}
           onApprovePlan={approvePlan}
           className="relative h-full overflow-y-hidden"
-          bottomOverlayHeight={queuedMessages.length > 0 ? 296 : 132}
+          bottomOverlayHeight={hasPendingDecisionCards ? 0 : queuedMessages.length > 0 ? 296 : 132}
           emptyTitle="开始对话"
           emptyDescription="发送消息开始与 AI 助手对话"
           statusDividerLabel={compactionDividerLabel}

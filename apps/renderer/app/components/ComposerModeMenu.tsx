@@ -49,6 +49,8 @@ interface ComposerModeMenuProps {
   specRequested: boolean;
   riskMode?: RiskMode;
   planApproval?: PlanApproval;
+  /** Once a Spec/Plan turn has been sent, only approval (or an explicit stop) may leave plan mode. */
+  planModeLocked?: boolean;
   disabled?: boolean;
   onSpecChange: (requested: boolean) => void;
   onRiskModeChange?: (mode: RiskMode) => void;
@@ -59,6 +61,7 @@ export default function ComposerModeMenu({
   specRequested,
   riskMode = "auto_edit",
   planApproval = "on",
+  planModeLocked = false,
   disabled = false,
   onSpecChange,
   onRiskModeChange,
@@ -87,6 +90,7 @@ export default function ComposerModeMenu({
   }, [selectedMode]);
 
   const selectMode = (value: (typeof modeOptions)[number]["value"]) => {
+    if (planModeLocked && value !== "plan") return;
     const currentIndex = modeOptions.findIndex((option) => option.value === selectedMode);
     const nextIndex = modeOptions.findIndex((option) => option.value === value);
     setRollDirection(nextIndex >= currentIndex ? 1 : -1);
@@ -186,14 +190,16 @@ export default function ComposerModeMenu({
         >
           {modeOptions.map((option) => {
             const Icon = option.icon;
+            const optionLocked = planModeLocked && option.value !== "plan";
             return (
               <button
                 key={option.value}
                 type="button"
                 aria-label={`${option.label}：${option.description}`}
                 aria-pressed={selectedMode === option.value}
+                disabled={disabled || optionLocked}
                 onClick={() => selectMode(option.value)}
-                className={`flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-ui-control-hover ${
+                className={`flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-ui-control-hover disabled:cursor-not-allowed disabled:opacity-45 ${
                   selectedMode === option.value ? "bg-ui-control" : ""
                 }`}
               >

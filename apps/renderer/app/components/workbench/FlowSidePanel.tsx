@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useState, type PointerEvent, type ReactNode } from "react";
-import { Expand, Globe2, Minimize2, PanelRightClose, PanelRightOpen, Plus, X } from "lucide-react";
+import { Expand, FileDiff, Globe2, Minimize2, PanelRightClose, PanelRightOpen, Plus, X } from "lucide-react";
 import type { FlowWorkbench, WorkbenchTeamMember } from "../../hooks/useFlowWorkbench";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -21,6 +21,7 @@ import {
   dynamicWorkbenchTabId,
   openBrowserWorkbenchTab,
   openDynamicWorkbenchTab,
+  openReviewWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   type DynamicWorkbenchTab,
   type RightPanelCollapsedSections,
@@ -57,7 +58,7 @@ function workspaceFileTitle(path: string | null) {
 }
 
 type WorkbenchAddAction = {
-  id: "browser";
+  id: "browser" | "review";
   label: string;
   icon: ReactNode;
   onSelect?: () => void;
@@ -70,6 +71,7 @@ type FlowSidePanelHeaderProps = {
   isMaximized?: boolean;
   onToggleMaximize?: () => void;
   onOpenBrowser?: () => void;
+  onOpenReview?: () => void;
 };
 
 export function FlowSidePanelHeader({
@@ -78,8 +80,9 @@ export function FlowSidePanelHeader({
   isMaximized = false,
   onToggleMaximize = () => {},
   onOpenBrowser = () => {},
+  onOpenReview = () => {},
 }: FlowSidePanelHeaderProps) {
-  const setTab = (tab: "overview" | "files" | "review") => {
+  const setTab = (tab: "overview" | "files") => {
     onStateChange({
       ...state,
       tab,
@@ -87,10 +90,10 @@ export function FlowSidePanelHeader({
     });
   };
   const hasBrowserTab = state.dynamicTabs.some((tab) => tab.type === "browser");
-  const fixedTabs: { id: "overview" | "files" | "review"; label: string; icon?: ReactNode }[] = [
+  const hasReviewTab = state.dynamicTabs.some((tab) => tab.type === "review");
+  const fixedTabs: { id: "overview" | "files"; label: string; icon?: ReactNode }[] = [
     { id: "overview", label: "概要" },
     { id: "files", label: workspaceFileTitle(state.activeWorkspaceFilePath) },
-    { id: "review", label: "审核" },
   ];
   const addActions: WorkbenchAddAction[] = [
     ...(!hasBrowserTab
@@ -99,6 +102,14 @@ export function FlowSidePanelHeader({
           label: "浏览器",
           icon: <Globe2 className="size-4" />,
           onSelect: onOpenBrowser,
+        }]
+      : []),
+    ...(!hasReviewTab
+      ? [{
+          id: "review" as const,
+          label: "审核",
+          icon: <FileDiff className="size-4" />,
+          onSelect: onOpenReview,
         }]
       : []),
   ];
@@ -541,6 +552,9 @@ function DynamicTabContent({
   if (tab.type === "browser") {
     return <DesktopBrowserPanel flowId={flowId} visible={browserVisible} />;
   }
+  if (tab.type === "review") {
+    return <ReviewDiffPanel review={workbench.review} />;
+  }
   return null;
 }
 
@@ -615,6 +629,10 @@ export default function FlowSidePanel({
     onStateChange(openBrowserWorkbenchTab(state));
   };
 
+  const openReview = () => {
+    onStateChange(openReviewWorkbenchTab(state));
+  };
+
   const openWorkspaceFileInBrowser = (url: string) => {
     onStateChange(openBrowserWorkbenchTab(state));
     const bridge = getDesktopBrowserBridge();
@@ -643,7 +661,7 @@ export default function FlowSidePanel({
       ? activeDynamicTab.path
       : null;
   const isFileWorkspace = state.tab === "files" || activeDynamicTab?.type === "workspace_file_preview";
-  const isReviewWorkspace = state.tab === "review";
+  const isReviewWorkspace = activeDynamicTab?.type === "review";
   const isBrowserWorkspace = activeDynamicTab?.type === "browser";
   const isAnimatingDrawer = drawerAnimation !== null;
   const isOverlayDrawer = !isMaximized && (!isOpen || isAnimatingDrawer);
@@ -713,6 +731,7 @@ export default function FlowSidePanel({
           isMaximized={isMaximized}
           onToggleMaximize={onToggleMaximize}
           onOpenBrowser={openBrowser}
+          onOpenReview={openReview}
         />
 
         <div className={isFileWorkspace || isBrowserWorkspace || isReviewWorkspace ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto"}>
@@ -738,8 +757,6 @@ export default function FlowSidePanel({
             treeVisible={fileTreeVisible}
             onTreeVisibleChange={handleFileTreeVisibleChange}
           />
-        ) : isReviewWorkspace ? (
-          <ReviewDiffPanel review={workbench.review} />
         ) : (
           <DynamicTabContent
             flowId={flowId}

@@ -41,6 +41,21 @@ export type WsInMessage =
   | { type: "flow_expert:event"; flow_id: string; data: any }
   | { type: "context_usage:event"; flow_id: string; data: any }
   | { type: "context_compaction:event"; flow_id: string; data: any }
+  | {
+      type: "runtime:transport";
+      flow_id: string;
+      agent_session_id: string;
+      flow_expert_id?: string;
+      data: {
+        state: "reconnecting" | "timeout" | "fallback_https" | "clear";
+        message?: string;
+        attempt?: number;
+        max_attempts?: number;
+        runtime_role: "leader" | "expert";
+        user_turn_id?: string;
+        task_id?: string;
+      };
+    }
   | { type: "flow:decision_card"; flow_id: string; data: any }
   | { type: "flow:decision_card_resolved"; flow_id: string; data: any }
   | { type: "flow:spec_card"; flow_id: string; data: any }

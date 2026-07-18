@@ -209,14 +209,16 @@ describe('NewTaskView', () => {
         content: '实现左侧面板',
         parts: [{ type: 'text', text: '实现左侧面板' }],
       }),
+      null,
     );
   });
 
   it('creates a task with a one-shot Plan mode request', async () => {
     const user = userEvent.setup();
+    const onTaskCreated = vi.fn();
     const { wsClient } = await import('../lib/ws');
 
-    render(<NewTaskView />);
+    render(<NewTaskView onTaskCreated={onTaskCreated} />);
 
     await user.click(screen.getByRole('button', { name: '执行模式：自动编辑' }));
     await user.click(screen.getByRole('button', { name: /计划模式：/ }));
@@ -239,6 +241,11 @@ describe('NewTaskView', () => {
       content: '先写规格',
       spec_requested: true,
     }));
+    expect(onTaskCreated).toHaveBeenCalledWith(
+      createdFlow.id,
+      expect.objectContaining({ content: '先写规格' }),
+      'auto_edit',
+    );
   });
 
   it('persists new-Flow mode choices only as defaults for later new Flows', async () => {

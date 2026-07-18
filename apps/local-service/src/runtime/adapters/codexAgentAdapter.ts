@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { createCodexToUiChunkAdapter } from "../../adapter/codexToUiChunks.js";
 import {
   liveContextUsageToSnapshot,
@@ -34,6 +35,7 @@ import type {
   BuildExpertRuntimeOptionsInput,
   BuildLeaderRuntimeOptionsInput,
   RuntimeOutputAdapter,
+  RuntimeDiagnosticEvent,
   RuntimeQueryInput,
   RuntimeRawQueryLike,
   RuntimeResultInfo,
@@ -178,6 +180,160 @@ function arrayValue(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function appServerTransport(args: string[] | undefined): "stdio" | "websocket" | "unix" | "unknown" {
+  if (!args) return "unknown";
+  if (args.includes("--stdio") || args.includes("stdio://")) return "stdio";
+  if (args.some((arg) => arg.startsWith("ws://") || arg.startsWith("wss://"))) return "websocket";
+  if (args.some((arg) => arg.startsWith("unix://"))) return "unix";
+  return "unknown";
+}
+
+function proxyPresence(env: NodeJS.ProcessEnv | undefined) {
+  const has = (...names: string[]) => names.some((name) => Boolean(env?.[name]?.trim()));
+  return {
+    http: has("HTTP_PROXY", "http_proxy"),
+    https: has("HTTPS_PROXY", "https_proxy"),
+    all: has("ALL_PROXY", "all_proxy"),
+    noProxy: has("NO_PROXY", "no_proxy"),
+  };
+}
+
+function scrubDiagnosticText(value: string): string {
+  const withoutSecrets = value
+    .replace(
+      /(authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
+      "$1$2<redacted>",
+    )
+    .replace(
+      /(authorization|proxy-authorization|cookie|set-cookie)(\s+)([^\s,;}]+)/gi,
+      "$1$2<redacted>",
+    );
+  const withoutQuery = withoutSecrets.replace(/https?:\/\/[^\s"']+/gi, (value) => {
+    try {
+      const url = new URL(value);
+      return `${url.protocol}//${url.host}${url.pathname}`;
+    } catch {
+      return "<url>";
+    }
+  });
+  return withoutQuery.slice(0, 500);
+}
+
+function sanitizedStderrLine(line: string): string {
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    if (isRecord(parsed)) {
+      const fields = isRecord(parsed.fields) ? parsed.fields : {};
+      const span = isRecord(parsed.span) ? parsed.span : {};
+      const safeFields: Record<string, unknown> = {};
+      for (const key of ["message", "method", "status", "transport", "api.path", "name"]) {
+        if (fields[key] !== undefined) safeFields[key] = typeof fields[key] === "string"
+          ? scrubDiagnosticText(fields[key] as string)
+          : fields[key];
+      }
+      const safeSpan: Record<string, unknown> = {};
+      for (const key of ["api.path", "transport", "name"]) {
+        if (span[key] !== undefined) safeSpan[key] = span[key];
+      }
+      return JSON.stringify({
+        ...(typeof parsed.timestamp === "string" ? { timestamp: parsed.timestamp } : {}),
+        ...(typeof parsed.level === "string" ? { level: parsed.level } : {}),
+        ...(typeof parsed.target === "string" ? { target: parsed.target } : {}),
+        ...(Object.keys(safeFields).length ? { fields: safeFields } : {}),
+        ...(Object.keys(safeSpan).length ? { span: safeSpan } : {}),
+      }).slice(0, 500);
+    }
+  } catch {
+    // Keep plain-text diagnostics below.
+  }
+  return scrubDiagnosticText(line);
+}
+
+function isUsefulProviderStderr(line: string): boolean {
+  return /responses_(?:websocket|http)|stream_responses|falling back|reconnect|retry|timeout|failed|error|warn|proxy\(|websocket|transport/i.test(line);
+}
+
+function observedProviderTransport(line: string): "responses_websocket" | "responses_http" | null {
+  const normalized = line.toLowerCase();
+  if (normalized.includes("responses_websocket") || normalized.includes("stream_responses_websocket")) {
+    return "responses_websocket";
+  }
+  if (normalized.includes("responses_http") || normalized.includes("stream_responses_http") || normalized.includes("falling back to http")) {
+    return "responses_http";
+  }
+  return null;
+}
+
+type ProviderConnectionStatus = Omit<
+  Extract<RuntimeDiagnosticEvent, { type: "provider_connection_status" }>,
+  "type" | "sessionId" | "turnId"
+>;
+
+function retryProgress(text: string): { attempt?: number; maxAttempts?: number } {
+  const matches = [...text.matchAll(/\b(\d+)\s*\/\s*(\d+)\b/gu)];
+  const match = matches.at(-1);
+  if (!match) return {};
+  const attempt = Number(match[1]);
+  const maxAttempts = Number(match[2]);
+  return Number.isInteger(attempt) && attempt > 0 && Number.isInteger(maxAttempts) && maxAttempts > 0
+    ? { attempt, maxAttempts }
+    : {};
+}
+
+function retrySuffix(progress: { attempt?: number; maxAttempts?: number }) {
+  return progress.attempt !== undefined && progress.maxAttempts !== undefined
+    ? `（${progress.attempt}/${progress.maxAttempts}）`
+    : "";
+}
+
+function providerConnectionStatusFromText(text: string): ProviderConnectionStatus | null {
+  const normalized = text.toLowerCase();
+  const progress = retryProgress(text);
+  if (/fall(?:ing)?\s+back|fallback|switch(?:ed|ing)?\s+to\s+https?/iu.test(text)) {
+    return {
+      state: "fallback_https",
+      message: "Codex WebSocket 不可用，已切换到 HTTPS",
+    };
+  }
+  if (/timed?\s*out|timeout/iu.test(text)) {
+    return {
+      state: "timeout",
+      message: `Codex WebSocket 连接超时，正在重试${retrySuffix(progress)}`,
+      ...progress,
+    };
+  }
+  if (/reconnect|retry|will\s+retry/iu.test(normalized)) {
+    return {
+      state: "reconnecting",
+      message: `Codex WebSocket 正在重连${retrySuffix(progress)}`,
+      ...progress,
+    };
+  }
+  return null;
+}
+
+function providerConnectionStatusFromEvent(event: CodexJsonRpcMessage): ProviderConnectionStatus | null {
+  if (method(event) !== "error") return null;
+  const payload = params(event);
+  if (payload?.willRetry !== true) return null;
+  const error = isRecord(payload.error) ? payload.error : {};
+  const text = [stringValue(error.message), stringValue(error.additionalDetails)].filter(Boolean).join(" ");
+  return providerConnectionStatusFromText(text) ?? {
+    state: "reconnecting",
+    message: "Codex 网络连接异常，正在重试",
+  };
+}
+
+function isProviderOutputNotification(event: CodexJsonRpcMessage): boolean {
+  const eventMethod = method(event);
+  return eventMethod === "item/agentMessage/delta"
+    || eventMethod === "item/reasoning/summaryTextDelta"
+    || eventMethod === "item/reasoning/textDelta"
+    || eventMethod === "item/started"
+    || eventMethod === "item/completed"
+    || eventMethod === "item/commandExecution/outputDelta";
+}
+
 function method(raw: unknown) {
   return isRecord(raw) ? stringValue(raw.method) : "";
 }
@@ -275,6 +431,8 @@ function classifyEvent(raw: unknown, previous: RuntimePreviousContextUsage | und
 
 class CodexRuntimeQuery implements RuntimeRawQueryLike {
   private readonly client: CodexAppServerTransport;
+  private readonly transport: "stdio" | "websocket" | "unix" | "unknown";
+  private readonly proxy: ReturnType<typeof proxyPresence>;
   private closed = false;
   private latestUsage: unknown = null;
   private currentThreadId: string | null = null;
@@ -282,18 +440,91 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   private compactedInCurrentTurn = false;
   private readonly pendingInputs: CodexRuntimeInput[] = [];
   private readonly reportedForeignNotifications = new Set<string>();
+  private lastConnectionStatusKey = "";
+  private observedProviderWebsocket = false;
 
   constructor(
     private readonly input: AsyncIterable<unknown>,
     private readonly options: CodexQueryOptions,
     clientFactory: CodexClientFactory,
   ) {
-    this.client = clientFactory({
+    this.proxy = proxyPresence(options.env);
+    const clientOptions: CodexAppServerClientOptions = {
       command: options.appServerCommand,
       args: codexAppServerArgs(options),
       env: options.env,
       cwd: options.cwd,
       ...options.clientOptions,
+    };
+    this.transport = appServerTransport(clientOptions.args);
+    const existingStderrHandler = clientOptions.onStderrLine;
+    clientOptions.onStderrLine = (line) => {
+      existingStderrHandler?.(line);
+      const sanitized = sanitizedStderrLine(line);
+      const transport = observedProviderTransport(line);
+      if (isUsefulProviderStderr(line)) {
+        this.options.diagnostics?.({
+          type: "provider_stderr",
+          message: sanitized,
+          sessionId: this.currentThreadId,
+          turnId: this.currentTurnId,
+        });
+      }
+      if (transport) {
+        if (transport === "responses_websocket") this.observedProviderWebsocket = true;
+        this.options.diagnostics?.({
+          type: "provider_transport_observed",
+          transport,
+          message: sanitized,
+          sessionId: this.currentThreadId,
+          turnId: this.currentTurnId,
+        });
+        if (transport === "responses_http" && this.observedProviderWebsocket) {
+          this.emitConnectionStatus({
+            state: "fallback_https",
+            message: "Codex WebSocket 不可用，已切换到 HTTPS",
+          });
+        }
+      }
+      const connectionStatus = providerConnectionStatusFromText(line);
+      if (connectionStatus) this.emitConnectionStatus(connectionStatus);
+    };
+    this.client = clientFactory(clientOptions);
+  }
+
+  private emitTransportStage(
+    stage: "client_ready" | "thread_ready" | "turn_ack" | "first_notification" | "first_output" | "turn_completed",
+    startedAt: number,
+    details: { sessionId?: string | null; turnId?: string | null; method?: string; sinceTurnStartMs?: number; proxy?: boolean },
+  ) {
+    this.options.diagnostics?.({
+      type: "provider_transport_stage",
+      stage,
+      transport: this.transport,
+      modelProvider: this.options.modelProvider || undefined,
+      model: this.options.model || undefined,
+      runtimeProfile: this.options.runtimeProfile.id,
+      sessionId: details.sessionId ?? this.currentThreadId,
+      turnId: details.turnId ?? this.currentTurnId,
+      ...(details.method ? { method: details.method } : {}),
+      durationMs: Math.round(performance.now() - startedAt),
+      ...(details.sinceTurnStartMs !== undefined ? { sinceTurnStartMs: Math.round(details.sinceTurnStartMs) } : {}),
+      ...(details.proxy ? { proxy: this.proxy } : {}),
+    });
+    if (stage === "first_output" || stage === "turn_completed") {
+      this.emitConnectionStatus({ state: "clear" });
+    }
+  }
+
+  private emitConnectionStatus(status: ProviderConnectionStatus) {
+    const key = JSON.stringify(status);
+    if (key === this.lastConnectionStatusKey) return;
+    this.lastConnectionStatusKey = key;
+    this.options.diagnostics?.({
+      type: "provider_connection_status",
+      ...status,
+      sessionId: this.currentThreadId,
+      turnId: this.currentTurnId,
     });
   }
 
@@ -320,7 +551,9 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<unknown> {
+    const clientStartedAt = performance.now();
     await this.client.start();
+    this.emitTransportStage("client_ready", clientStartedAt, { sessionId: null, turnId: null, proxy: true });
     const inputCursor = new InputCursor(this.input[Symbol.asyncIterator]());
     const notifications = new InputCursor(this.client.notifications()[Symbol.asyncIterator]());
     const first = await inputCursor.next();
@@ -366,9 +599,11 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       developerInstructions: this.options.systemPrompt,
       ephemeral: false,
     };
+    const threadStartedAt = performance.now();
     if (this.options.resume) {
       const result = await this.client.request("thread/resume", { threadId: this.options.resume, ...params });
       const sessionId = threadIdFromResult(result);
+      this.emitTransportStage("thread_ready", threadStartedAt, { sessionId, turnId: null });
       this.options.diagnostics?.({
         type: "thread_established",
         operation: "resume",
@@ -379,6 +614,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     }
     const result = await this.client.request("thread/start", params);
     const sessionId = threadIdFromResult(result);
+    this.emitTransportStage("thread_ready", threadStartedAt, { sessionId, turnId: null });
     this.options.diagnostics?.({
       type: "thread_established",
       operation: "start",
@@ -395,6 +631,8 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     notifications: InputCursor<CodexJsonRpcMessage>,
   ): AsyncIterable<unknown> {
     this.compactedInCurrentTurn = false;
+    this.emitConnectionStatus({ state: "clear" });
+    const turnAckStartedAt = performance.now();
     const started = await this.client.request("turn/start", {
       threadId,
       input: userInput(input),
@@ -403,9 +641,11 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     });
     const turnId = turnIdFromResult(started);
     this.currentTurnId = turnId;
+    this.emitTransportStage("turn_ack", turnAckStartedAt, { sessionId: threadId, turnId });
     this.options.diagnostics?.({ type: "provider_turn_started", sessionId: threadId, turnId });
+    const turnStartedAt = performance.now();
     try {
-      yield* this.consumeUntilTurnCompleted(threadId, turnId, notifications, inputCursor);
+      yield* this.consumeUntilTurnCompleted(threadId, turnId, notifications, inputCursor, turnStartedAt);
     } finally {
       if (this.currentTurnId === turnId) this.currentTurnId = null;
     }
@@ -421,8 +661,11 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     turnId: string,
     notifications: InputCursor<CodexJsonRpcMessage>,
     inputCursor: InputCursor<unknown>,
+    turnStartedAt: number,
   ): AsyncIterable<unknown> {
     let inputOpen = true;
+    let firstNotificationObserved = false;
+    let firstOutputObserved = false;
     while (!this.closed) {
       const nextEvent = notifications.peek().then((result) => ({ kind: "event" as const, result }));
       const nextInput = inputOpen
@@ -455,6 +698,26 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       if (eventResult.done) return;
       const event = eventResult.value;
       if (this.closed) return;
+      const connectionStatus = providerConnectionStatusFromEvent(event);
+      if (connectionStatus) this.emitConnectionStatus(connectionStatus);
+      if (!firstNotificationObserved) {
+        firstNotificationObserved = true;
+        this.emitTransportStage("first_notification", turnStartedAt, {
+          sessionId: threadId,
+          turnId,
+          method: method(event) || "unknown",
+          sinceTurnStartMs: performance.now() - turnStartedAt,
+        });
+      }
+      if (!firstOutputObserved && isProviderOutputNotification(event)) {
+        firstOutputObserved = true;
+        this.emitTransportStage("first_output", turnStartedAt, {
+          sessionId: threadId,
+          turnId,
+          method: method(event) || "unknown",
+          sinceTurnStartMs: performance.now() - turnStartedAt,
+        });
+      }
       this.observeThreadNotification(event, threadId, turnId);
       if (isContextCompactionEvent(event)) this.compactedInCurrentTurn = true;
       if (method(event) === "thread/tokenUsage/updated") {
@@ -472,6 +735,12 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       if (method(event) === "turn/completed" && stringValue(params(event)?.threadId) === threadId) {
         const eventTurn = isRecord(params(event)?.turn) ? params(event)?.turn as Record<string, unknown> : {};
         if (!turnId || stringValue(eventTurn.id) === turnId) {
+          this.emitTransportStage("turn_completed", turnStartedAt, {
+            sessionId: threadId,
+            turnId,
+            method: "turn/completed",
+            sinceTurnStartMs: performance.now() - turnStartedAt,
+          });
           this.options.diagnostics?.({
             type: "provider_turn_completed",
             sessionId: threadId,
@@ -694,9 +963,12 @@ export function createCodexAgentRuntimeAdapter(input: {
     },
     buildLeaderOptions: buildCodexLeaderOptions,
     buildExpertOptions: buildCodexExpertOptions,
-    prepareLeaderMcpServer: async ({ server, bridgeRegistry }) => {
+    prepareLeaderMcpServer: async ({ server, serverFactory, bindingKey, bridgeRegistry }) => {
       if (!bridgeRegistry) throw new Error("Codex Leader requires a standard MCP bridge registry");
-      const bridge = await bridgeRegistry.register(server, "leader");
+      const bridge = await bridgeRegistry.register(server, "leader", {
+        ...(bindingKey ? { stableKey: bindingKey } : {}),
+        ...(serverFactory ? { createServer: serverFactory } : {}),
+      });
       return {
         mcpServerConfig: {
           type: "http",
@@ -708,9 +980,12 @@ export function createCodexAgentRuntimeAdapter(input: {
         close: bridge.close,
       };
     },
-    prepareExpertMcpServer: async ({ server, bridgeRegistry }) => {
+    prepareExpertMcpServer: async ({ server, serverFactory, bindingKey, bridgeRegistry }) => {
       if (!bridgeRegistry) throw new Error("Codex Expert requires a standard MCP bridge registry");
-      const bridge = await bridgeRegistry.register(server, "browser");
+      const bridge = await bridgeRegistry.register(server, "browser", {
+        ...(bindingKey ? { stableKey: bindingKey } : {}),
+        ...(serverFactory ? { createServer: serverFactory } : {}),
+      });
       return {
         mcpServerConfig: {
           type: "http",

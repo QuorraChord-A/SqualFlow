@@ -45,7 +45,7 @@ import { normalizeCodexReasoningEffort } from "./codexReasoningEffort.js";
 import { checkPermission, type CheckPermissionArgs } from "../permissions/permissionPolicy.js";
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
-import type { RuntimeDiagnosticEvent } from "./adapters/runtimeAdapter.js";
+import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
 
@@ -87,20 +87,6 @@ export type CreateLeaderRuntimeInput = {
   onUserTurnFatal?: (input: { flowId: string; userTurnId: string }) => void;
   logger?: OperationalLogger;
 };
-
-function logRuntimeDiagnostic(
-  logger: OperationalLogger | undefined,
-  context: Record<string, unknown>,
-  event: RuntimeDiagnosticEvent,
-) {
-  if (!logger) return;
-  const fields = { ...context, ...event };
-  if (event.type === "foreign_thread_notification") {
-    logger.warn(fields, "runtime received notification for a different SDK session");
-    return;
-  }
-  logger.info(fields, "runtime provider diagnostic");
-}
 
 function parseToolList(value: string | null | undefined) {
   if (!value) return [];
@@ -565,6 +551,7 @@ class LeaderFlowStream {
       this.closed = true;
       this.stopPeriodicContextUsageCapture();
       this.input.close();
+      this.query?.close?.();
       this.onClosed();
       this.resolveFinished();
     }
@@ -726,6 +713,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   const streams = new Map<string, LeaderFlowStream>();
   const pendingStarts = new Map<string, PendingLeaderStart>();
   const cancelledTurnByFlow = new Map<string, string>();
+  const mcpTurnContexts = new Map<string, { currentTurnInput?: CurrentTurnInput }>();
+  const browserTurnContexts = new Map<string, { agentSessionId: string | null }>();
   const contextCompactions = input.contextCompactions ?? new ContextCompactionState();
 
   function enrichSpecRequestedTurn(turn: LeaderTurnInput): LeaderTurnInput {
@@ -750,8 +739,9 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
 
   async function createStream(turn: LeaderTurnInput) {
     const leader = input.store.getExpert("exp-leader");
-    let currentTurnInput: CurrentTurnInput | undefined;
-    const mcpServer = createLeaderMcpServer(createLeaderToolHandlers(
+    const mcpTurnContext = mcpTurnContexts.get(turn.leaderAgentSessionId) ?? {};
+    mcpTurnContexts.set(turn.leaderAgentSessionId, mcpTurnContext);
+    const leaderToolHandlers = createLeaderToolHandlers(
       createStorePort(input.store, input.agentDispatcher),
       {
         onDecisionCardCreated: (card) => input.eventBus.publish(card.flowId, {
@@ -841,8 +831,10 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           if (revisionId) await input.orchestrationScheduler?.startRevision(revisionId);
         },
       },
-      { getCurrentTurnInput: () => currentTurnInput, leaderAgentSessionId: turn.leaderAgentSessionId },
-    ));
+      { getCurrentTurnInput: () => mcpTurnContext.currentTurnInput, leaderAgentSessionId: turn.leaderAgentSessionId },
+    );
+    const createLeaderServer = () => createLeaderMcpServer(leaderToolHandlers);
+    const mcpServer = createLeaderServer();
     const flow = input.store.getFlow(turn.flowId);
     if (!flow) throw new Error("Flow not found");
     const leaderRuntimeConfig = await resolveLeaderRuntimeConfig(flow, turn.resumeSessionId);
@@ -868,22 +860,29 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const cwd = flowCwd(input.store, turn.flowId);
     const leaderMcpBinding = await runtimeAdapter.prepareLeaderMcpServer({
       server: mcpServer,
+      serverFactory: createLeaderServer,
+      bindingKey: `leader:${turn.leaderAgentSessionId}`,
       bridgeRegistry: input.mcpBridgeRegistry,
     });
-    const browserTurnContext: { agentSessionId: string | null } = { agentSessionId: null };
+    const browserTurnContext = browserTurnContexts.get(turn.leaderAgentSessionId) ?? { agentSessionId: null };
+    browserTurnContexts.set(turn.leaderAgentSessionId, browserTurnContext);
     const leaderScratchDir = path.join(config.runtimeScratchRoot, turn.flowId, "leader");
     fs.mkdirSync(leaderScratchDir, { recursive: true });
     let browserMcpBinding: { mcpServerConfig: unknown; close: () => Promise<void> | void } | undefined;
     if (input.desktopBridge) {
-      const browserServer = createBrowserMcpServer(createBrowserToolHandlers({
+      const browserToolHandlers = createBrowserToolHandlers({
         desktopBridge: input.desktopBridge,
         holderName: "Leader",
         flowId: turn.flowId,
         getAgentSessionId: () => browserTurnContext.agentSessionId,
         getScratchDir: () => leaderScratchDir,
-      }));
+      });
+      const createBrowserServer = () => createBrowserMcpServer(browserToolHandlers);
+      const browserServer = createBrowserServer();
       browserMcpBinding = await runtimeAdapter.prepareExpertMcpServer({
         server: browserServer,
+        serverFactory: createBrowserServer,
+        bindingKey: `leader-browser:${turn.leaderAgentSessionId}`,
         bridgeRegistry: input.mcpBridgeRegistry,
       });
     }
@@ -940,19 +939,24 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       sessionId: turn.resumeSessionId ? undefined : turn.leaderSessionId,
       runtimeConfig: leaderRuntimeConfig.config,
       modelName: runtimeConfigModelName(leaderRuntimeConfig.config, leaderRuntimeConfig.modelId) ?? undefined,
-      diagnostics: (event) => logRuntimeDiagnostic(input.logger, {
-        runtimeRole: "leader",
-        flowId: turn.flowId,
-        userTurnId: turn.userTurnId ?? null,
-        agentSessionId: turn.leaderAgentSessionId,
-      }, event),
+      diagnostics: (event) => reportRuntimeDiagnostic({
+        logger: input.logger,
+        eventBus: input.eventBus,
+        context: {
+          runtimeRole: "leader",
+          flowId: turn.flowId,
+          userTurnId: turn.userTurnId ?? null,
+          agentSessionId: turn.leaderAgentSessionId,
+        },
+        event,
+      }),
     });
     stream = new LeaderFlowStream(
       turn,
       runtimeAdapter,
       options,
       cwd,
-      (value) => { currentTurnInput = value; },
+      (value) => { mcpTurnContext.currentTurnInput = value; },
       input,
       () => {
         if (streams.get(turn.flowId) === stream) streams.delete(turn.flowId);
@@ -1018,12 +1022,17 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       resume: sdkSessionId,
       runtimeConfig: leaderRuntimeConfig.config,
       modelName: runtimeConfigModelName(leaderRuntimeConfig.config, leaderRuntimeConfig.modelId) ?? undefined,
-      diagnostics: (event) => logRuntimeDiagnostic(input.logger, {
-        runtimeRole: "leader_compaction",
-        flowId,
-        userTurnId: null,
-        agentSessionId: leaderAgentSession.id,
-      }, event),
+      diagnostics: (event) => reportRuntimeDiagnostic({
+        logger: input.logger,
+        eventBus: input.eventBus,
+        context: {
+          runtimeRole: "leader_compaction",
+          flowId,
+          userTurnId: null,
+          agentSessionId: leaderAgentSession.id,
+        },
+        event,
+      }),
     });
 
     const runningCompaction = contextCompactions.start({
@@ -1238,6 +1247,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       await Promise.all(starts.map((start) => start.settled));
       streams.clear();
       cancelledTurnByFlow.clear();
+      mcpTurnContexts.clear();
+      browserTurnContexts.clear();
     },
   };
 }

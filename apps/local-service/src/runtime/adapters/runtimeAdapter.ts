@@ -45,6 +45,47 @@ export type RuntimeToolPermission = (request: RuntimeToolPermissionRequest) => P
 
 export type RuntimeDiagnosticEvent =
   | {
+      type: "provider_transport_stage";
+      stage: "client_ready" | "thread_ready" | "turn_ack" | "first_notification" | "first_output" | "turn_completed";
+      transport: "stdio" | "websocket" | "unix" | "unknown";
+      modelProvider?: string;
+      model?: string;
+      runtimeProfile?: string;
+      sessionId: string | null;
+      turnId: string | null;
+      method?: string;
+      durationMs: number;
+      sinceTurnStartMs?: number;
+      proxy?: {
+        http: boolean;
+        https: boolean;
+        all: boolean;
+        noProxy: boolean;
+      };
+    }
+  | {
+      type: "provider_stderr";
+      message: string;
+      sessionId?: string | null;
+      turnId?: string | null;
+    }
+  | {
+      type: "provider_transport_observed";
+      transport: "responses_websocket" | "responses_http";
+      message: string;
+      sessionId?: string | null;
+      turnId?: string | null;
+    }
+  | {
+      type: "provider_connection_status";
+      state: "reconnecting" | "timeout" | "fallback_https" | "clear";
+      message?: string;
+      attempt?: number;
+      maxAttempts?: number;
+      sessionId?: string | null;
+      turnId?: string | null;
+    }
+  | {
       type: "thread_established";
       operation: "start" | "resume";
       requestedSessionId: string | null;
@@ -151,10 +192,14 @@ export type AgentRuntimeAdapter = {
   buildExpertOptions: (input: BuildExpertRuntimeOptionsInput) => unknown;
   prepareLeaderMcpServer: (input: {
     server: McpServer;
+    serverFactory?: () => McpServer;
+    bindingKey?: string;
     bridgeRegistry?: McpBridgeRegistry;
   }) => Promise<RuntimeLeaderMcpBinding>;
   prepareExpertMcpServer: (input: {
     server: McpServer;
+    serverFactory?: () => McpServer;
+    bindingKey?: string;
     bridgeRegistry?: McpBridgeRegistry;
   }) => Promise<RuntimeLeaderMcpBinding>;
   createInputQueue: () => AsyncMessageQueue<unknown>;

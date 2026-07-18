@@ -30,6 +30,7 @@ type AssistantTurnProps = {
   turnTiming?: TurnTiming | null;
   showReasoning?: boolean;
   beforeFooter?: ReactNode;
+  thinkingLabel?: string;
 };
 
 function mergeAdjacentToolGroups(blocks: TranscriptBlock[]): TranscriptBlock[] {
@@ -161,6 +162,13 @@ function hasLiveBlock(blocks: TranscriptBlock[]): boolean {
     || (block.type === "tool-group" && !block.finalized)
     || (block.type === "text" && block.streaming)
     || (block.type === "reasoning" && block.streaming)
+  ));
+}
+
+function hasObservableWork(blocks: TranscriptBlock[]): boolean {
+  return blocks.some((block) => (
+    (block.type === "text" && block.text.trim().length > 0)
+    || (block.type === "tool-group" && block.tools.length > 0)
   ));
 }
 
@@ -430,6 +438,7 @@ function renderTranscriptBlock(
     onPlanOpen,
     onPlanApprove,
     showReasoning,
+    thinkingLabel,
   }: {
     flowId: string;
     decisionCardsById: Map<string, DecisionCardData>;
@@ -439,6 +448,7 @@ function renderTranscriptBlock(
     onPlanOpen: (plan: OrchestrationPlanView) => void;
     onPlanApprove: (plan: OrchestrationPlanView) => void;
     showReasoning: boolean;
+    thinkingLabel?: string;
   },
 ) {
   switch (block.type) {
@@ -453,7 +463,7 @@ function renderTranscriptBlock(
     case "reasoning":
       return showReasoning ? <ReasoningBlock key={block.id} block={block} /> : null;
     case "thinking":
-      return <ThinkingIndicator key={block.id} />;
+      return <ThinkingIndicator key={block.id} label={thinkingLabel} />;
     case "tool-group":
       return <ToolGroup key={block.id} group={block} />;
     case "decision-card-result":
@@ -501,6 +511,7 @@ export default function AssistantTurn({
   turnTiming,
   showReasoning = true,
   beforeFooter,
+  thinkingLabel,
 }: AssistantTurnProps) {
   const finishedSignal = activity === "finished" || (!activity && turnTiming?.finishedAt != null);
   const waitingForUser = turnTiming?.label === "waiting" && !hasLiveBlock(blocks);
@@ -510,6 +521,7 @@ export default function AssistantTurn({
     : showReasoning
       ? blocks
       : mergeAdjacentToolGroups(blocks.filter((block) => block.type !== "reasoning"));
+  const hasObservableWorkStarted = hasObservableWork(visibleBlocks);
   const shouldShowLiveThinking = isLiveTurn && (
     activity === "reasoning" || blocks.some((block) => (
       block.type === "thinking" || (block.type === "reasoning" && block.streaming)
@@ -525,13 +537,11 @@ export default function AssistantTurn({
   const stillLive = finishedSignal && hasLiveBlock(visibleBlocks);
   const effectiveActivity: TranscriptActivity | undefined = waitingForUser ? "finished" : stillLive ? "waiting" : activity;
   const isFinished = (finishedSignal || waitingForUser) && !stillLive;
-  const hasToolWork = visibleBlocks.some((block) => block.type === "tool-group");
   const { canCollapse, pinnedIds } = computeTurnCollapsePlan(visibleBlocks, effectiveActivity);
-  // A finished turn that only ever produced a single, immediate text reply
-  // (no tool calls, nothing worth collapsing) doesn't need the "已工作 X 秒"
-  // header at all; a turn with real tool work or genuine collapsible content
-  // (e.g. a guided multi-step exchange) still gets it.
-  const showWorkHeader = waitingForUser || !isFinished || hasToolWork || canCollapse;
+  // Keep the pre-output phase visually quiet: reasoning alone remains
+  // "正在思考". Reveal the accumulated timer and divider only after the
+  // first non-empty assistant text or actual tool call becomes observable.
+  const showWorkHeader = waitingForUser || hasObservableWorkStarted;
   // Scope the collapse-state slot to the finished/live phase separately: a
   // turn's id is stable across its whole lifetime, but the "default
   // collapsed" value while running (always false, nothing to hide yet) must
@@ -583,8 +593,9 @@ export default function AssistantTurn({
         onPlanOpen,
         onPlanApprove,
         showReasoning,
+        thinkingLabel,
       }))}
-      {shouldShowLiveThinking && !hasVisibleActiveToolSlot && <ThinkingIndicator />}
+      {shouldShowLiveThinking && !hasVisibleActiveToolSlot && <ThinkingIndicator label={thinkingLabel} />}
       {beforeFooter}
       {isFinished && (footerTimestamp || copyText) ? (
         <div className={styles.assistantMeta}>

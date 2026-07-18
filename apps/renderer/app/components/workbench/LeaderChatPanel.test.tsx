@@ -1981,7 +1981,7 @@ describe("LeaderChatPanel", () => {
     expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("已压缩当前会话");
   });
 
-  it("keeps Plan mode as a one-shot message option", async () => {
+  it("keeps Plan mode locked until the generated plan is approved", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
 
@@ -1989,7 +1989,126 @@ describe("LeaderChatPanel", () => {
     await user.click(screen.getByRole("button", { name: "执行模式：自动编辑" }));
     await user.click(screen.getByRole("button", { name: /计划模式：/ }));
     expect(screen.getByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText("输入消息..."), "先生成计划");
+    await user.keyboard("{Enter}");
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:message",
+      spec_requested: true,
+      content: "先生成计划",
+    }));
+    expect(screen.getByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "执行模式：计划模式" }));
+    expect(screen.getByRole("button", { name: /自动编辑：/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /完全访问：/ })).toBeDisabled();
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "plan_approval:event",
+          flow_id: "flow-1",
+          data: { status: "approved" },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "执行模式：自动编辑" })).toBeInTheDocument());
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "flow:set_agent_mode" }));
+  });
+
+  it("keeps a newly created Flow in Plan mode during the UI handoff", async () => {
+    const user = userEvent.setup();
+    const onInitialPlanModeResolved = vi.fn();
+
+    renderPanel({
+      riskMode: "full_access",
+      initialPlanModeReturnRiskMode: "full_access",
+      onInitialPlanModeResolved,
+    });
+
+    expect(await screen.findByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "执行模式：计划模式" }));
+    expect(screen.getByRole("button", { name: /自动编辑：/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /完全访问：/ })).toBeDisabled();
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "plan_approval:event",
+          flow_id: "flow-1",
+          data: { status: "approved", plan_revision_id: "revision-new-flow" },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "执行模式：完全访问" })).toBeInTheDocument());
+    expect(onInitialPlanModeResolved).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores Plan mode from an active spec-requested UserTurn before a card exists", async () => {
+    renderPanel({ riskMode: "full_access" });
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "flow:state",
+          flow_id: "flow-1",
+          data: {
+            user_turns: [{
+              user_turn_id: "turn-plan-refresh",
+              trigger_message_id: "msg-plan-refresh",
+              status: "active",
+              started_at: "2026-07-18T05:00:00.000Z",
+              active_started_at: "2026-07-18T05:00:00.000Z",
+              active_duration_ms: 0,
+              input_snapshot_json: JSON.stringify({ spec_requested: true }),
+            }],
+          },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    expect(await screen.findByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
+  });
+
+  it("restores plan mode after a refresh while Spec or Plan approval is pending", async () => {
+    renderPanel({
+      specCards: {
+        "spec-approval-1": {
+          spec_approval_id: "spec-approval-1",
+          spec_revision_id: "spec-revision-1",
+          user_turn_id: "turn-1",
+          status: "pending",
+          file_name: "plan.md",
+          overview: "先确认范围",
+          actions: ["run"],
+        },
+      },
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument());
+    await userEvent.setup().click(screen.getByRole("button", { name: "执行模式：计划模式" }));
+    expect(screen.getByRole("button", { name: /自动编辑：/ })).toBeDisabled();
+  });
+
+  it("returns to the risk mode that was active before entering Plan mode", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+
+    renderPanel({ riskMode: "full_access" });
+    await user.click(screen.getByRole("button", { name: "执行模式：完全访问" }));
+    await user.click(screen.getByRole("button", { name: /计划模式：/ }));
+    await user.type(screen.getByPlaceholderText("输入消息..."), "保留原档位");
+    await user.keyboard("{Enter}");
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({ type: "plan_approval:event", flow_id: "flow-1", data: { status: "approved" } } as unknown as WsInMessage);
+      }
+    });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "执行模式：完全访问" })).toBeInTheDocument());
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({ spec_requested: true }));
   });
 
   it("keeps a queued Spec request for the next turn instead of sending it as a guide", async () => {
@@ -2520,6 +2639,9 @@ describe("LeaderChatPanel", () => {
     const composer = screen.getByTestId("leader-chat-composer");
 
     await within(composer).findByText(/是否继续？/);
+    expect(composer).toHaveAttribute("data-layout", "docked");
+    expect(composer.className).not.toContain("absolute");
+    expect(composer.className).toContain("shrink-0");
     expect(within(transcriptShell).queryByText(/是否继续？/)).toBeNull();
     expect(screen.queryByPlaceholderText("请先完成澄清卡片...")).toBeNull();
     expect(screen.queryByPlaceholderText("输入消息...")).toBeNull();

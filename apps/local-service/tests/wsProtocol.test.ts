@@ -1,5 +1,7 @@
 import fs from "node:fs";
-import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { config } from "../src/config.js";
 import { createStore } from "../src/db/store.js";
 import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
 import { createApp } from "../src/server/app.js";
@@ -19,6 +21,15 @@ const testLeaderRuntimeBinding = {
   leaderRuntimeConfigId: "default-agent-sdk",
   leaderRuntimeModelId: "mimo-v25",
 };
+const originalAgentRuntimeConfigRoot = config.agentRuntimeConfigRoot;
+
+beforeAll(() => {
+  config.agentRuntimeConfigRoot = path.join(import.meta.dirname, "fixtures", "agent-runtime");
+});
+
+afterAll(() => {
+  config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
+});
 
 const wsBuffers = new WeakMap<any, unknown[]>();
 const wsWaiters = new WeakMap<any, Array<(message: unknown) => void>>();
@@ -67,6 +78,33 @@ function createQuery(messages: unknown[]): ClaudeQueryLike {
 }
 
 describe("EventBus", () => {
+  it("accepts only structured runtime transport status messages", () => {
+    expect(ServerWsMessageSchema.parse({
+      type: "runtime:transport",
+      flow_id: "flow-1",
+      agent_session_id: "agent-1",
+      data: {
+        state: "reconnecting",
+        message: "Codex WebSocket 正在重连（2/5）",
+        attempt: 2,
+        max_attempts: 5,
+        runtime_role: "leader",
+        user_turn_id: "turn-1",
+      },
+    })).toMatchObject({ type: "runtime:transport" });
+    expect(() => ServerWsMessageSchema.parse({
+      type: "runtime:transport",
+      flow_id: "flow-1",
+      agent_session_id: "agent-1",
+      data: {
+        state: "reconnecting",
+        message: "secret",
+        runtime_role: "leader",
+        raw_stderr: "must not cross the protocol boundary",
+      },
+    })).toThrow();
+  });
+
   it("publishes messages to subscribed flow clients only", async () => {
     const bus = new EventBus();
     const flowOneReceived: unknown[] = [];

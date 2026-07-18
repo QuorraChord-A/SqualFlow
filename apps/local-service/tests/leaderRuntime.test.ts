@@ -703,6 +703,34 @@ describe("LeaderRuntime platform event protocol", () => {
     ]);
   });
 
+  it("closes a completed streaming query so the runtime lease can be reused", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    const close = vi.fn();
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield { type: "result", subtype: "success", session_id: "sdk-reusable-leader", is_error: false };
+        },
+        close,
+      }) }),
+    });
+
+    await runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "完成后释放运行时租约",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+
+    await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
   it("keeps the UserTurn open while a failed Expert result and its recovery are queued", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);

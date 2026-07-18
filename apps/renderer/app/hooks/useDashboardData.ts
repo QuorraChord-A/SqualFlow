@@ -87,6 +87,7 @@ export interface UserTurnData {
 type SpecCardState = {
   spec_approval_id: string;
   spec_revision_id: string;
+  user_turn_id?: string | null;
   status: "pending" | "approved" | "cancelled";
   file_name: string;
   overview: string;

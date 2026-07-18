@@ -46,7 +46,11 @@ import {
 } from '../types/messageAttachments';
 
 interface NewTaskViewProps {
-  onTaskCreated?: (flowId: string, initialMessage: UIMessage) => void;
+  onTaskCreated?: (
+    flowId: string,
+    initialMessage: UIMessage,
+    initialPlanModeReturnRiskMode: RiskMode | null,
+  ) => void;
   onOpenModelSettings?: () => void;
 }
 
@@ -336,10 +340,9 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
         client_message_id: clientMessageId,
       });
       setPrompt('');
-      setSpecRequested(false);
       if (browserElementAttachments.length > 0) clearBrowserElementAttachments();
       if (imageAttachments.length > 0) clearImageAttachments();
-      onTaskCreated?.(flow.id, initialMessage);
+      onTaskCreated?.(flow.id, initialMessage, specRequested ? riskMode : null);
       return true;
     } finally {
       setIsCreatingTask(false);
