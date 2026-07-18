@@ -39,14 +39,14 @@ function imageAttachment(id: string): MessageImageAttachment {
   };
 }
 
-describe("useRunningMessageQueueStore persistence", () => {
+describe("useRunningMessageQueueStore projection", () => {
   beforeEach(() => {
     window.localStorage.clear();
     resetRunningMessageQueueStoreForTests();
   });
 
   it(
-    "persists browserElementAttachments/imageAttachments to localStorage and restores them on rehydration",
+    "projects backend queue state without treating localStorage as the queue authority",
     () => {
       const message: RunningQueuedMessage = {
         id: "queued-with-attachments",
@@ -55,23 +55,17 @@ describe("useRunningMessageQueueStore persistence", () => {
         imageAttachments: [imageAttachment("image-1")],
       };
 
-      useRunningMessageQueueStore.getState().updateFlowQueue("flow-1", (messages) => [...messages, message]);
+      useRunningMessageQueueStore.getState().setFlowQueue("flow-1", [message]);
 
       const inMemory = useRunningMessageQueueStore.getState().queuesByFlow["flow-1"] ?? [];
       expect(inMemory[0]?.browserElementAttachments).toHaveLength(1);
       expect(inMemory[0]?.imageAttachments).toHaveLength(1);
 
-      const persistedRaw = window.localStorage.getItem("squadflow.runningMessageQueue.v1:flow-1");
-      expect(persistedRaw).toBeTruthy();
-      const persisted = JSON.parse(persistedRaw ?? "[]") as Array<Record<string, unknown>>;
-      expect(persisted[0]?.content).toBe("带附件的排队消息");
-      expect(persisted[0]?.browserElementAttachments).toHaveLength(1);
-      expect(persisted[0]?.imageAttachments).toHaveLength(1);
+      expect(window.localStorage.getItem("squadflow.runningMessageQueue.v1:flow-1")).toBeNull();
 
       resetRunningMessageQueueStoreForTests();
       const rehydrated = useRunningMessageQueueStore.getState().hydrateFlowQueue("flow-1");
-      expect(rehydrated[0]?.browserElementAttachments).toHaveLength(1);
-      expect(rehydrated[0]?.imageAttachments).toHaveLength(1);
+      expect(rehydrated).toEqual([]);
     },
   );
 });

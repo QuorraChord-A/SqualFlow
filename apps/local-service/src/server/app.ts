@@ -20,7 +20,12 @@ import { McpBridgeRegistry, registerMcpBridgeRoutes } from "../mcp/mcpBridgeRegi
 import { DesktopBridge } from "./desktopBridge.js";
 import { registerDesktopWsGateway } from "./desktopWsGateway.js";
 import { registerHttpRoutes } from "./httpRoutes.js";
-import { recoverPendingDecisionCardLeaderInputs, registerWsGateway, type SessionHistoryLoader } from "./wsGateway.js";
+import {
+  recoverPendingDecisionCardLeaderInputs,
+  registerWsGateway,
+  type WsConnection,
+} from "./wsGateway.js";
+import { MessageQueueCoordinator } from "../runtime/messageQueueCoordinator.js";
 import { errorDiagnostic } from "../observability/operationalLogger.js";
 import { clearNativeRuntimeSessionFiles } from "../protocol/runtimeMessageProtocolMigration.js";
 import { createAgentRuntimeAdapter } from "../runtime/adapters/factory.js";
@@ -37,7 +42,6 @@ type CreateAppOptions = {
   eventBus?: EventBus;
   chatJournal?: ChatJournal;
   runtimeAdapterFactory?: AgentRuntimeAdapterFactory;
-  sessionHistoryLoader?: SessionHistoryLoader;
   logger?: FastifyServerOptions["logger"];
 };
 
@@ -89,12 +93,16 @@ export function createApp(options: CreateAppOptions = {}) {
   const databasePath = options.store ? null : options.databasePath ?? config.databasePath;
   const store = options.store ?? createStore(databasePath!);
   store.migrate({ beforeRuntimeMessageProtocolReset: clearNativeRuntimeSessionFiles });
+  const sealedTranscriptMessageCount = store.sealActiveTranscriptMessages();
+  const staleRuntimeRecovery = store.expireStaleLeaderRuntimeState();
   app.log.info({
     event: "backend_process_started",
     runId,
     backendVersion: process.env.npm_package_version ?? "0.1.0",
     pid: process.pid,
     databasePath,
+    sealedTranscriptMessageCount,
+    ...staleRuntimeRecovery,
   }, "SquadFlow backend process started");
   const defaultProjectPath = path.join(config.defaultProjectRoot, DEFAULT_PROJECT_DIRECTORY_NAME);
   fs.mkdirSync(defaultProjectPath, { recursive: true });
@@ -117,7 +125,7 @@ export function createApp(options: CreateAppOptions = {}) {
   store.seedExperts();
 
   const eventBus = options.eventBus ?? new EventBus();
-  const chatJournal = options.chatJournal ?? new ChatJournal();
+  const chatJournal = options.chatJournal ?? new ChatJournal(store, runId);
   const contextCompactions = new ContextCompactionState();
   const mcpBridgeRegistry = new McpBridgeRegistry();
   const codexAppServerPool = options.runtimeAdapterFactory
@@ -195,6 +203,32 @@ export function createApp(options: CreateAppOptions = {}) {
       expertRuntime.cancelUserTurn({ flowId, userTurnId });
     },
   });
+
+  const messageQueueCoordinator: MessageQueueCoordinator = new MessageQueueCoordinator({
+    store,
+    eventBus,
+    logger: app.log,
+    connectionForFlow: (flowId): WsConnection => ({
+      clientId: `queue-coordinator:${flowId}`,
+      subscriptions: new Set([flowId]),
+      eventBus,
+      store,
+      chatJournal,
+      leaderRuntime,
+      expertRuntime,
+      orchestrationScheduler,
+      logger: app.log,
+      runId,
+      requestQueueDrain: messageQueueCoordinator.request,
+      send: async (message) => {
+        if (message.type === "system:error" && message.flow_id === flowId) {
+          await eventBus.publish(flowId, message);
+        }
+      },
+    }),
+  });
+  const recoveredSubmissions = messageQueueCoordinator.start();
+  app.log.info({ event: "message_submission_recovery_completed", runId, ...recoveredSubmissions }, "message submission recovery completed");
   void orchestrationScheduler.recover().then(() => {
     app.log.info({ event: "orchestration_recovery_completed", runId }, "orchestration recovery completed");
   }).catch((error) => {
@@ -264,6 +298,7 @@ export function createApp(options: CreateAppOptions = {}) {
   });
 
   app.addHook("onClose", async () => {
+    await messageQueueCoordinator.close();
     const runtimeResults = await Promise.allSettled([
       expertRuntime.close?.(),
       leaderRuntime.close?.(),
@@ -292,9 +327,9 @@ export function createApp(options: CreateAppOptions = {}) {
       leaderRuntime,
       expertRuntime,
       orchestrationScheduler,
-      sessionHistoryLoader: options.sessionHistoryLoader,
       logger: app.log,
       runId,
+      requestQueueDrain: messageQueueCoordinator.request,
     });
   });
 

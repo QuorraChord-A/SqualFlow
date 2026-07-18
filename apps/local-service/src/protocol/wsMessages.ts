@@ -58,6 +58,48 @@ export const ClientWsMessageSchema = z.discriminatedUnion("type", [
     log_id: z.string().optional(),
   }).strict(),
   z.object({
+    type: z.literal("flow:queue_add"),
+    flow_id: z.string(),
+    queue_id: z.string().min(1),
+    content: z.string(),
+    display_content: z.string().optional(),
+    spec_requested: z.boolean().optional(),
+    attachments: MessageImageAttachmentsSchema,
+    plan_feedback: z.array(PlanFeedbackSchema).max(40).optional(),
+    client_payload: z.record(z.string(), z.unknown()).optional(),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("flow:queue_delete"),
+    flow_id: z.string(),
+    queue_id: z.string().min(1),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("flow:queue_reorder"),
+    flow_id: z.string(),
+    queue_ids: z.array(z.string().min(1)).max(100),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("flow:queue_dispatch"),
+    flow_id: z.string(),
+    queue_id: z.string().min(1),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("flow:queue_guide"),
+    flow_id: z.string(),
+    queue_id: z.string().min(1),
+    client_message_id: z.string().min(1),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("flow:queue_clear"),
+    flow_id: z.string(),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
     type: z.literal("flow:decision"),
     flow_id: z.string(),
     card_id: z.string(),
@@ -114,13 +156,17 @@ const HistoryBoundarySchema = z.object({
 
 const ActiveTurnSchema = z.object({
   message_id: z.string(),
+  root_message_id: z.string().optional(),
+  segment_index: z.number().int().nonnegative().optional(),
   started_at: z.string(),
 }).strict();
 
 export const ServerWsMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("flow:state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:status"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
+  z.object({ type: z.literal("flow:message_ack"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:guide_ack"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
+  z.object({ type: z.literal("flow:queue_state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("task:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("user_turn:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("session:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
@@ -142,8 +188,8 @@ export const ServerWsMessageSchema = z.discriminatedUnion("type", [
       task_id: z.string().optional(),
     }).strict(),
   }).strict(),
-  z.object({ type: z.literal("session:transcript_event"), flow_id: z.string(), session_id: z.string(), agent_session_id: z.string().optional(), flow_expert_id: z.string().optional(), log_id: z.string().optional(), data: z.object({ cursor: z.number().int().nonnegative(), event: z.unknown() }).strict() }).strict(),
-  z.object({ type: z.literal("session:transcript_snapshot"), flow_id: z.string(), session_id: z.string().optional(), agent_session_id: z.string().optional(), flow_expert_id: z.string().optional(), data: z.object({ cursor: z.number().int().nonnegative(), messages: z.array(z.unknown()), history_boundaries: z.array(HistoryBoundarySchema).optional(), active_turn: ActiveTurnSchema.optional() }).strict(), pending_cards: z.array(z.unknown()).optional(), decision_cards: z.array(z.unknown()).optional() }).strict(),
+  z.object({ type: z.literal("session:transcript_event"), flow_id: z.string(), session_id: z.string(), agent_session_id: z.string().optional(), flow_expert_id: z.string().optional(), log_id: z.string().optional(), data: z.object({ stream_epoch: z.string(), cursor: z.number().int().nonnegative(), event: z.unknown(), removed_message_ids: z.array(z.string()).optional(), active_turn: ActiveTurnSchema.optional() }).strict() }).strict(),
+  z.object({ type: z.literal("session:transcript_snapshot"), flow_id: z.string(), session_id: z.string().optional(), agent_session_id: z.string().optional(), flow_expert_id: z.string().optional(), data: z.object({ stream_epoch: z.string(), cursor: z.number().int().nonnegative(), messages: z.array(z.unknown()), history_boundaries: z.array(HistoryBoundarySchema).optional(), active_turn: ActiveTurnSchema.optional() }).strict(), pending_cards: z.array(z.unknown()).optional(), decision_cards: z.array(z.unknown()).optional() }).strict(),
   z.object({ type: z.literal("flow:decision_card"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:decision_card_resolved"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:spec_card"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),

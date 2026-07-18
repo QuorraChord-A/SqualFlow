@@ -1092,6 +1092,7 @@ describe("LeaderRuntime platform event protocol", () => {
     const resultReleased = new Promise<void>((resolve) => { releaseResult = resolve; });
     const priorities: Array<string | undefined> = [];
     const contents: string[] = [];
+    const guideDeliveryOrder: string[] = [];
     const runtime = createLeaderRuntime({
       store,
       eventBus: new EventBus(),
@@ -1108,6 +1109,7 @@ describe("LeaderRuntime platform event protocol", () => {
           signalFirstInput();
 
           const guide = await messages.next();
+          guideDeliveryOrder.push("runtime");
           priorities.push(guide.value?.priority);
           const guideContent = Array.isArray(guide.value?.message.content) ? guide.value.message.content[0] : undefined;
           contents.push(guideContent?.type === "text" ? guideContent.text : "");
@@ -1132,6 +1134,7 @@ describe("LeaderRuntime platform event protocol", () => {
       leaderAgentSessionId: leader.id,
       content: "补充当前 turn",
       messageId: "msg-guide-1",
+      beforeDeliver: () => guideDeliveryOrder.push("persisted"),
     });
 
     releaseResult();
@@ -1140,6 +1143,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(accepted).toEqual({ accepted: true, messageId: "msg-guide-1" });
     expect(priorities).toEqual(["later", "now"]);
     expect(contents[0]).toContain("开始处理");
+    expect(guideDeliveryOrder).toEqual(["persisted", "runtime"]);
     expect(parseMessageSegments(contents[1] ?? "", flow.id)).toEqual([
       expect.objectContaining({ kind: "event", type: "guide", body: "补充当前 turn" }),
     ]);

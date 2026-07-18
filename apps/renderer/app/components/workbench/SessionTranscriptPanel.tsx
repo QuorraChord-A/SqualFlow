@@ -30,6 +30,7 @@ import { TranscriptScrollProvider, useTranscriptScroll } from "./transcript/Tran
 import {
   emptyTranscriptState,
   transcriptReducer,
+  type TranscriptCommittedEvent,
   type TranscriptEvent,
 } from "./transcript/transcriptState";
 import { ImagePreviewOverlay, ImageThumbnailContent } from "./transcript/ImagePreview";
@@ -361,52 +362,13 @@ function findUserTurnStartIndex(
   turn: UserTurnDisplay,
   usedIndexes: Set<number>,
 ): number {
-  const exactIndex = messages.findIndex((message, index) =>
-    !usedIndexes.has(index) && message.id === turn.triggerMessageId
-  );
-  if (exactIndex >= 0) return exactIndex;
-
-  const turnStartedAt = timestampMs(turn.startedAt);
-  if (turnStartedAt !== null) {
-    let bestIndex = -1;
-    let bestDelta = Number.POSITIVE_INFINITY;
-    for (let index = 0; index < messages.length; index += 1) {
-      const message = messages[index];
-      if (!message || message.role !== "user" || usedIndexes.has(index)) continue;
-      const messageTimestamp = timestampMs(messageTimestampValue(message));
-      if (messageTimestamp === null) continue;
-      const delta = Math.abs(messageTimestamp - turnStartedAt);
-      if (delta < bestDelta) {
-        bestDelta = delta;
-        bestIndex = index;
-      }
-    }
-    if (bestIndex >= 0 && bestDelta <= 60_000) return bestIndex;
-  }
-
   return messages.findIndex((message, index) =>
-    !usedIndexes.has(index) && message.role === "user"
+    !usedIndexes.has(index) && message.id === turn.triggerMessageId
   );
 }
 
-/**
- * Pick a turn's anchor assistant message (the one whose id becomes the React
- * key for the whole rendered group) by earliest timestamp rather than array
- * position, so the anchor stays the same even if a merge ever produces a
- * turn's messages slightly out of chronological order.
- */
 function pickAnchorAssistant(assistants: UIMessage[]): UIMessage | undefined {
-  if (assistants.length <= 1) return assistants[0];
-  let anchor = assistants[0]!;
-  let anchorTimestamp = timestampMs(messageTimestampValue(anchor));
-  for (const candidate of assistants.slice(1)) {
-    const candidateTimestamp = timestampMs(messageTimestampValue(candidate));
-    if (candidateTimestamp !== null && (anchorTimestamp === null || candidateTimestamp < anchorTimestamp)) {
-      anchor = candidate;
-      anchorTimestamp = candidateTimestamp;
-    }
-  }
-  return anchor;
+  return assistants[0];
 }
 
 export function formatMessageTimestamp(value: unknown, now = new Date()): string | null {
@@ -458,7 +420,10 @@ function messageText(message: UIMessage): string {
 }
 
 function isDecisionCardResultMessage(message: UIMessage): boolean {
-  return message.role === "user" && /^clarification_card_id:\s*\S+/mu.test(messageText(message));
+  const metadata = (message as { metadata?: { decisionCardId?: unknown; decisionStatus?: unknown } }).metadata;
+  return message.role === "user"
+    && typeof metadata?.decisionCardId === "string"
+    && (metadata.decisionStatus === "resolved" || metadata.decisionStatus === "cancelled");
 }
 
 function timelineInputMessage(message: UIMessage): TimelineInputMessage {
@@ -1310,8 +1275,7 @@ export default function SessionTranscriptPanel({
   const fetchedSessionRef = useRef<string | null>(null);
   const pendingHistoryRequestRef = useRef<string | null>(null);
   const eventFrameRef = useRef<number | null>(null);
-  const finishResyncTimersRef = useRef<number[]>([]);
-  const pendingEventsRef = useRef<Array<{ cursor: number; event: TranscriptEvent }>>([]);
+  const pendingEventsRef = useRef<TranscriptCommittedEvent[]>([]);
   const activeFlowIdRef = useRef<string | null>(flowId);
   const activeFlowExpertIdRef = useRef<string | null>(flowExpertId);
   const activeAgentSessionIdRef = useRef<string | null>(agentSessionId);
@@ -1333,7 +1297,7 @@ export default function SessionTranscriptPanel({
     }
   }, []);
 
-  const scheduleTranscriptEvent = useCallback((item: { cursor: number; event: TranscriptEvent }) => {
+  const scheduleTranscriptEvent = useCallback((item: TranscriptCommittedEvent) => {
     if (!shouldBatchTranscriptEvent(item.event)) {
       flushPendingEvents();
       dispatchTranscript({ type: "apply-events", events: [item] });
@@ -1357,27 +1321,6 @@ export default function SessionTranscriptPanel({
     pendingEventsRef.current = [];
   }, []);
 
-  const clearFinishResyncTimers = useCallback(() => {
-    for (const timer of finishResyncTimersRef.current) window.clearTimeout(timer);
-    finishResyncTimersRef.current = [];
-  }, []);
-
-  const scheduleFinishedSnapshotResync = useCallback((
-    targetFlowId: string,
-    targetAgentSessionId: string | null,
-    targetFlowExpertId: string | null,
-  ) => {
-    clearFinishResyncTimers();
-    finishResyncTimersRef.current = [750, 2_500].map((delayMs) =>
-      window.setTimeout(() => {
-        if (activeFlowIdRef.current !== targetFlowId) return;
-        if (activeFlowExpertIdRef.current !== targetFlowExpertId) return;
-        if ((activeAgentSessionIdRef.current ?? null) !== (targetAgentSessionId ?? null)) return;
-        wsClient.sendSessionGet(targetFlowId, "", targetAgentSessionId ?? undefined, targetFlowExpertId ?? undefined);
-      }, delayMs)
-    );
-  }, [clearFinishResyncTimers]);
-
   useEffect(() => {
     const prevFlowId = prevFlowIdRef.current;
     const prevFlowExpertId = prevFlowExpertIdRef.current;
@@ -1400,7 +1343,6 @@ export default function SessionTranscriptPanel({
       fetchedSessionRef.current = null;
       pendingHistoryRequestRef.current = null;
       cancelPendingEventFlush();
-      clearFinishResyncTimers();
       setRuntimeTransportLabel(null);
       dispatchTranscript({ type: "reset" });
     } else if (agentSessionId !== prevSessionId) {
@@ -1440,11 +1382,10 @@ export default function SessionTranscriptPanel({
     } else {
       wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined);
     }
-  }, [flowId, flowExpertId, agentSessionId, cancelPendingEventFlush, clearFinishResyncTimers]);
+  }, [flowId, flowExpertId, agentSessionId, cancelPendingEventFlush]);
 
   useEffect(() => {
-    if (optimisticMessages.length === 0) return;
-    dispatchTranscript({ type: "append-optimistic", messages: optimisticMessages });
+    dispatchTranscript({ type: "sync-optimistic", messages: optimisticMessages });
   }, [optimisticMessages]);
 
   useEffect(() => {
@@ -1468,20 +1409,6 @@ export default function SessionTranscriptPanel({
       }
 
       if (msg.type === "flow:decision_card_resolved" && !activeFlowExpertId) {
-        const cardId = typeof msg.data?.card_id === "string" ? msg.data.card_id : "";
-        if (cardId) {
-          const isCancelled = msg.data?.status === "cancelled";
-          const messageId = typeof msg.data?.message_id === "string"
-            ? msg.data.message_id
-            : `live-decision-${cardId}`;
-          dispatchTranscript({
-            type: "decision-card-resolved",
-            cardId,
-            messageId,
-            status: isCancelled ? "cancelled" : "resolved",
-            createdAt: new Date(),
-          });
-        }
         return;
       }
 
@@ -1503,8 +1430,6 @@ export default function SessionTranscriptPanel({
         setRuntimeTransportLabel(null);
         flushPendingEvents();
         dispatchTranscript({ type: "finish-active", finishedAt: new Date().toISOString() });
-        wsClient.sendSessionGet(activeFlowId, "", activeAgentSessionId ?? undefined, activeFlowExpertId ?? undefined);
-        scheduleFinishedSnapshotResync(activeFlowId, activeAgentSessionId, activeFlowExpertId);
         return;
       }
 
@@ -1512,7 +1437,6 @@ export default function SessionTranscriptPanel({
         const expertStatus = String(msg.data?.status ?? "");
         if (["completed", "failed"].includes(expertStatus)) {
           setRuntimeTransportLabel(null);
-          wsClient.sendSessionGet(activeFlowId, "", activeAgentSessionId ?? undefined, activeFlowExpertId);
         }
         return;
       }
@@ -1526,6 +1450,7 @@ export default function SessionTranscriptPanel({
         flushPendingEvents();
         dispatchTranscript({
           type: "load-snapshot",
+          streamEpoch: msg.data.stream_epoch || "legacy",
           cursor: msg.data.cursor,
           messages: msg.data.messages,
           historyBoundaries: msg.data.history_boundaries ?? [],
@@ -1541,16 +1466,18 @@ export default function SessionTranscriptPanel({
           setHistoryLoadVersion((version) => version + 1);
         }
         const event = msg.data.event as TranscriptEvent;
-        scheduleTranscriptEvent({ cursor: msg.data.cursor, event });
-        if (event.type === "turn-finished") {
-          wsClient.sendSessionGet(activeFlowId, "", activeAgentSessionId ?? undefined, activeFlowExpertId ?? undefined);
-          scheduleFinishedSnapshotResync(activeFlowId, activeAgentSessionId, activeFlowExpertId);
-        }
+        scheduleTranscriptEvent({
+          streamEpoch: msg.data.stream_epoch || "legacy",
+          cursor: msg.data.cursor,
+          event,
+          ...(msg.data.removed_message_ids?.length ? { removedMessageIds: msg.data.removed_message_ids } : {}),
+          ...(msg.data.active_turn ? { activeTurn: msg.data.active_turn } : {}),
+        });
       }
     });
 
     return unsubscribe;
-  }, [flowId, flowExpertId, agentSessionId, allowInferredAgentSessionId, flushPendingEvents, scheduleFinishedSnapshotResync, scheduleTranscriptEvent]);
+  }, [flowId, flowExpertId, agentSessionId, allowInferredAgentSessionId, flushPendingEvents, scheduleTranscriptEvent]);
 
   useEffect(() => {
     if (!transcript.needsResync || !flowId) return;
@@ -1561,9 +1488,8 @@ export default function SessionTranscriptPanel({
   useEffect(() => {
     return () => {
       cancelPendingEventFlush();
-      clearFinishResyncTimers();
     };
-  }, [cancelPendingEventFlush, clearFinishResyncTimers]);
+  }, [cancelPendingEventFlush]);
 
   return (
     <StickToBottom

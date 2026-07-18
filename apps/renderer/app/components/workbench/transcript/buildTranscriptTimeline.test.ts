@@ -64,6 +64,7 @@ describe("buildTranscriptTimeline", () => {
       id: "msg-decision-1",
       role: "user",
       parts: [{ type: "text", text: "clarification_card_id: dc-1\n用户已回答澄清卡片。\n\n1. 选择\n回答：重新优化 Hello World" }],
+      metadata: { decisionCardId: "dc-1", decisionStatus: "resolved" },
     };
     expect(buildTranscriptTimeline({ message, activity: "finished" })).toContainEqual(
       expect.objectContaining({ type: "decision-card-result", cardId: "dc-1", status: "resolved", collapseState: "shallow" }),
@@ -506,7 +507,7 @@ describe("buildTranscriptTimeline", () => {
     expect(card).toMatchObject({ cardId: "card-1", toolCallId: "ask-1" });
   });
 
-  it("deduplicates repeated ask_user projections with different transient tool ids", () => {
+  it("keeps different ask_user ids distinct even when their inputs are equal", () => {
     const input = {
       flow_id: "flow-1",
       questions: [{
@@ -531,11 +532,14 @@ describe("buildTranscriptTimeline", () => {
 
     expect(toolGroup).toMatchObject({
       type: "tool-group",
-      tools: [expect.objectContaining({
-        toolCallId: "ask-transient",
-        toolName: "mcp__squadflow-leader__ask_user",
-        state: "completed",
-      })],
+      tools: [
+        expect.objectContaining({ toolCallId: "ask-transient", state: "running" }),
+        expect.objectContaining({
+          toolCallId: "ask-canonical",
+          toolName: "mcp__squadflow-leader__ask_user",
+          state: "completed",
+        }),
+      ],
     });
     expect(blocks.filter((block) => block.type === "decision-card")).toEqual([
       expect.objectContaining({ cardId: "card-1", toolCallId: "ask-canonical" }),

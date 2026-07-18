@@ -24,11 +24,14 @@ export class WsPusher {
     const { log_id: logId, ...chunk } = event;
     const sessionId = this.getSessionId();
 
-    if (chunk.type === "finish") {
-      await this.onOutputCompleted?.(this.flowId);
-    }
-
-    const result = this.chatJournal.record(this.flowId, sessionId, chunk, this.flowExpertId);
+    const result = this.chatJournal.record(
+      this.flowId,
+      sessionId,
+      chunk,
+      this.flowExpertId,
+      this.agentSessionId,
+    );
+    if (result.ignored) return;
     const transcriptEvent = withCanonicalMessageId(transcriptEventFromChunk(chunk), result.messageId);
 
     await this.eventBus.publish(this.flowId, {
@@ -38,8 +41,24 @@ export class WsPusher {
       agent_session_id: this.agentSessionId,
       flow_expert_id: this.flowExpertId,
       ...(logId ? { log_id: logId } : {}),
-      data: { cursor: result.cursor, event: transcriptEvent },
+      data: {
+        stream_epoch: this.chatJournal.getStreamEpoch(),
+        cursor: result.cursor,
+        event: transcriptEvent,
+        ...(result.removedMessageIds?.length ? { removed_message_ids: result.removedMessageIds } : {}),
+        ...(result.activeTurn ? {
+          active_turn: {
+            message_id: result.activeTurn.messageId,
+            root_message_id: result.activeTurn.rootMessageId,
+            segment_index: result.activeTurn.segmentIndex,
+            started_at: result.activeTurn.startedAt,
+          },
+        } : {}),
+      },
     });
+    if (chunk.type === "finish") {
+      await this.onOutputCompleted?.(this.flowId);
+    }
   }
 
   async publishUserMessage(content: string, messageId: string, createdAt?: string): Promise<void> {
@@ -51,6 +70,8 @@ export class WsPusher {
       messageId,
       createdAt,
       this.flowExpertId,
+      undefined,
+      this.agentSessionId,
     );
     await this.publishMessageAdded(sessionId, cursor, message);
   }
@@ -62,7 +83,7 @@ export class WsPusher {
       session_id: sessionId,
       agent_session_id: this.agentSessionId,
       flow_expert_id: this.flowExpertId,
-      data: { cursor, event: { type: "message-added", message } },
+      data: { stream_epoch: this.chatJournal.getStreamEpoch(), cursor, event: { type: "message-added", message } },
     });
   }
 }

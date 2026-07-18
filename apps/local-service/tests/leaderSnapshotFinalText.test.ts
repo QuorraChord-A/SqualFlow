@@ -25,47 +25,47 @@ function nextWsMessage(ws: any): Promise<any> {
   return new Promise((resolve) => wsWaiters.get(ws)?.push(resolve));
 }
 
-function recordLeaderCompleteTurn(journal: ChatJournal, flowId: string, sessionId: string) {
+function recordLeaderCompleteTurn(journal: ChatJournal, flowId: string, sessionId: string, transcriptId: string) {
   const messageId = "msg-leader-live-1";
-  journal.recordUserMessage(flowId, sessionId, "当前项目都有什么", "msg-user-live-1", "2026-06-25T14:05:00.000Z");
-  journal.record(flowId, sessionId, { type: "start", messageId, startedAt: "2026-06-25T14:05:01.000Z" });
+  journal.recordUserMessage(flowId, sessionId, "当前项目都有什么", "msg-user-live-1", "2026-06-25T14:05:00.000Z", transcriptId);
+  journal.record(flowId, sessionId, { type: "start", messageId, startedAt: "2026-06-25T14:05:01.000Z" }, transcriptId);
   journal.record(flowId, sessionId, {
     type: "tool-input-start",
     messageId,
     toolCallId: "call-get-context",
     toolName: "mcp__leader__get_context",
-  });
+  }, transcriptId);
   journal.record(flowId, sessionId, {
     type: "tool-input-available",
     messageId,
     toolCallId: "call-get-context",
     toolName: "mcp__leader__get_context",
     input: { flow_id: flowId },
-  });
+  }, transcriptId);
   journal.record(flowId, sessionId, {
     type: "tool-output-available",
     messageId,
     toolCallId: "call-get-context",
     output: { content: "{\"status\":\"ok\"}" },
-  });
-  journal.record(flowId, sessionId, { type: "text-start", messageId, id: "blk-final" });
+  }, transcriptId);
+  journal.record(flowId, sessionId, { type: "text-start", messageId, id: "blk-final" }, transcriptId);
   journal.record(flowId, sessionId, {
     type: "text-delta",
     messageId,
     id: "blk-final",
     delta: "研究任务已完成，以下是项目概况。",
-  });
-  journal.record(flowId, sessionId, { type: "text-end", messageId, id: "blk-final" });
+  }, transcriptId);
+  journal.record(flowId, sessionId, { type: "text-end", messageId, id: "blk-final" }, transcriptId);
   journal.record(flowId, sessionId, {
     type: "finish",
     messageId,
     durationMs: 8000,
     finishedAt: "2026-06-25T14:05:09.000Z",
-  });
+  }, transcriptId);
 }
 
-describe("leader snapshot requires complete SDK history", () => {
-  it("returns an explicit error instead of replacing incomplete history with journal content", async () => {
+describe("leader snapshot uses the canonical transcript", () => {
+  it("returns the committed final message without consulting SDK history", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -87,34 +87,12 @@ describe("leader snapshot requires complete SDK history", () => {
       status: "completed",
     });
 
-    const chatJournal = new ChatJournal();
-    recordLeaderCompleteTurn(chatJournal, flow.id, "sdk-leader-stale");
-
+    const chatJournal = new ChatJournal(store);
+    recordLeaderCompleteTurn(chatJournal, flow.id, "sdk-leader-stale", "ags-leader-stale");
     const app = createApp({
       logger: false,
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [{
-        id: "msg-disk-1",
-        role: "assistant",
-        parts: [{
-          type: "tool-mcp__leader__get_context",
-          toolCallId: "call-get-context",
-          toolName: "mcp__leader__get_context",
-          state: "output-available",
-          inputText: "",
-          input: { flow_id: flow.id },
-          output: { content: "{\"status\":\"ok\"}" },
-        }],
-        content: "",
-        metadata: {
-          turnTiming: {
-            startedAt: "2026-06-25T14:05:01.000Z",
-            finishedAt: "2026-06-25T14:05:09.000Z",
-            durationMs: 8000,
-          },
-        },
-      }] as any,
     });
 
     try {
@@ -131,9 +109,14 @@ describe("leader snapshot requires complete SDK history", () => {
       }));
       const response = await nextWsMessage(ws);
       expect(response).toEqual(expect.objectContaining({
-        type: "system:error",
+        type: "session:transcript_snapshot",
         flow_id: flow.id,
-        data: expect.objectContaining({ code: "SESSION_HISTORY_INCOMPLETE" }),
+        data: expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ id: "msg-user-live-1", content: "当前项目都有什么" }),
+            expect.objectContaining({ id: "msg-leader-live-1", content: "研究任务已完成，以下是项目概况。" }),
+          ]),
+        }),
       }));
       ws.terminate();
     } finally {

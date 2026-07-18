@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -8,7 +8,6 @@ import {
   readDefaultFlowRuntimeConfigForSdk,
   readFlowLeaderRuntimeConfig,
   readRoleRuntimeConfig,
-  readRuntimeConfig,
 } from "../config/agentRuntimeConfig.js";
 import {
   ClientWsMessageSchema,
@@ -27,30 +26,25 @@ import { DECISION_CANCELLED_BODY } from "../runtime/leaderPrompt.js";
 import type { ExpertRuntime } from "../runtime/expertRuntime.js";
 import type { OrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
 import { captureUserTurnBaseline } from "../runtime/userTurnDiff.js";
-import { createAgentRuntimeAdapter } from "../runtime/adapters/factory.js";
 import type { ChatJournal, ChatUIMessage } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
-import { mergeTurnTimings, persistedTurnTimings } from "../ws/turnTiming.js";
-import { runtimeSdkForPersistedAgentSession } from "./sessionRuntimeResolver.js";
 import type { OperationalLogger } from "../observability/operationalLogger.js";
-
-export type SessionHistoryLoader = (sessionId: string) => Promise<ChatUIMessage[]>;
 
 type SendServerMessage = (message: ServerWsMessage) => Promise<void> | void;
 
-type WsConnection = {
+export type WsConnection = {
   clientId: string;
   subscriptions: Set<string>;
   eventBus: EventBus;
   store: Store;
   chatJournal: ChatJournal;
-  sessionHistoryLoader?: SessionHistoryLoader;
   leaderRuntime: LeaderRuntime;
   expertRuntime?: Pick<ExpertRuntime, "cancelUserTurn" | "resolvePermissionCard">;
   orchestrationScheduler: OrchestrationScheduler;
   send: SendServerMessage;
   logger?: OperationalLogger;
   runId?: string;
+  requestQueueDrain?: (flowId: string) => void;
 };
 
 export type WsGatewayDeps = {
@@ -60,9 +54,9 @@ export type WsGatewayDeps = {
   leaderRuntime: LeaderRuntime;
   expertRuntime?: Pick<ExpertRuntime, "cancelUserTurn" | "resolvePermissionCard">;
   orchestrationScheduler: OrchestrationScheduler;
-  sessionHistoryLoader?: SessionHistoryLoader;
   logger?: OperationalLogger;
   runId?: string;
+  requestQueueDrain?: (flowId: string) => void;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -73,63 +67,38 @@ function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-type RuntimeAgentSession = NonNullable<ReturnType<Store["getAgentSession"]>>;
-
-async function loadSessionHistory(
-  connection: WsConnection,
-  flowId: string,
-  sessionId: string,
-  agentSession?: RuntimeAgentSession | null,
-  expertId?: string | null,
-  runtimeConfigId?: string | null,
-): Promise<ChatUIMessage[]> {
-  if (connection.sessionHistoryLoader) return connection.sessionHistoryLoader(sessionId);
-  const sdk = await runtimeSdkForPersistedAgentSession({
-    store: connection.store,
-    flowId,
-    agentSession,
-    expertId,
-    sdkSessionId: sessionId,
-  });
-  const persistedRuntimeConfigId = runtimeConfigId ?? agentSession?.runtimeConfigId;
-  const runtimeConfig = persistedRuntimeConfigId
-    ? await readRuntimeConfig(persistedRuntimeConfigId)
-    : null;
-  const adapter = createAgentRuntimeAdapter({
-    sdk,
-    ...(runtimeConfig?.sdk === sdk ? { runtimeConfig } : {}),
-  });
-  if (!adapter.capabilities.historyRead) {
-    throw new Error(`Session history is not supported by runtime SDK: ${sdk}`);
-  }
-  return adapter.loadSessionHistory(sessionId, flowId);
+function stableJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, stableJsonValue(value[key])]),
+  );
 }
 
-function runningJournalSnapshot(
-  connection: WsConnection,
-  flowId: string,
-  sessionId: string,
-  agentSession?: RuntimeAgentSession | null,
-): { history: ChatUIMessage[] } | null {
-  const localHistory = connection.chatJournal.getHistory(flowId, sessionId);
-  const current = connection.chatJournal.getCurrentMessage(flowId, sessionId);
-  const openUserTurn = connection.store.getOpenUserTurn(flowId);
-  if (agentSession && ["completed", "failed"].includes(agentSession.status)) return null;
-  const leaderTurnStarting = agentSession?.expertId === "exp-leader"
-    && openUserTurn?.status === "active"
-    && (agentSession.status === "idle" || agentSession.status === "queued");
-  if (!current && agentSession?.status !== "streaming" && !leaderTurnStarting) return null;
+function submissionPayloadHash(payload: Record<string, unknown>): string {
+  return createHash("sha256").update(JSON.stringify(stableJsonValue(payload))).digest("hex");
+}
+
+function flowMessageSubmissionPayload(message: ClientWsMessage & { type: "flow:message" }): Record<string, unknown> {
   return {
-    history: current
-      ? mergeHistoryWithActiveTurn(
-          localHistory,
-          localHistory,
-          current,
-          openUserTurn?.triggerMessageId,
-        )
-      : localHistory,
+    content: message.content,
+    spec_requested: message.spec_requested === true,
+    attachments: message.attachments ?? [],
+    plan_feedback: message.plan_feedback ?? [],
   };
 }
+
+function guideSubmissionPayload(message: ClientWsMessage & { type: "flow:guide" }): Record<string, unknown> {
+  return {
+    content: message.content,
+    attachments: message.attachments ?? [],
+    plan_feedback: message.plan_feedback ?? [],
+  };
+}
+
+type RuntimeAgentSession = NonNullable<ReturnType<Store["getAgentSession"]>>;
 
 function rawToString(rawMessage: unknown): string {
   if (typeof rawMessage === "string") return rawMessage;
@@ -180,7 +149,7 @@ async function publishPlanRunEvent(
 
 function flowStateData(flowId: string, store: Store) {
   const snapshot = buildFlowSnapshot(store, flowId);
-  return "error" in snapshot
+  const state = "error" in snapshot
     ? {
         status: "ready",
         active_user_turn_id: null,
@@ -193,6 +162,10 @@ function flowStateData(flowId: string, store: Store) {
         recent_events: [],
       }
     : snapshot;
+  return {
+    ...state,
+    queued_messages: queueStateData(flowId, store),
+  };
 }
 
 function flowStateMessage(flowId: string, store: Store, logId?: string): ServerWsMessage {
@@ -202,6 +175,68 @@ function flowStateMessage(flowId: string, store: Store, logId?: string): ServerW
     ...(logId ? { log_id: logId } : {}),
     data: flowStateData(flowId, store),
   });
+}
+
+function queueClientPayload(itemPayload: Record<string, unknown>): Record<string, unknown> {
+  const clientPayload = isRecord(itemPayload.client_payload) ? itemPayload.client_payload : {};
+  const attachments = Array.isArray(itemPayload.attachments)
+    ? itemPayload.attachments.filter(isRecord)
+    : [];
+  const attachmentsById = new Map(attachments.flatMap((attachment) =>
+    typeof attachment.id === "string" ? [[attachment.id, attachment] as const] : []
+  ));
+  const restoreDataUrl = (value: unknown, field: "dataUrl" | "screenshotDataUrl") => {
+    if (!Array.isArray(value)) return undefined;
+    return value.map((candidate) => {
+      if (!isRecord(candidate) || typeof candidate.id !== "string") return candidate;
+      if (typeof candidate[field] === "string") return candidate;
+      const attachment = attachmentsById.get(candidate.id);
+      if (typeof attachment?.media_type !== "string" || typeof attachment.data !== "string") return candidate;
+      return { ...candidate, [field]: `data:${attachment.media_type};base64,${attachment.data}` };
+    });
+  };
+  const imageAttachments = restoreDataUrl(clientPayload.imageAttachments, "dataUrl");
+  const browserElementAttachments = restoreDataUrl(clientPayload.browserElementAttachments, "screenshotDataUrl");
+  return {
+    ...clientPayload,
+    ...(imageAttachments ? { imageAttachments } : {}),
+    ...(browserElementAttachments ? { browserElementAttachments } : {}),
+  };
+}
+
+function queueStateData(flowId: string, store: Store) {
+  return store.listQueuedMessages(flowId).map((item) => {
+    const clientPayload = queueClientPayload(item.payload);
+    return {
+      ...clientPayload,
+      id: item.id,
+      content: typeof item.payload.content === "string" ? item.payload.content : "",
+      ...(typeof item.payload.display_content === "string"
+        ? { displayContent: item.payload.display_content }
+        : {}),
+      ...(item.payload.spec_requested === true ? { specRequested: true } : {}),
+      status: item.status,
+      revision: item.revision,
+    };
+  });
+}
+
+function queueStateMessage(flowId: string, store: Store, logId?: string): ServerWsMessage {
+  return ServerWsMessageSchema.parse({
+    type: "flow:queue_state",
+    flow_id: flowId,
+    ...(logId ? { log_id: logId } : {}),
+    data: { messages: queueStateData(flowId, store) },
+  });
+}
+
+async function publishQueueState(connection: WsConnection, flowId: string, logId?: string) {
+  const message = queueStateMessage(flowId, connection.store, logId);
+  if (connection.subscriptions.has(flowId)) {
+    await connection.eventBus.publish(flowId, message);
+  } else {
+    await connection.send(message);
+  }
 }
 
 function parseDecisionCards(flowId: string, store: Store) {
@@ -229,17 +264,6 @@ function parseDecisionCards(flowId: string, store: Store) {
       status: card.status,
     };
   });
-}
-
-function textFromMessage(message: ChatUIMessage): string {
-  return message.parts
-    .filter((part) => part.type === "text")
-    .map((part) => (part as { text?: string }).text ?? "")
-    .join("");
-}
-
-function normalizeMessageText(message: ChatUIMessage): string {
-  return textFromMessage(message).trim().replace(/\s+/g, " ");
 }
 
 function imageAttachmentMetadata(attachments: MessageImageAttachment[] | undefined): Record<string, unknown> | undefined {
@@ -299,114 +323,21 @@ function planFeedbackMetadata(feedback: Array<{ id: string; plan_revision_id: st
   return feedback?.length ? { planFeedback: feedback } : undefined;
 }
 
-function isSameUserTurn(left: ChatUIMessage, right: ChatUIMessage): boolean {
-  if (left.role !== "user" || right.role !== "user") return false;
-  const leftText = normalizeMessageText(left);
-  const rightText = normalizeMessageText(right);
-  if (leftText && rightText && (leftText === rightText || leftText.includes(rightText) || rightText.includes(leftText))) {
-    return true;
-  }
-
-  const leftMetadata = isRecord(left.metadata) ? left.metadata : {};
-  const rightMetadata = isRecord(right.metadata) ? right.metadata : {};
-  const leftPlanFeedback = Array.isArray(leftMetadata.planFeedback) && leftMetadata.planFeedback.length > 0;
-  const rightPlanFeedback = Array.isArray(rightMetadata.planFeedback) && rightMetadata.planFeedback.length > 0;
-  if ((leftPlanFeedback && rightText === "计划评论") || (rightPlanFeedback && leftText === "计划评论")) {
-    return true;
-  }
-
-  const browserCommentKey = (value: unknown) => {
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (!isRecord(item)) return [];
-      return [JSON.stringify({
-        markerNumber: item.markerNumber,
-        comment: item.comment,
-        label: item.label ?? item.ariaLabel,
-        pageUrl: item.pageUrl ?? item.url,
-        selector: item.selector,
-      })];
-    }).sort();
+function transcriptCommitMetadata(result: {
+  removedMessageIds?: string[];
+  activeTurn?: { messageId: string; rootMessageId: string; segmentIndex: number; startedAt: string };
+}) {
+  return {
+    ...(result.removedMessageIds?.length ? { removed_message_ids: result.removedMessageIds } : {}),
+    ...(result.activeTurn ? {
+      active_turn: {
+        message_id: result.activeTurn.messageId,
+        root_message_id: result.activeTurn.rootMessageId,
+        segment_index: result.activeTurn.segmentIndex,
+        started_at: result.activeTurn.startedAt,
+      },
+    } : {}),
   };
-  const leftBrowserComments = browserCommentKey(leftMetadata.browserElementAttachments);
-  const rightBrowserComments = browserCommentKey(rightMetadata.browserElementAttachments);
-  return leftBrowserComments.length > 0
-    && leftBrowserComments.length === rightBrowserComments.length
-    && leftBrowserComments.every((value, index) => value === rightBrowserComments[index]);
-}
-
-function toolCallIds(message: ChatUIMessage): Set<string> {
-  const ids = new Set<string>();
-  for (const part of message.parts) {
-    if (part.type.startsWith("tool-")) {
-      const toolCallId = (part as { toolCallId?: string }).toolCallId;
-      if (toolCallId) ids.add(toolCallId);
-    }
-  }
-  return ids;
-}
-
-function isSameAssistantTurn(left: ChatUIMessage, right: ChatUIMessage): boolean {
-  if (left.role !== "assistant" || right.role !== "assistant") return false;
-
-  const leftTools = toolCallIds(left);
-  const rightTools = toolCallIds(right);
-  for (const toolCallId of leftTools) {
-    if (rightTools.has(toolCallId)) return true;
-  }
-
-  const leftText = textFromMessage(left).trim();
-  const rightText = textFromMessage(right).trim();
-  return Boolean(leftText && rightText && (leftText.includes(rightText) || rightText.includes(leftText)));
-}
-
-function mergeHistoryWithCurrent(history: ChatUIMessage[], current: ChatUIMessage): ChatUIMessage[] {
-  const completedHistory = history.filter((item) => item.id !== current.id);
-  const last = completedHistory.at(-1);
-  if (last && isSameAssistantTurn(last, current)) {
-    return [...completedHistory.slice(0, -1), current];
-  }
-  return [...completedHistory, current];
-}
-
-function isCompletedHistoryComplete(history: ChatUIMessage[], localHistory: ChatUIMessage[]): boolean {
-  const historyAssistantText = history
-    .filter((message) => message.role === "assistant")
-    .map(normalizeMessageText)
-    .join("");
-
-  return localHistory.every((localMessage) => {
-    if (localMessage.role === "user") {
-      return history.some((historyMessage) => isSameUserTurn(historyMessage, localMessage));
-    }
-    const localText = normalizeMessageText(localMessage);
-    return !localText || historyAssistantText.includes(localText);
-  });
-}
-
-function mergeHistoryWithActiveTurn(
-  history: ChatUIMessage[],
-  localHistory: ChatUIMessage[],
-  current: ChatUIMessage,
-  triggerMessageId?: string | null,
-): ChatUIMessage[] {
-  const exactStartIndex = triggerMessageId
-    ? localHistory.findIndex((message) => message.id === triggerMessageId)
-    : -1;
-  const startIndex = exactStartIndex >= 0
-    ? exactStartIndex
-    : localHistory.findLastIndex((message) => message.role === "user");
-  if (startIndex < 0) return mergeHistoryWithCurrent(history, current);
-
-  const activeTail = localHistory.slice(startIndex);
-  const activeUserMessage = activeTail[0];
-  const persistedStartIndex = activeUserMessage?.role === "user"
-    ? history.findLastIndex((message) => isSameUserTurn(message, activeUserMessage))
-    : -1;
-  const completedHistory = persistedStartIndex >= 0
-    ? history.slice(0, persistedStartIndex)
-    : history;
-  return mergeHistoryWithCurrent([...completedHistory, ...activeTail], current);
 }
 
 type HistoryBoundary = {
@@ -419,101 +350,6 @@ type HistoryBoundary = {
   status: "loaded" | "missing";
   before_message_id?: string;
 };
-
-type HistorySegment = {
-  flowExpertId: string;
-  agentSessionId: string;
-  displayName: string;
-  startedAt: string;
-  status: "loaded" | "missing";
-  messages: ChatUIMessage[];
-};
-
-function leaderSdkSessionIds(
-  events: ReturnType<Store["listEventLog"]>,
-  agentSessionId: string,
-  currentSessionId: string,
-): string[] {
-  const sessionIds = new Set<string>();
-  for (const event of events) {
-    if (event.agentSessionId !== agentSessionId) continue;
-    let payload: Record<string, unknown> | null = null;
-    try {
-      const parsed = JSON.parse(event.payloadJson) as unknown;
-      payload = isRecord(parsed) ? parsed : null;
-    } catch {
-      payload = null;
-    }
-    const sessionId = event.eventType === "agent_session.turn_completed"
-      ? optionalString(payload?.sdk_session_id)
-      : undefined;
-    if (sessionId) sessionIds.add(sessionId);
-  }
-  sessionIds.add(currentSessionId);
-  return [...sessionIds];
-}
-
-function namespaceHistoricalMessages(messages: ChatUIMessage[], sessionId: string): ChatUIMessage[] {
-  return messages.map((message) => ({
-    ...message,
-    id: `history-${sessionId}-${message.id}`,
-  }));
-}
-
-function flattenFlowExpertHistorySegments(segments: HistorySegment[]) {
-  const unique = new Map<string, ChatUIMessage>();
-  const boundaries: HistoryBoundary[] = [];
-
-  for (let segmentIndex = 0; segmentIndex < segments.length; segmentIndex += 1) {
-    const segment = segments[segmentIndex]!;
-    let firstMessageId: string | undefined;
-    for (const historyMessage of segment.messages) {
-      if (!unique.has(historyMessage.id)) {
-        unique.set(historyMessage.id, historyMessage);
-      }
-      firstMessageId ??= historyMessage.id;
-    }
-    if (segmentIndex > 0) {
-      boundaries.push({
-        id: `history-boundary-${segment.agentSessionId}`,
-        kind: "history_session_boundary",
-        flow_expert_id: segment.flowExpertId,
-        agent_session_id: segment.agentSessionId,
-        display_name: segment.displayName,
-        started_at: segment.startedAt,
-        status: segment.status,
-        ...(firstMessageId ? { before_message_id: firstMessageId } : {}),
-      });
-    }
-  }
-
-  const history = [...unique.values()];
-  return { history, historyBoundaries: boundaries };
-}
-
-function sessionHistoryUnavailable(
-  message: ClientWsMessage & { type: "session:get" },
-  error: unknown,
-): ServerWsMessage {
-  const detail = error instanceof Error ? error.message : String(error);
-  return errorMessage(
-    "SESSION_HISTORY_UNAVAILABLE",
-    `Session history could not be loaded: ${detail}`,
-    message.flow_id,
-    message.log_id,
-  );
-}
-
-function sessionHistoryIncomplete(
-  message: ClientWsMessage & { type: "session:get" },
-): ServerWsMessage {
-  return errorMessage(
-    "SESSION_HISTORY_INCOMPLETE",
-    "Session history has not persisted the completed transcript yet",
-    message.flow_id,
-    message.log_id,
-  );
-}
 
 async function sessionHistoryMessage(message: ClientWsMessage & { type: "session:get" }, connection: WsConnection): Promise<ServerWsMessage> {
   let flowExpert = message.flow_expert_id
@@ -538,135 +374,43 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
         return false;
       }) ?? sessions.find((session) => session.expertId === "exp-leader" && session.taskId === null);
 
-  let sessionId = message.session_id
+  const sessionId = message.session_id
     || flowExpert?.sdkSessionId
     || agentSession?.sessionId
     || agentSession?.id
     || "";
-  let history: ChatUIMessage[] = [];
-  let historyBoundaries: HistoryBoundary[] = [];
-
+  const channelId = flowExpert?.id ?? agentSession?.id ?? message.agent_session_id ?? sessionId;
+  const entries = channelId
+    ? connection.chatJournal.getTranscriptEntries(message.flow_id, channelId)
+    : [];
+  const history = entries.map((entry) => entry.message as unknown as ChatUIMessage);
+  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
+  const historyBoundaries: HistoryBoundary[] = [];
   if (flowExpert) {
-    const matchingSessions = sessions
-      .filter((session) => session.flowExpertId === flowExpert!.id && session.sessionId)
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const sessionsBySdkSessionId = new Map<string, typeof matchingSessions[number]>();
-    for (const session of matchingSessions) {
-      if (session.sessionId && !sessionsBySdkSessionId.has(session.sessionId)) {
-        sessionsBySdkSessionId.set(session.sessionId, session);
-      }
-    }
-    const uniqueSessions = [...sessionsBySdkSessionId.values()];
-    const segments: HistorySegment[] = [];
-    if (uniqueSessions.length === 0 && flowExpert.sdkSessionId) {
-      const running = runningJournalSnapshot(connection, message.flow_id, flowExpert.sdkSessionId);
-      if (running) {
-        history = running.history;
-      } else {
-        const localHistory = connection.chatJournal.getHistory(message.flow_id, flowExpert.sdkSessionId);
-        try {
-          const loaded = await loadSessionHistory(
-            connection,
-            message.flow_id,
-            flowExpert.sdkSessionId,
-            null,
-            flowExpert.expertId,
-            flowExpert.runtimeConfigId,
-          );
-          const timings = persistedTurnTimings(connection.store.listEventLog(message.flow_id), flowExpert.sdkSessionId);
-          const completedHistory = mergeTurnTimings(loaded, timings);
-          if (!isCompletedHistoryComplete(completedHistory, localHistory)) {
-            return sessionHistoryIncomplete(message);
-          }
-          history = completedHistory;
-        } catch (error) {
-          return sessionHistoryUnavailable(message, error);
-        }
-      }
-    }
-    for (const legacy of uniqueSessions) {
-      const running = runningJournalSnapshot(connection, message.flow_id, legacy.sessionId!, legacy);
-      try {
-        let sessionHistory: ChatUIMessage[];
-        if (running) {
-          sessionHistory = running.history;
-        } else {
-          const localHistory = connection.chatJournal.getHistory(message.flow_id, legacy.sessionId!);
-          const loaded = await loadSessionHistory(
-            connection,
-            message.flow_id,
-            legacy.sessionId!,
-            legacy,
-            flowExpert.expertId,
-            legacy.runtimeConfigId ?? flowExpert.runtimeConfigId,
-          );
-          const timings = persistedTurnTimings(connection.store.listEventLog(message.flow_id), legacy.sessionId!);
-          sessionHistory = mergeTurnTimings(loaded, timings);
-          if (!isCompletedHistoryComplete(sessionHistory, localHistory)) {
-            return sessionHistoryIncomplete(message);
-          }
-        }
-        segments.push({
-          flowExpertId: flowExpert.id,
-          agentSessionId: legacy.id,
-          displayName: legacy.displayName,
-          startedAt: legacy.createdAt,
+    let previousAgentSessionId: string | null = null;
+    for (const entry of entries) {
+      if (!entry.agentSessionId || entry.agentSessionId === previousAgentSessionId) continue;
+      if (previousAgentSessionId !== null) {
+        const boundarySession = sessionsById.get(entry.agentSessionId);
+        historyBoundaries.push({
+          id: `history-boundary-${entry.agentSessionId}`,
+          kind: "history_session_boundary",
+          flow_expert_id: flowExpert.id,
+          agent_session_id: entry.agentSessionId,
+          display_name: boundarySession?.displayName ?? flowExpert.displayName,
+          started_at: boundarySession?.createdAt ?? entry.createdAt,
           status: "loaded",
-          messages: sessionHistory,
+          before_message_id: entry.messageId,
         });
-      } catch (error) {
-        return sessionHistoryUnavailable(message, error);
       }
-    }
-    const flattened = flattenFlowExpertHistorySegments(segments);
-    if (segments.length > 0) history = flattened.history;
-    historyBoundaries = flattened.historyBoundaries;
-    agentSession = uniqueSessions.at(-1) ?? agentSession;
-    sessionId = flowExpert.sdkSessionId ?? uniqueSessions.at(-1)?.sessionId ?? sessionId;
-  } else if (sessionId) {
-    const running = runningJournalSnapshot(connection, message.flow_id, sessionId, agentSession);
-    if (running) {
-      history = running.history;
-    } else {
-      const eventLog = connection.store.listEventLog(message.flow_id);
-      const sessionIds = agentSession?.expertId === "exp-leader" && agentSession.taskId === null
-        ? leaderSdkSessionIds(eventLog, agentSession.id, sessionId)
-        : [sessionId];
-      const historySegments: ChatUIMessage[][] = [];
-      for (const historySessionId of sessionIds) {
-        const localHistory = connection.chatJournal.getHistory(message.flow_id, historySessionId);
-        let sessionHistory: ChatUIMessage[];
-        try {
-          sessionHistory = await loadSessionHistory(
-            connection,
-            message.flow_id,
-            historySessionId,
-            agentSession,
-          );
-        } catch (error) {
-          return sessionHistoryUnavailable(message, error);
-        }
-        if (agentSession) {
-          const timings = persistedTurnTimings(eventLog, historySessionId);
-          sessionHistory = mergeTurnTimings(sessionHistory, timings);
-        }
-        if (!isCompletedHistoryComplete(sessionHistory, localHistory)) {
-          return sessionHistoryIncomplete(message);
-        }
-        historySegments.push(
-          historySessionId === sessionId
-            ? sessionHistory
-            : namespaceHistoricalMessages(sessionHistory, historySessionId),
-        );
-      }
-      history = historySegments.flat();
+      previousAgentSessionId = entry.agentSessionId;
     }
   }
 
-  const journalCurrent = sessionId ? connection.chatJournal.getCurrentMessage(message.flow_id, sessionId) : null;
-  const current = agentSession && ["completed", "failed", "interrupted"].includes(agentSession.status)
+  const journalActiveTurn = sessionId ? connection.chatJournal.getActiveTurn(message.flow_id, sessionId) : null;
+  const activeTurn = agentSession && ["completed", "failed", "interrupted"].includes(agentSession.status)
     ? null
-    : journalCurrent;
+    : journalActiveTurn;
   const decisionCards = parseDecisionCards(message.flow_id, connection.store);
   const pendingCards = decisionCards.filter((card) => card.status === "pending");
 
@@ -677,13 +421,16 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
     ...(flowExpert ? { flow_expert_id: flowExpert.id } : {}),
     ...(agentSession ? { agent_session_id: agentSession.id } : {}),
     data: {
+      stream_epoch: connection.chatJournal.getStreamEpoch(),
       cursor: connection.chatJournal.getCursor(message.flow_id, flowExpert?.id ?? agentSession?.id ?? sessionId),
       messages: history,
       ...(historyBoundaries.length > 0 ? { history_boundaries: historyBoundaries } : {}),
-      ...(current ? {
+      ...(activeTurn ? {
         active_turn: {
-          message_id: current.id,
-          started_at: current.metadata?.turnTiming?.startedAt ?? current.createdAt!,
+          message_id: activeTurn.message.id,
+          root_message_id: activeTurn.rootMessageId,
+          segment_index: activeTurn.segmentIndex,
+          started_at: activeTurn.message.metadata?.turnTiming?.startedAt ?? activeTurn.message.createdAt!,
         },
       } : {}),
     },
@@ -777,22 +524,72 @@ async function missingLeaderModelError(flow: NonNullable<ReturnType<Store["getFl
   }
 }
 
-async function handleFlowMessage(message: ClientWsMessage & { type: "flow:message" }, connection: WsConnection): Promise<void> {
+async function handleFlowMessage(
+  message: ClientWsMessage & { type: "flow:message" },
+  connection: WsConnection,
+  onMaterialized?: (messageId: string) => void,
+): Promise<boolean> {
   const flow = connection.store.getFlow(message.flow_id);
   if (!flow) {
     await connection.send(errorMessage("not_found", "Flow not found", message.flow_id, message.log_id));
-    return;
+    return false;
   }
 
   const projectDirectoryError = missingProjectDirectoryError(message.flow_id, connection.store);
   if (projectDirectoryError) {
     await connection.send(errorMessage("PROJECT_DIRECTORY_MISSING", projectDirectoryError, message.flow_id, message.log_id));
-    return;
+    return false;
   }
   const leaderModelError = await missingLeaderModelError(flow);
   if (leaderModelError) {
     await connection.send(errorMessage("LEADER_MODEL_NOT_CONFIGURED", leaderModelError, message.flow_id, message.log_id));
-    return;
+    return false;
+  }
+
+  const messageId = message.client_message_id ?? `msg-user-${randomUUID()}`;
+  const submissionPayload = flowMessageSubmissionPayload(message);
+  const payloadHash = submissionPayloadHash(submissionPayload);
+  const existingLeader = connection.store
+    .listAgentSessions(message.flow_id)
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
+  const existingSubmission = connection.store.getSubmission(message.flow_id, messageId);
+  if (existingSubmission && (
+    existingSubmission.submissionType !== "normal"
+    || existingSubmission.payloadHash !== payloadHash
+  )) {
+    await connection.send(errorMessage(
+      "MESSAGE_ID_CONFLICT",
+      "The same client message id was already used with different content.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return false;
+  }
+  if (existingSubmission?.receiptState === "materialized") {
+    onMaterialized?.(existingSubmission.messageId ?? messageId);
+    await connection.send(ServerWsMessageSchema.parse({
+      type: "flow:message_ack",
+      flow_id: message.flow_id,
+      ...(message.log_id ? { log_id: message.log_id } : {}),
+      data: {
+        accepted: true,
+        message_id: existingSubmission.messageId ?? messageId,
+        client_message_id: message.client_message_id ?? messageId,
+        leader_agent_session_id: existingLeader?.id,
+      },
+    }));
+    return true;
+  }
+  if (existingSubmission && ["dispatching", "uncertain", "rejected", "cancelled"].includes(existingSubmission.receiptState)) {
+    await connection.send(errorMessage(
+      existingSubmission.receiptState === "dispatching" ? "MESSAGE_ALREADY_DISPATCHING" : "MESSAGE_NOT_RETRYABLE",
+      existingSubmission.receiptState === "dispatching"
+        ? "This message is already being dispatched."
+        : "This message was already resolved and cannot be submitted again with the same id.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return false;
   }
 
   const hasPendingUserAction = connection.store.listDecisionCards(message.flow_id).some((card) => card.status === "pending")
@@ -804,13 +601,13 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
       message.flow_id,
       message.log_id,
     ));
-    return;
+    return false;
   }
 
   if (connection.store.listDecisionCards(message.flow_id).some((card) => card.status === "pending")) {
     const error = new LeaderInputRejectedError();
     await connection.send(errorMessage(error.code, error.message, message.flow_id, message.log_id));
-    return;
+    return false;
   }
 
   const openUserTurn = connection.store.getOpenUserTurn(message.flow_id);
@@ -824,14 +621,46 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
       message.flow_id,
       message.log_id,
     ));
-    return;
+    return false;
   }
 
   const failedLeaderSession = connection.store
     .listAgentSessions(message.flow_id)
     .find((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "failed");
   const leader = ensureLeaderSession(message.flow_id, connection, { restartFailed: true });
-  const messageId = message.client_message_id ?? `msg-user-${randomUUID()}`;
+  const acceptance = existingSubmission
+    ? { outcome: "duplicate" as const, submission: existingSubmission }
+    : connection.store.acceptSubmission({
+        flowId: message.flow_id,
+        clientMessageId: messageId,
+        submissionType: "normal",
+        payloadHash,
+        payload: submissionPayload,
+      });
+  if (acceptance.outcome === "conflict") {
+    await connection.send(errorMessage("MESSAGE_ID_CONFLICT", "Message id conflicts with an existing submission.", message.flow_id, message.log_id));
+    return false;
+  }
+  if (!connection.store.claimSubmission(message.flow_id, messageId)) {
+    const current = connection.store.getSubmission(message.flow_id, messageId);
+    if (current?.receiptState === "materialized") {
+      onMaterialized?.(current.messageId ?? messageId);
+      await connection.send(ServerWsMessageSchema.parse({
+        type: "flow:message_ack",
+        flow_id: message.flow_id,
+        ...(message.log_id ? { log_id: message.log_id } : {}),
+        data: {
+          accepted: true,
+          message_id: current.messageId ?? messageId,
+          client_message_id: message.client_message_id ?? messageId,
+          leader_agent_session_id: leader.id,
+        },
+      }));
+      return true;
+    }
+    await connection.send(errorMessage("MESSAGE_ALREADY_DISPATCHING", "This message is already being dispatched.", message.flow_id, message.log_id));
+    return false;
+  }
   const createdAt = new Date().toISOString();
   const pendingPlanApproval = connection.store.listPlanApprovals(message.flow_id).find((approval) => approval.status === "pending");
   const effectiveFeedback = message.plan_feedback?.length
@@ -842,19 +671,22 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
   const feedbackRevisionId = effectiveFeedback[0]?.plan_revision_id;
   if (feedbackRevisionId) {
     if (effectiveFeedback.some((feedback) => feedback.plan_revision_id !== feedbackRevisionId)) {
+      connection.store.releaseSubmission(message.flow_id, messageId);
       await connection.send(errorMessage("INVALID_PLAN_FEEDBACK", "计划反馈必须指向当前等待审批的版本。", message.flow_id, message.log_id));
-      return;
+      return false;
     }
     const revision = connection.store.getPlanRevision(feedbackRevisionId);
     const feedbackPlan = revision ? connection.store.getOrchestrationPlan(revision.planId) : undefined;
     if (!revision || !feedbackPlan || feedbackPlan.flowId !== message.flow_id) {
+      connection.store.releaseSubmission(message.flow_id, messageId);
       await connection.send(errorMessage("INVALID_PLAN_FEEDBACK", "找不到评论引用的计划版本。", message.flow_id, message.log_id));
-      return;
+      return false;
     }
     const planNodeIds = new Set(connection.store.listPlanNodes(feedbackRevisionId).map((node) => node.id));
     if (effectiveFeedback.some((feedback) => feedback.plan_node_id && !planNodeIds.has(feedback.plan_node_id))) {
+      connection.store.releaseSubmission(message.flow_id, messageId);
       await connection.send(errorMessage("INVALID_PLAN_FEEDBACK", "计划反馈包含无效任务节点。", message.flow_id, message.log_id));
-      return;
+      return false;
     }
     if (pendingPlanApproval?.planRevisionId === feedbackRevisionId) {
       const updated = connection.store.setPlanApprovalFeedbackPending({
@@ -863,8 +695,9 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
         feedback: effectiveFeedback.map((feedback) => ({ planNodeId: feedback.plan_node_id, markerNumber: feedback.marker_number, comment: feedback.comment })),
       });
       if (!updated) {
+        connection.store.releaseSubmission(message.flow_id, messageId);
         await connection.send(errorMessage("PLAN_APPROVAL_CONFLICT", "计划审批状态已变化，请刷新后重试。", message.flow_id, message.log_id));
-        return;
+        return false;
       }
       await connection.eventBus.publish(message.flow_id, { type: "plan_approval:event", flow_id: message.flow_id, data: updated });
     } else {
@@ -873,32 +706,45 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
         feedback: effectiveFeedback.map((feedback) => ({ planNodeId: feedback.plan_node_id, markerNumber: feedback.marker_number, comment: feedback.comment })),
       });
       if (!recorded) {
+        connection.store.releaseSubmission(message.flow_id, messageId);
         await connection.send(errorMessage("INVALID_PLAN_FEEDBACK", "只能评论当前运行中的计划版本。", message.flow_id, message.log_id));
-        return;
+        return false;
       }
       const pausedRun = connection.store.getPlanRunForRevision(feedbackRevisionId);
-      if (pausedRun?.status === "paused_for_feedback") await publishPlanRunEvent(connection, pausedRun, message.log_id);
+      if (pausedRun?.status === "paused_for_feedback") await publishPlanRunEvent(connection, pausedRun);
     }
   }
-  const userTurn = openUserTurn
-    ? openUserTurn.status === "waiting_user"
-      ? connection.store.resumeUserTurn(openUserTurn.id)
-      : openUserTurn
-    : connection.store.createUserTurn({
-        flowId: message.flow_id,
-        triggerMessageId: messageId,
-        startedAt: createdAt,
-        specRequested: message.spec_requested === true,
-      });
-  const transcriptMessage = connection.chatJournal.recordUserMessage(
-    message.flow_id,
-    leader.sessionId ?? leader.id,
-    message.content,
-    messageId,
-    createdAt,
-    leader.id,
-    { ...imageAttachmentMetadata(message.attachments), ...planFeedbackMetadata(effectiveFeedback) },
-  );
+  let userTurn: ReturnType<Store["createUserTurn"]> | undefined;
+  let transcriptMessage: ReturnType<ChatJournal["recordUserMessage"]>;
+  try {
+    connection.store.sqlite.transaction(() => {
+      userTurn = openUserTurn
+        ? openUserTurn.status === "waiting_user"
+          ? connection.store.resumeUserTurn(openUserTurn.id)
+          : openUserTurn
+        : connection.store.createUserTurn({
+            flowId: message.flow_id,
+            triggerMessageId: messageId,
+            startedAt: createdAt,
+            specRequested: message.spec_requested === true,
+          });
+      onMaterialized?.(messageId);
+      connection.store.markSubmissionMaterialized(message.flow_id, messageId, messageId);
+      transcriptMessage = connection.chatJournal.recordUserMessage(
+        message.flow_id,
+        leader.sessionId ?? leader.id,
+        message.content,
+        messageId,
+        createdAt,
+        leader.id,
+        { ...imageAttachmentMetadata(message.attachments), ...planFeedbackMetadata(effectiveFeedback) },
+      );
+    })();
+  } catch (error) {
+    connection.chatJournal.clear(message.flow_id, leader.sessionId ?? leader.id);
+    connection.store.releaseSubmission(message.flow_id, messageId);
+    throw error;
+  }
   await connection.eventBus.publish(message.flow_id, {
     type: "session:transcript_event",
     flow_id: message.flow_id,
@@ -906,8 +752,24 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
     agent_session_id: leader.id,
     flow_expert_id: leader.id,
     ...(message.log_id ? { log_id: message.log_id } : {}),
-    data: { cursor: transcriptMessage.cursor, event: { type: "message-added", message: transcriptMessage.message } },
+    data: {
+      stream_epoch: connection.chatJournal.getStreamEpoch(),
+      cursor: transcriptMessage!.cursor,
+      event: { type: "message-added", message: transcriptMessage!.message },
+      ...transcriptCommitMetadata(transcriptMessage!),
+    },
   });
+  await connection.send(ServerWsMessageSchema.parse({
+    type: "flow:message_ack",
+    flow_id: message.flow_id,
+    ...(message.log_id ? { log_id: message.log_id } : {}),
+    data: {
+      accepted: true,
+      message_id: messageId,
+      client_message_id: message.client_message_id ?? null,
+      leader_agent_session_id: leader.id,
+    },
+  }));
   connection.store.appendEventLog({
     flowId: message.flow_id,
     userTurnId: userTurn?.id,
@@ -962,6 +824,7 @@ async function handleFlowMessage(message: ClientWsMessage & { type: "flow:messag
     }
     return publishLeaderError(message, connection, error);
   });
+  return true;
 }
 
 async function handlePlanApprove(message: ClientWsMessage & { type: "flow:plan_approve" }, connection: WsConnection) {
@@ -983,11 +846,15 @@ async function handlePlanApprove(message: ClientWsMessage & { type: "flow:plan_a
   await connection.orchestrationScheduler.startRevision(resolved.planRevisionId);
 }
 
-async function handleFlowGuide(message: ClientWsMessage & { type: "flow:guide" }, connection: WsConnection): Promise<void> {
+async function handleFlowGuide(
+  message: ClientWsMessage & { type: "flow:guide" },
+  connection: WsConnection,
+  onMaterialized?: (messageId: string) => void,
+): Promise<boolean> {
   const flow = connection.store.getFlow(message.flow_id);
   if (!flow) {
     await connection.send(errorMessage("not_found", "Flow not found", message.flow_id, message.log_id));
-    return;
+    return false;
   }
 
   const leader = connection.store
@@ -995,18 +862,73 @@ async function handleFlowGuide(message: ClientWsMessage & { type: "flow:guide" }
     .find((session) => session.expertId === "exp-leader" && session.taskId === null);
   if (!leader) {
     await connection.send(errorMessage("LEADER_NOT_RUNNING", "Leader is not currently running", message.flow_id, message.log_id));
-    return;
+    return false;
   }
   const leaderModelError = await missingLeaderModelError(flow);
   if (leaderModelError) {
     await connection.send(errorMessage("LEADER_MODEL_NOT_CONFIGURED", leaderModelError, message.flow_id, message.log_id));
-    return;
+    return false;
   }
 
   const messageId = message.client_message_id ?? `msg-user-guided-${randomUUID()}`;
+  const submissionPayload = guideSubmissionPayload(message);
+  const payloadHash = submissionPayloadHash(submissionPayload);
+  const existingSubmission = connection.store.getSubmission(message.flow_id, messageId);
+  if (existingSubmission && (
+    existingSubmission.submissionType !== "guide"
+    || existingSubmission.payloadHash !== payloadHash
+  )) {
+    await connection.send(errorMessage(
+      "MESSAGE_ID_CONFLICT",
+      "The same Guide id was already used with different content.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return false;
+  }
+  if (existingSubmission?.receiptState === "materialized") {
+    onMaterialized?.(existingSubmission.messageId ?? messageId);
+    await connection.send(ServerWsMessageSchema.parse({
+      type: "flow:guide_ack",
+      flow_id: message.flow_id,
+      ...(message.log_id ? { log_id: message.log_id } : {}),
+      data: {
+        accepted: true,
+        message_id: existingSubmission.messageId ?? messageId,
+        client_message_id: message.client_message_id ?? messageId,
+        leader_agent_session_id: leader.id,
+      },
+    }));
+    return true;
+  }
+  if (existingSubmission && ["dispatching", "uncertain", "rejected", "cancelled"].includes(existingSubmission.receiptState)) {
+    await connection.send(errorMessage(
+      existingSubmission.receiptState === "dispatching" ? "GUIDE_ALREADY_DISPATCHING" : "GUIDE_NOT_RETRYABLE",
+      existingSubmission.receiptState === "dispatching"
+        ? "This Guide is already being delivered."
+        : "This Guide cannot be delivered again with the same id.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return false;
+  }
+  const acceptance = existingSubmission
+    ? { outcome: "duplicate" as const, submission: existingSubmission }
+    : connection.store.acceptSubmission({
+        flowId: message.flow_id,
+        clientMessageId: messageId,
+        submissionType: "guide",
+        payloadHash,
+        payload: submissionPayload,
+      });
+  if (acceptance.outcome === "conflict" || !connection.store.claimSubmission(message.flow_id, messageId)) {
+    await connection.send(errorMessage("GUIDE_ALREADY_DISPATCHING", "This Guide is already being delivered.", message.flow_id, message.log_id));
+    return false;
+  }
   try {
     const guideFeedback = message.plan_feedback ?? [];
     const feedbackRevisionId = guideFeedback[0]?.plan_revision_id;
+    let feedbackInput: Parameters<Store["recordPlanFeedback"]>[0] | undefined;
     if (feedbackRevisionId) {
       if (guideFeedback.some((feedback) => feedback.plan_revision_id !== feedbackRevisionId)) throw new Error("计划反馈必须指向同一个计划版本");
       const revision = connection.store.getPlanRevision(feedbackRevisionId);
@@ -1015,43 +937,61 @@ async function handleFlowGuide(message: ClientWsMessage & { type: "flow:guide" }
       if (!plan || !turn || plan.flowId !== message.flow_id || plan.userTurnId !== turn.id) throw new Error("只能评论当前运行中的计划版本");
       const nodeIds = new Set(connection.store.listPlanNodes(feedbackRevisionId).map((node) => node.id));
       if (guideFeedback.some((feedback) => feedback.plan_node_id && !nodeIds.has(feedback.plan_node_id))) throw new Error("计划反馈包含无效任务节点");
-      const recorded = connection.store.recordPlanFeedback({
+      feedbackInput = {
         flowId: message.flow_id, userTurnId: turn.id, planRevisionId: feedbackRevisionId, sourceMessageId: messageId,
         feedback: guideFeedback.map((feedback) => ({ planNodeId: feedback.plan_node_id, markerNumber: feedback.marker_number, comment: feedback.comment })),
-      });
-      if (!recorded) throw new Error("只能评论当前运行中的计划版本");
-      const pausedRun = connection.store.getPlanRunForRevision(feedbackRevisionId);
-      if (pausedRun?.status === "paused_for_feedback") await publishPlanRunEvent(connection, pausedRun, message.log_id);
+      };
     }
-    const result = await connection.leaderRuntime.guideLeaderTurn({
+    const createdAt = new Date().toISOString();
+    let transcriptMessage: ReturnType<ChatJournal["recordUserMessage"]> | undefined;
+    await connection.leaderRuntime.guideLeaderTurn({
       flowId: message.flow_id,
       content: message.content,
       planFeedback: guideFeedback,
       leaderAgentSessionId: leader.id,
       messageId,
       attachments: message.attachments,
-    });
-    const createdAt = new Date().toISOString();
-    const transcriptMessage = connection.chatJournal.recordUserMessage(
-      message.flow_id,
-      leader.sessionId ?? leader.id,
-      message.content,
-      result.messageId,
-      createdAt,
-      leader.id,
-      {
-        localMessageKind: "running-guide",
-        ...imageAttachmentMetadata(message.attachments),
-        ...planFeedbackMetadata(guideFeedback),
+      beforeDeliver: () => {
+        connection.store.sqlite.transaction(() => {
+          if (feedbackInput && !connection.store.recordPlanFeedback(feedbackInput)) {
+            throw new Error("只能评论当前运行中的计划版本");
+          }
+          onMaterialized?.(messageId);
+          connection.store.markSubmissionMaterialized(message.flow_id, messageId, messageId);
+          transcriptMessage = connection.chatJournal.recordUserMessage(
+            message.flow_id,
+            leader.sessionId ?? leader.id,
+            message.content,
+            messageId,
+            createdAt,
+            leader.id,
+            {
+              localMessageKind: "running-guide",
+              guideStatusLabel: "已引导对话",
+              ...imageAttachmentMetadata(message.attachments),
+              ...planFeedbackMetadata(guideFeedback),
+            },
+          );
+        })();
       },
-    );
+    });
+    if (!transcriptMessage) throw new Error("Leader runtime did not commit Guide delivery");
+    if (feedbackRevisionId) {
+      const pausedRun = connection.store.getPlanRunForRevision(feedbackRevisionId);
+      if (pausedRun?.status === "paused_for_feedback") await publishPlanRunEvent(connection, pausedRun, message.log_id);
+    }
     await connection.eventBus.publish(message.flow_id, {
       type: "session:transcript_event",
       flow_id: message.flow_id,
       session_id: leader.sessionId ?? leader.id,
       agent_session_id: leader.id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
-      data: { cursor: transcriptMessage.cursor, event: { type: "message-added", message: transcriptMessage.message } },
+      data: {
+        stream_epoch: connection.chatJournal.getStreamEpoch(),
+        cursor: transcriptMessage.cursor,
+        event: { type: "message-added", message: transcriptMessage.message },
+        ...transcriptCommitMetadata(transcriptMessage),
+      },
     });
     connection.store.appendEventLog({
       flowId: message.flow_id,
@@ -1059,7 +999,7 @@ async function handleFlowGuide(message: ClientWsMessage & { type: "flow:guide" }
       agentSessionId: leader.id,
       eventType: "flow.guide_message",
       payload: {
-        message_id: result.messageId,
+        message_id: messageId,
         created_at: createdAt,
         client_message_id: message.client_message_id ?? null,
       },
@@ -1070,19 +1010,228 @@ async function handleFlowGuide(message: ClientWsMessage & { type: "flow:guide" }
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
         accepted: true,
-        message_id: result.messageId,
+        message_id: messageId,
         client_message_id: message.client_message_id ?? null,
         leader_agent_session_id: leader.id,
       },
     }));
+    return true;
   } catch (error) {
+    connection.store.markSubmissionRejected(message.flow_id, messageId, "LEADER_GUIDE_UNAVAILABLE");
     await connection.send(errorMessage(
       "LEADER_GUIDE_UNAVAILABLE",
       error instanceof Error ? error.message : String(error),
       message.flow_id,
       message.log_id,
     ));
+    return false;
   }
+}
+
+async function handleQueueAdd(
+  message: ClientWsMessage & { type: "flow:queue_add" },
+  connection: WsConnection,
+) {
+  if (!connection.store.getFlow(message.flow_id)) {
+    await connection.send(errorMessage("not_found", "Flow not found", message.flow_id, message.log_id));
+    return;
+  }
+  const payload = {
+    content: message.content,
+    ...(message.display_content !== undefined ? { display_content: message.display_content } : {}),
+    ...(message.spec_requested ? { spec_requested: true } : {}),
+    ...(message.attachments?.length ? { attachments: message.attachments } : {}),
+    ...(message.plan_feedback?.length ? { plan_feedback: message.plan_feedback } : {}),
+    ...(message.client_payload ? { client_payload: message.client_payload } : {}),
+  };
+  const result = connection.store.addQueuedMessage({
+    id: message.queue_id,
+    flowId: message.flow_id,
+    payloadHash: submissionPayloadHash({
+      content: message.content,
+      spec_requested: message.spec_requested === true,
+      attachments: message.attachments ?? [],
+      plan_feedback: message.plan_feedback ?? [],
+    }),
+    payload,
+  });
+  if (result.acceptance.outcome === "conflict") {
+    await connection.send(errorMessage(
+      "MESSAGE_ID_CONFLICT",
+      "The same queued message id was already used with different content.",
+      message.flow_id,
+      message.log_id,
+    ));
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  await publishQueueState(connection, message.flow_id, message.log_id);
+  connection.requestQueueDrain?.(message.flow_id);
+}
+
+async function handleQueueDelete(
+  message: ClientWsMessage & { type: "flow:queue_delete" },
+  connection: WsConnection,
+) {
+  connection.store.deleteQueuedMessage(message.flow_id, message.queue_id);
+  await publishQueueState(connection, message.flow_id, message.log_id);
+}
+
+async function handleQueueReorder(
+  message: ClientWsMessage & { type: "flow:queue_reorder" },
+  connection: WsConnection,
+) {
+  if (!connection.store.reorderQueuedMessages(message.flow_id, message.queue_ids)) {
+    await connection.send(errorMessage(
+      "QUEUE_REVISION_CONFLICT",
+      "The queued message list changed. Refresh and try again.",
+      message.flow_id,
+      message.log_id,
+    ));
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  await publishQueueState(connection, message.flow_id, message.log_id);
+}
+
+function queuedFlowMessage(
+  flowId: string,
+  queueId: string,
+  payload: Record<string, unknown>,
+  logId?: string,
+): ClientWsMessage & { type: "flow:message" } {
+  const parsed = ClientWsMessageSchema.parse({
+    type: "flow:message",
+    flow_id: flowId,
+    content: typeof payload.content === "string" ? payload.content : "",
+    ...(payload.spec_requested === true ? { spec_requested: true } : {}),
+    ...(Array.isArray(payload.attachments) ? { attachments: payload.attachments } : {}),
+    ...(Array.isArray(payload.plan_feedback) ? { plan_feedback: payload.plan_feedback } : {}),
+    client_message_id: queueId,
+    ...(logId ? { log_id: logId } : {}),
+  });
+  if (parsed.type !== "flow:message") throw new Error("Invalid queued flow message");
+  return parsed;
+}
+
+function queuedGuideMessage(
+  flowId: string,
+  clientMessageId: string,
+  payload: Record<string, unknown>,
+  logId?: string,
+): ClientWsMessage & { type: "flow:guide" } {
+  const parsed = ClientWsMessageSchema.parse({
+    type: "flow:guide",
+    flow_id: flowId,
+    content: typeof payload.content === "string" ? payload.content : "",
+    ...(Array.isArray(payload.attachments) ? { attachments: payload.attachments } : {}),
+    ...(Array.isArray(payload.plan_feedback) ? { plan_feedback: payload.plan_feedback } : {}),
+    client_message_id: clientMessageId,
+    ...(logId ? { log_id: logId } : {}),
+  });
+  if (parsed.type !== "flow:guide") throw new Error("Invalid queued Guide message");
+  return parsed;
+}
+
+async function handleQueueDispatch(
+  message: ClientWsMessage & { type: "flow:queue_dispatch" },
+  connection: WsConnection,
+) {
+  const queue = connection.store.listQueuedMessages(message.flow_id);
+  const item = queue.find((candidate) => candidate.id === message.queue_id);
+  if (!item) {
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  if (queue[0]?.id !== item.id) {
+    await connection.send(errorMessage(
+      "QUEUE_ORDER_CONFLICT",
+      "Only the first queued message can be dispatched.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return;
+  }
+  const claimed = connection.store.claimQueuedMessage(message.flow_id, item.id);
+  if (!claimed) {
+    await connection.send(errorMessage(
+      "QUEUE_REVISION_CONFLICT",
+      "The queued message changed before it could be dispatched.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return;
+  }
+  await publishQueueState(connection, message.flow_id);
+  const accepted = await handleFlowMessage(
+    queuedFlowMessage(message.flow_id, claimed.id, claimed.payload, message.log_id),
+    connection,
+    (messageId) => {
+      connection.store.completeQueuedMessage(message.flow_id, claimed.id, messageId);
+    },
+  );
+  if (!accepted) {
+    connection.store.releaseSubmission(message.flow_id, claimed.id);
+    connection.store.releaseQueuedMessage(message.flow_id, claimed.id);
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  await publishQueueState(connection, message.flow_id, message.log_id);
+}
+
+export async function drainNextQueuedMessage(flowId: string, connection: WsConnection): Promise<boolean> {
+  if (connection.store.getOpenUserTurn(flowId)) return false;
+  const next = connection.store.listQueuedMessages(flowId)[0];
+  if (!next || next.status !== "accepted") return false;
+  await handleQueueDispatch({
+    type: "flow:queue_dispatch",
+    flow_id: flowId,
+    queue_id: next.id,
+  }, connection);
+  return connection.store.getQueuedMessage(flowId, next.id) === undefined;
+}
+
+async function handleQueueGuide(
+  message: ClientWsMessage & { type: "flow:queue_guide" },
+  connection: WsConnection,
+) {
+  const item = connection.store.getQueuedMessage(message.flow_id, message.queue_id);
+  if (!item) {
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  const claimed = connection.store.claimQueuedMessageForGuide(message.flow_id, message.queue_id);
+  if (!claimed) {
+    await connection.send(errorMessage(
+      "QUEUE_REVISION_CONFLICT",
+      "The queued message changed before it could be guided.",
+      message.flow_id,
+      message.log_id,
+    ));
+    return;
+  }
+  await publishQueueState(connection, message.flow_id);
+  const accepted = await handleFlowGuide(
+    queuedGuideMessage(message.flow_id, message.client_message_id, claimed.payload, message.log_id),
+    connection,
+    () => {
+      connection.store.completeGuidedQueuedMessage(message.flow_id, claimed.id);
+    },
+  );
+  if (!accepted) {
+    connection.store.releaseQueuedMessage(message.flow_id, claimed.id);
+    await publishQueueState(connection, message.flow_id, message.log_id);
+    return;
+  }
+  await publishQueueState(connection, message.flow_id, message.log_id);
+}
+
+async function handleQueueClear(
+  message: ClientWsMessage & { type: "flow:queue_clear" },
+  connection: WsConnection,
+) {
+  connection.store.clearQueuedMessages(message.flow_id);
+  await publishQueueState(connection, message.flow_id, message.log_id);
 }
 
 async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" }, connection: WsConnection): Promise<void> {
@@ -1334,6 +1483,29 @@ async function handleDecision(message: ClientWsMessage & { type: "flow:decision"
         created_at: resolution.leaderInput.createdAt,
       },
     });
+    const transcriptMessage = connection.chatJournal.recordUserMessage(
+      message.flow_id,
+      leader.sessionId ?? leader.id,
+      `clarification_card_id: ${resolved.id}\n用户已回答澄清卡片。`,
+      resolution.leaderInput.messageId,
+      resolution.leaderInput.createdAt,
+      leader.id,
+      { decisionCardId: resolved.id, decisionStatus: "resolved" },
+    );
+    await connection.eventBus.publish(message.flow_id, {
+      type: "session:transcript_event",
+      flow_id: message.flow_id,
+      session_id: leader.sessionId ?? leader.id,
+      agent_session_id: leader.id,
+      flow_expert_id: leader.id,
+      ...(message.log_id ? { log_id: message.log_id } : {}),
+      data: {
+        stream_epoch: connection.chatJournal.getStreamEpoch(),
+        cursor: transcriptMessage.cursor,
+        event: { type: "message-added", message: transcriptMessage.message },
+        ...transcriptCommitMetadata(transcriptMessage),
+      },
+    });
   }
 
   await connection.send(ServerWsMessageSchema.parse({
@@ -1401,7 +1573,7 @@ async function handleDecisionCancel(
   }
 
   const cancelled = resolution.card;
-  ensureLeaderSession(message.flow_id, connection);
+  const leader = ensureLeaderSession(message.flow_id, connection);
   if (resolution.newlyResolved) {
     const turn = cancelled.userTurnId
       ? connection.store.resumeUserTurn(cancelled.userTurnId)
@@ -1417,6 +1589,29 @@ async function handleDecisionCancel(
         action_id: actionId,
         status: cancelled.status,
         created_at: resolution.leaderInput.createdAt,
+      },
+    });
+    const transcriptMessage = connection.chatJournal.recordUserMessage(
+      message.flow_id,
+      leader.sessionId ?? leader.id,
+      `clarification_card_id: ${cancelled.id}\n用户取消了本次澄清卡片。`,
+      resolution.leaderInput.messageId,
+      resolution.leaderInput.createdAt,
+      leader.id,
+      { decisionCardId: cancelled.id, decisionStatus: "cancelled" },
+    );
+    await connection.eventBus.publish(message.flow_id, {
+      type: "session:transcript_event",
+      flow_id: message.flow_id,
+      session_id: leader.sessionId ?? leader.id,
+      agent_session_id: leader.id,
+      flow_expert_id: leader.id,
+      ...(message.log_id ? { log_id: message.log_id } : {}),
+      data: {
+        stream_epoch: connection.chatJournal.getStreamEpoch(),
+        cursor: transcriptMessage.cursor,
+        event: { type: "message-added", message: transcriptMessage.message },
+        ...transcriptCommitMetadata(transcriptMessage),
       },
     });
   }
@@ -1572,6 +1767,8 @@ async function handleUserTurnCancel(
     return;
   }
   await cancelUserTurnState(connection, turn, message.log_id);
+  connection.store.clearQueuedMessages(message.flow_id);
+  await publishQueueState(connection, message.flow_id, message.log_id);
 }
 
 function parseClientMessage(rawMessage: unknown):
@@ -1696,6 +1893,24 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
     case "flow:guide":
       await handleFlowGuide(message, connection);
       return;
+    case "flow:queue_add":
+      await handleQueueAdd(message, connection);
+      return;
+    case "flow:queue_delete":
+      await handleQueueDelete(message, connection);
+      return;
+    case "flow:queue_reorder":
+      await handleQueueReorder(message, connection);
+      return;
+    case "flow:queue_dispatch":
+      await handleQueueDispatch(message, connection);
+      return;
+    case "flow:queue_guide":
+      await handleQueueGuide(message, connection);
+      return;
+    case "flow:queue_clear":
+      await handleQueueClear(message, connection);
+      return;
     case "flow:decision":
       await handleDecision(message, connection);
       return;
@@ -1721,24 +1936,31 @@ export function registerWsGateway(app: FastifyInstance, deps: WsGatewayDeps): vo
     const send: SendServerMessage = (message) => {
       socket.send(JSON.stringify(ServerWsMessageSchema.parse(message)));
     };
+    let incomingMessages = Promise.resolve();
 
     socket.on("message", (rawMessage: unknown) => {
-      void handleWsClientMessage(rawMessage, {
-        clientId,
-        subscriptions,
-        eventBus: deps.eventBus,
-        store: deps.store,
-        chatJournal: deps.chatJournal,
-        sessionHistoryLoader: deps.sessionHistoryLoader,
-        leaderRuntime: deps.leaderRuntime,
-        expertRuntime: deps.expertRuntime,
-        orchestrationScheduler: deps.orchestrationScheduler,
-        logger: deps.logger,
-        runId: deps.runId,
-        send,
-      }).catch(() => {
-        send(errorMessage("internal_error", "Websocket message handling failed"));
-      });
+      incomingMessages = incomingMessages
+        .then(() => handleWsClientMessage(rawMessage, {
+          clientId,
+          subscriptions,
+          eventBus: deps.eventBus,
+          store: deps.store,
+          chatJournal: deps.chatJournal,
+          leaderRuntime: deps.leaderRuntime,
+          expertRuntime: deps.expertRuntime,
+          orchestrationScheduler: deps.orchestrationScheduler,
+          logger: deps.logger,
+          runId: deps.runId,
+          requestQueueDrain: deps.requestQueueDrain,
+          send,
+        }))
+        .catch(() => {
+          try {
+            send(errorMessage("internal_error", "Websocket message handling failed"));
+          } catch {
+            // The socket may have closed while the command was being handled.
+          }
+        });
     });
 
     socket.on("close", () => {

@@ -26,6 +26,16 @@ export type TranscriptEvent =
   | { type: "tool-output-available"; messageId: string; toolCallId: string; output: unknown }
   | { type: "turn-finished"; messageId: string; durationMs: number | null; finishedAt: string };
 
+export type TranscriptCommittedEvent = {
+  streamEpoch: string;
+  cursor: number;
+  event: TranscriptEvent;
+  removedMessageIds?: string[];
+  activeTurn?: TranscriptActiveTurn;
+};
+
+type PendingTranscriptEvent = Omit<TranscriptCommittedEvent, "streamEpoch" | "cursor">;
+
 type ActiveTurn = {
   messageId: string;
   renderMessageId: string;
@@ -38,25 +48,28 @@ type ActiveTurn = {
 export type TranscriptState = {
   messages: UIMessage[];
   historyBoundaries: HistorySessionBoundary[];
+  streamEpoch: string | null;
   cursor: number | null;
-  pendingEvents: Map<number, TranscriptEvent>;
+  pendingEvents: Map<number, PendingTranscriptEvent>;
   status: TranscriptStatus;
   activeTurn: ActiveTurn | null;
+  optimisticMessageIds: Set<string>;
   expandedDecisionResultIds: Set<string>;
   needsResync: boolean;
 };
 
 export type TranscriptAction =
   | { type: "reset" }
-  | { type: "append-optimistic"; messages: UIMessage[] }
+  | { type: "sync-optimistic"; messages: UIMessage[] }
   | {
       type: "load-snapshot";
+      streamEpoch: string;
       cursor: number;
       messages: UIMessage[];
       historyBoundaries: HistorySessionBoundary[];
       activeTurn?: TranscriptActiveTurn;
     }
-  | { type: "apply-events"; events: Array<{ cursor: number; event: TranscriptEvent }> }
+  | { type: "apply-events"; events: TranscriptCommittedEvent[] }
   | {
       type: "decision-card-resolved";
       cardId: string;
@@ -70,10 +83,12 @@ export type TranscriptAction =
 export const emptyTranscriptState: TranscriptState = {
   messages: [],
   historyBoundaries: [],
+  streamEpoch: null,
   cursor: null,
   pendingEvents: new Map(),
   status: "idle",
   activeTurn: null,
+  optimisticMessageIds: new Set(),
   expandedDecisionResultIds: new Set(),
   needsResync: false,
 };
@@ -100,133 +115,16 @@ function textContent(message: UIMessage): string {
     .join("");
 }
 
-function setTextContent(message: MutableMessage, text: string) {
-  let wroteText = false;
-  message.parts = message.parts.map((part) => {
-    if (part.type !== "text") return part;
-    if (wroteText) return { ...(part as Record<string, unknown>), text: "" } as UIMessage["parts"][number];
-    wroteText = true;
-    return { ...(part as Record<string, unknown>), text } as UIMessage["parts"][number];
-  });
-  if (!wroteText) {
-    message.parts = [{ type: "text", text } as UIMessage["parts"][number], ...message.parts];
-  }
-  message.content = text;
-}
-
-function userMessageSignature(message: UIMessage): string {
-  if (message.role !== "user") return "";
-  const text = textContent(message)
-    .trim()
-    .replace(/\s+/g, " ");
-  const decisionCardId = /^clarification_card_id:\s*(\S+)/mu.exec(text)?.[1];
-  return decisionCardId ? `decision-card:${decisionCardId}` : `text:${text}`;
-}
-
-function browserElementAttachments(message: UIMessage): unknown {
-  return (message as { metadata?: { browserElementAttachments?: unknown } }).metadata?.browserElementAttachments;
-}
-
-function imageAttachments(message: UIMessage): unknown {
-  return (message as { metadata?: { imageAttachments?: unknown } }).metadata?.imageAttachments;
-}
-
-function cloneServerMessageWithLocalMetadata(serverMessage: UIMessage, localMessage: UIMessage): UIMessage {
-  const localAttachments = browserElementAttachments(localMessage);
-  const localImageAttachments = imageAttachments(localMessage);
-  const shouldKeepLocalGuideText = isRunningGuideMessage(serverMessage)
-    && isRunningGuideMessage(localMessage)
-    && textContent(localMessage).trim().length > 0;
-  if (
-    !shouldKeepLocalGuideText
-    && (!Array.isArray(localAttachments) || localAttachments.length === 0)
-    && (!Array.isArray(localImageAttachments) || localImageAttachments.length === 0)
-  ) {
-    return cloneUiMessage(serverMessage);
-  }
-  const next = cloneUiMessage(serverMessage) as MutableMessage;
-  next.metadata = {
-    ...(next.metadata ?? {}),
-    ...(shouldKeepLocalGuideText
-      ? {
-        localMessageKind: "running-guide",
-        guideStatusLabel: (localMessage as { metadata?: { guideStatusLabel?: unknown } }).metadata?.guideStatusLabel ?? "已引导对话",
-      }
-      : {}),
-    ...(Array.isArray(localAttachments) && localAttachments.length > 0 ? { browserElementAttachments: localAttachments } : {}),
-    ...(Array.isArray(localImageAttachments) && localImageAttachments.length > 0 ? { imageAttachments: localImageAttachments } : {}),
-  };
-  if (shouldKeepLocalGuideText) setTextContent(next, textContent(localMessage));
-  return next;
-}
-
 function cloneMessagesWithOptimistic(state: TranscriptState, messages: UIMessage[]): UIMessage[] {
   const snapshot = messages.map(cloneUiMessage);
   const snapshotIds = new Set(snapshot.map((message) => message.id));
-  const snapshotUserSignatures = new Set(
-    snapshot.filter((message) => message.role === "user").map(userMessageSignature).filter(Boolean),
-  );
   const optimistic = state.messages.filter((message) =>
-    message.role === "user"
+    state.optimisticMessageIds.has(message.id)
     && !snapshotIds.has(message.id)
-    // Modern optimistic messages carry their client id and timestamp. Only
-    // use the old text-signature fallback for legacy messages without a
-    // timestamp; otherwise two legitimate consecutive prompts with the same
-    // text would collapse into one.
-    && ((message as { createdAt?: unknown }).createdAt != null || !snapshotUserSignatures.has(userMessageSignature(message))),
   );
-  if (optimistic.length === 0) return snapshot;
-
-  const optimisticIds = new Set(optimistic.map((message) => message.id));
-  const beforeByAnchor = new Map<string, UIMessage[]>();
-  const afterByAnchor = new Map<string, UIMessage[]>();
-  const unanchored: UIMessage[] = [];
-
-  const addToBucket = (buckets: Map<string, UIMessage[]>, anchorId: string, message: UIMessage) => {
-    const bucket = buckets.get(anchorId) ?? [];
-    bucket.push(cloneUiMessage(message));
-    buckets.set(anchorId, bucket);
-  };
-
-  for (let index = 0; index < state.messages.length; index += 1) {
-    const message = state.messages[index];
-    if (!message || !optimisticIds.has(message.id)) continue;
-
-    let previousAnchorId: string | null = null;
-    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-      const candidate = state.messages[cursor];
-      if (candidate && snapshotIds.has(candidate.id)) {
-        previousAnchorId = candidate.id;
-        break;
-      }
-    }
-    if (previousAnchorId) {
-      addToBucket(afterByAnchor, previousAnchorId, message);
-      continue;
-    }
-
-    let nextAnchorId: string | null = null;
-    for (let cursor = index + 1; cursor < state.messages.length; cursor += 1) {
-      const candidate = state.messages[cursor];
-      if (candidate && snapshotIds.has(candidate.id)) {
-        nextAnchorId = candidate.id;
-        break;
-      }
-    }
-    if (nextAnchorId) {
-      addToBucket(beforeByAnchor, nextAnchorId, message);
-    } else {
-      unanchored.push(cloneUiMessage(message));
-    }
-  }
-
-  const merged = [...unanchored];
-  for (const message of snapshot) {
-    merged.push(...(beforeByAnchor.get(message.id) ?? []));
-    merged.push(message);
-    merged.push(...(afterByAnchor.get(message.id) ?? []));
-  }
-  return merged;
+  return optimistic.length === 0
+    ? snapshot
+    : [...snapshot, ...optimistic.map(cloneUiMessage)];
 }
 
 function findPartIndex(parts: UIMessage["parts"], predicate: (part: AnyPart) => boolean): number {
@@ -242,9 +140,9 @@ function activeTurnFromSnapshot(
   if (!message) return null;
   const timing = readHistoryTurnTiming(message);
   return {
-    messageId: message.id,
+    messageId: activeTurn.root_message_id ?? message.id,
     renderMessageId: message.id,
-    segmentIndex: 0,
+    segmentIndex: activeTurn.segment_index ?? 0,
     activity: deriveActivityFromMessage(message),
     timing: {
       startedAt: activeTurn.started_at,
@@ -340,20 +238,8 @@ function appendServerMessage(messages: UIMessage[], message: UIMessage): UIMessa
   const existingIndex = messages.findIndex((item) => item.id === message.id);
   if (existingIndex >= 0) {
     const next = [...messages];
-    next[existingIndex] = cloneServerMessageWithLocalMetadata(message, messages[existingIndex]);
+    next[existingIndex] = cloneUiMessage(message);
     return next;
-  }
-  if (isRunningGuideMessage(message)) {
-    return [...messages, cloneUiMessage(message)];
-  }
-  const signature = userMessageSignature(message);
-  if (signature) {
-    const optimisticIndex = messages.findIndex((item) => item.role === "user" && userMessageSignature(item) === signature);
-    if (optimisticIndex >= 0) {
-      const next = [...messages];
-      next[optimisticIndex] = cloneServerMessageWithLocalMetadata(message, messages[optimisticIndex]);
-      return next;
-    }
   }
   return [...messages, cloneUiMessage(message)];
 }
@@ -363,26 +249,8 @@ function isRunningGuideMessage(message: UIMessage): boolean {
     && (message as { metadata?: { localMessageKind?: unknown } }).metadata?.localMessageKind === "running-guide";
 }
 
-function withoutGuideStatus(message: UIMessage): UIMessage {
-  if (!isRunningGuideMessage(message)) return message;
-  const next = cloneUiMessage(message) as UIMessage & { metadata?: Record<string, unknown> };
-  if (!next.metadata) return next;
-  delete next.metadata.guideStatusLabel;
-  return next;
-}
-
 function isGuideApplyingAssistantEvent(event: TranscriptEvent): boolean {
   return event.type === "text-delta"
-    || event.type === "reasoning-delta"
-    || event.type === "tool-input-start"
-    || event.type === "tool-input-delta"
-    || event.type === "tool-input-available";
-}
-
-function startsAssistantSegmentAfterGuide(event: TranscriptEvent): boolean {
-  return event.type === "text-start"
-    || event.type === "text-delta"
-    || event.type === "reasoning-start"
     || event.type === "reasoning-delta"
     || event.type === "tool-input-start"
     || event.type === "tool-input-delta"
@@ -426,46 +294,6 @@ function useCanonicalAssistantSegment(state: TranscriptState, event: TranscriptE
   };
 }
 
-function shouldStartNextAssistantSegment(state: TranscriptState, event: TranscriptEvent): boolean {
-  const messageId = transcriptEventMessageId(event);
-  if (!messageId || !state.activeTurn || state.activeTurn.messageId !== messageId) return false;
-  if (state.activeTurn.pendingGuideMessageIds.length === 0) return false;
-  if (!startsAssistantSegmentAfterGuide(event)) return false;
-  const renderIndex = state.messages.findIndex((message) => message.id === state.activeTurn?.renderMessageId);
-  const pendingGuideIndex = state.activeTurn.pendingGuideMessageIds.reduce((latest, messageId) => {
-    const index = state.messages.findIndex((message) => message.id === messageId);
-    return index > latest ? index : latest;
-  }, -1);
-  return renderIndex >= 0 && pendingGuideIndex > renderIndex;
-}
-
-function nextAssistantSegment(state: TranscriptState, event: TranscriptEvent): { messages: UIMessage[]; activeTurn: ActiveTurn; message: UIMessage } | null {
-  if (!shouldStartNextAssistantSegment(state, event) || !state.activeTurn) return null;
-  const segmentIndex = state.activeTurn.segmentIndex + 1;
-  const renderMessageId = `${state.activeTurn.messageId}:guide-${segmentIndex}`;
-  const existingIndex = state.messages.findIndex((message) => message.id === renderMessageId);
-  const messages = [...state.messages];
-  let message: UIMessage;
-  if (existingIndex >= 0) {
-    message = cloneUiMessage(messages[existingIndex]);
-    messages[existingIndex] = message;
-  } else {
-    message = createAssistantMessage(renderMessageId, state.activeTurn.timing.startedAt ?? new Date().toISOString());
-    messages.push(message);
-  }
-  return {
-    messages,
-    message,
-    activeTurn: {
-      ...state.activeTurn,
-      renderMessageId,
-      segmentIndex,
-      activity: "waiting",
-      pendingGuideMessageIds: state.activeTurn.pendingGuideMessageIds,
-    },
-  };
-}
-
 function markGuideApplied(messages: UIMessage[], guideMessageIds: string[]): UIMessage[] {
   if (guideMessageIds.length === 0) return messages;
   const guideIds = new Set(guideMessageIds);
@@ -486,20 +314,29 @@ function markGuideApplied(messages: UIMessage[], guideMessageIds: string[]): UIM
 
 function appendOptimisticMessage(messages: UIMessage[], message: UIMessage): UIMessage[] {
   if (messages.some((item) => item.id === message.id)) return messages;
-  const signature = userMessageSignature(message);
-  if (signature && messages.some((item) => item.role === "user" && userMessageSignature(item) === signature)) {
-    return messages;
-  }
   return [...messages, cloneUiMessage(message)];
 }
 
 function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptState {
   if (event.type === "message-added") {
-    const message = withoutGuideStatus(event.message);
+    const message = event.message;
     const activeTurn = state.activeTurn && isRunningGuideMessage(message)
       ? { ...state.activeTurn, pendingGuideMessageIds: [...state.activeTurn.pendingGuideMessageIds, message.id] }
       : state.activeTurn;
-    return { ...state, messages: appendServerMessage(state.messages, message), activeTurn };
+    const decisionCardId = message.role === "user"
+      ? (message as { metadata?: { decisionCardId?: unknown } }).metadata?.decisionCardId
+      : undefined;
+    return {
+      ...state,
+      messages: appendServerMessage(state.messages, message),
+      optimisticMessageIds: state.optimisticMessageIds.has(message.id)
+        ? new Set([...state.optimisticMessageIds].filter((messageId) => messageId !== message.id))
+        : state.optimisticMessageIds,
+      activeTurn,
+      expandedDecisionResultIds: typeof decisionCardId === "string"
+        ? new Set([...state.expandedDecisionResultIds, decisionCardId])
+        : state.expandedDecisionResultIds,
+    };
   }
 
   if (event.type === "turn-started") {
@@ -535,10 +372,6 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
   }
 
   let workingState = useCanonicalAssistantSegment(state, event) ?? state;
-  const segment = workingState === state ? nextAssistantSegment(state, event) : null;
-  if (segment) {
-    workingState = { ...workingState, messages: segment.messages, activeTurn: segment.activeTurn };
-  }
   const active = activeMessage(workingState, event.messageId);
   if (!active || !workingState.activeTurn) return { ...workingState, needsResync: true };
   let { messages, message } = active;
@@ -665,6 +498,46 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
   };
 }
 
+function reconcileCommittedEvent(state: TranscriptState, mutation: PendingTranscriptEvent): TranscriptState {
+  let next = mutation.removedMessageIds?.length
+    ? { ...state, messages: state.messages.filter((message) => !mutation.removedMessageIds!.includes(message.id)) }
+    : state;
+  next = applyEvent(next, mutation.event);
+  if (!mutation.activeTurn) return next;
+
+  const renderMessageId = mutation.activeTurn.message_id;
+  let messages = next.messages;
+  let message = messages.find((item) => item.id === renderMessageId && item.role === "assistant");
+  if (!message) {
+    message = createAssistantMessage(renderMessageId, mutation.activeTurn.started_at);
+    messages = [...messages, message];
+  }
+  const sameActiveMessage = next.activeTurn?.renderMessageId === renderMessageId;
+  return {
+    ...next,
+    messages,
+    status: "streaming",
+    activeTurn: {
+      messageId: mutation.activeTurn.root_message_id ?? renderMessageId,
+      renderMessageId,
+      segmentIndex: mutation.activeTurn.segment_index ?? 0,
+      activity: sameActiveMessage
+        ? next.activeTurn!.activity
+        : deriveActivityFromMessage(message),
+      timing: sameActiveMessage
+        ? next.activeTurn!.timing
+        : {
+            startedAt: mutation.activeTurn.started_at,
+            finishedAt: null,
+            durationMs: null,
+          },
+      pendingGuideMessageIds: sameActiveMessage
+        ? next.activeTurn!.pendingGuideMessageIds
+        : [],
+    },
+  };
+}
+
 function replayPending(state: TranscriptState): TranscriptState {
   if (state.cursor === null) return state;
   let cursor = state.cursor;
@@ -673,42 +546,55 @@ function replayPending(state: TranscriptState): TranscriptState {
   while (pendingEvents.has(cursor + 1)) {
     const event = pendingEvents.get(cursor + 1)!;
     pendingEvents.delete(cursor + 1);
-    next = applyEvent(next, event);
+    next = reconcileCommittedEvent(next, event);
     cursor += 1;
   }
   return { ...next, cursor, pendingEvents };
 }
 
-function applyEvents(state: TranscriptState, events: Array<{ cursor: number; event: TranscriptEvent }>): TranscriptState {
+function applyEvents(state: TranscriptState, events: TranscriptCommittedEvent[]): TranscriptState {
+  const streamEpoch = state.streamEpoch ?? events[0]?.streamEpoch ?? null;
   const pendingEvents = new Map(state.pendingEvents);
   for (const item of events) {
+    if (item.streamEpoch !== streamEpoch) continue;
     if (state.cursor !== null && item.cursor <= state.cursor) continue;
-    pendingEvents.set(item.cursor, item.event);
+    pendingEvents.set(item.cursor, {
+      event: item.event,
+      ...(item.removedMessageIds?.length ? { removedMessageIds: item.removedMessageIds } : {}),
+      ...(item.activeTurn ? { activeTurn: item.activeTurn } : {}),
+    });
   }
-  return replayPending({ ...state, pendingEvents });
+  return replayPending({ ...state, streamEpoch, pendingEvents });
 }
 
 function loadSnapshot(
   state: TranscriptState,
+  streamEpoch: string,
   cursor: number,
   messages: UIMessage[],
   historyBoundaries: HistorySessionBoundary[],
   activeTurnSnapshot: TranscriptActiveTurn | undefined,
 ): TranscriptState {
-  if (state.cursor !== null && cursor < state.cursor) return state;
+  const sameEpoch = state.streamEpoch === null || state.streamEpoch === streamEpoch;
+  if (sameEpoch && state.cursor !== null && cursor < state.cursor) return state;
   const sessionMessages = cloneMessagesWithOptimistic(state, messages);
-  const pendingEvents = new Map(
-    [...state.pendingEvents].filter(([eventCursor]) => eventCursor > cursor),
-  );
+  const pendingEvents = sameEpoch
+    ? new Map([...state.pendingEvents].filter(([eventCursor]) => eventCursor > cursor))
+    : new Map<number, PendingTranscriptEvent>();
   const activeTurn = activeTurnFromSnapshot(sessionMessages, activeTurnSnapshot);
+  const snapshotIds = new Set(messages.map((message) => message.id));
   return replayPending({
     ...state,
     messages: sessionMessages,
     historyBoundaries,
+    streamEpoch,
     cursor,
     pendingEvents,
     status: activeTurn ? "streaming" : "ready",
     activeTurn,
+    optimisticMessageIds: new Set(
+      [...state.optimisticMessageIds].filter((messageId) => !snapshotIds.has(messageId)),
+    ),
     needsResync: false,
   });
 }
@@ -717,15 +603,20 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
   switch (action.type) {
     case "reset":
       return emptyTranscriptState;
-    case "append-optimistic": {
-      let messages = state.messages;
+    case "sync-optimistic": {
+      if (action.messages.length === 0 && state.optimisticMessageIds.size === 0) return state;
+      let messages = state.messages.filter((message) => !state.optimisticMessageIds.has(message.id));
+      const canonicalIds = new Set(messages.map((message) => message.id));
+      const optimisticMessageIds = new Set<string>();
       for (const message of action.messages) {
+        if (canonicalIds.has(message.id)) continue;
         messages = appendOptimisticMessage(messages, message);
+        optimisticMessageIds.add(message.id);
       }
-      return messages === state.messages ? state : { ...state, messages };
+      return { ...state, messages, optimisticMessageIds };
     }
     case "load-snapshot":
-      return loadSnapshot(state, action.cursor, action.messages, action.historyBoundaries, action.activeTurn);
+      return loadSnapshot(state, action.streamEpoch, action.cursor, action.messages, action.historyBoundaries, action.activeTurn);
     case "apply-events":
       return applyEvents(state, action.events);
     case "finish-active":

@@ -158,6 +158,18 @@ function outgoingAttachmentsForMessage(options: Pick<
   ];
 }
 
+function queuedClientPayload(message: RunningQueuedMessage): Record<string, unknown> {
+  return {
+    ...message,
+    ...(message.imageAttachments?.length ? {
+      imageAttachments: message.imageAttachments.map(({ dataUrl: _dataUrl, ...attachment }) => attachment),
+    } : {}),
+    ...(message.browserElementAttachments?.length ? {
+      browserElementAttachments: message.browserElementAttachments.map(({ screenshotDataUrl: _screenshotDataUrl, ...attachment }) => attachment),
+    } : {}),
+  };
+}
+
 function runningGuideUiMessage(
   clientMessageId: string,
   displayText: string,
@@ -532,8 +544,8 @@ export default function LeaderChatPanel({
   const planFeedback = usePlanFeedbackStore((state) => state.drafts);
   const clearPlanFeedback = usePlanFeedbackStore((state) => state.clearDrafts);
   const setPlanFeedback = usePlanFeedbackStore((state) => state.setDrafts);
-  const restoredQueueNeedsFlowStateRef = useRef(false);
-  const restoredQueueObservedWaitingRef = useRef(false);
+  const dispatchingQueueIdRef = useRef<string | null>(null);
+  const pendingMessagesRef = useRef(new Map<string, string>());
   const pendingGuidesRef = useRef(new Map<string, PendingGuideMessage>());
   const planModeReturnRiskModeRef = useRef<RiskMode>(initialRiskMode);
   const planModeReturnRiskModeSetRef = useRef(false);
@@ -552,13 +564,12 @@ export default function LeaderChatPanel({
   const queuedMessages = useRunningMessageQueueStore((state) =>
     flowId ? state.queuesByFlow[flowId] ?? EMPTY_RUNNING_QUEUE : EMPTY_RUNNING_QUEUE
   );
-  const hydrateFlowQueue = useRunningMessageQueueStore((state) => state.hydrateFlowQueue);
-  const hydrateKnownRunningFlow = useRunningMessageQueueStore((state) => state.hydrateKnownRunningFlow);
   const knownRunningFlow = useRunningMessageQueueStore((state) =>
     flowId ? Boolean(state.knownRunningByFlow[flowId]) : false
   );
   const setKnownRunningFlow = useRunningMessageQueueStore((state) => state.setKnownRunningFlow);
   const updateFlowQueue = useRunningMessageQueueStore((state) => state.updateFlowQueue);
+  const setFlowQueue = useRunningMessageQueueStore((state) => state.setFlowQueue);
 
   const updateQueuedMessages = useCallback((updater: (messages: RunningQueuedMessage[]) => RunningQueuedMessage[]) => {
     if (!flowId) return;
@@ -641,12 +652,10 @@ export default function LeaderChatPanel({
     planModeUserTurnIdRef.current = null;
     planModeResolvedRevisionIdRef.current = null;
     planModeResolvedRef.current = false;
-    const restoredMessages = flowId ? hydrateFlowQueue(flowId) : EMPTY_RUNNING_QUEUE;
-    const restoredKnownRunning = flowId ? hydrateKnownRunningFlow(flowId) : false;
-    restoredQueueNeedsFlowStateRef.current = restoredMessages.length > 0 || restoredKnownRunning;
-    restoredQueueObservedWaitingRef.current = false;
+    dispatchingQueueIdRef.current = null;
+    pendingMessagesRef.current.clear();
     pendingGuidesRef.current.clear();
-  }, [flowId, hydrateFlowQueue, hydrateKnownRunningFlow, initialRiskMode]);
+  }, [flowId, initialRiskMode]);
 
   useEffect(() => {
     if (dashboardUserTurns.length > 0) {
@@ -749,7 +758,15 @@ export default function LeaderChatPanel({
     const unsubscribe = wsClient.onMessage((msg: WsInMessage) => {
       if (msg.type === "system:error") {
         if (msg.flow_id && msg.flow_id !== flowId) return;
+        dispatchingQueueIdRef.current = null;
         if (msg.log_id) {
+          const pendingMessageId = pendingMessagesRef.current.get(msg.log_id);
+          if (pendingMessageId) {
+            pendingMessagesRef.current.delete(msg.log_id);
+            setOptimisticMessages((messages) => messages.filter((message) => message.id !== pendingMessageId));
+            setUserTurns([]);
+            setKnownRunningFlow(flowId, dashboardUserTurns.some((turn) => turn.status === "active"));
+          }
           const pendingGuide = pendingGuidesRef.current.get(msg.log_id);
           if (pendingGuide) {
             pendingGuidesRef.current.delete(msg.log_id);
@@ -769,7 +786,30 @@ export default function LeaderChatPanel({
         const pendingGuide = pendingGuidesRef.current.get(logId);
         if (!pendingGuide) return;
         pendingGuidesRef.current.delete(logId);
+        setGuidedMessages((messages) => messages.filter((message) => message.id !== pendingGuide.clientMessageId));
         setFollowRequestKey((value) => value + 1);
+        return;
+      }
+
+      if (msg.type === "flow:message_ack") {
+        if (msg.flow_id !== flowId) return;
+        if (msg.log_id) pendingMessagesRef.current.delete(msg.log_id);
+        const clientMessageId = msg.data.client_message_id;
+        if (clientMessageId) {
+          setOptimisticMessages((messages) => messages.filter((message) => message.id !== clientMessageId));
+        }
+        return;
+      }
+
+      if (msg.type === "flow:queue_state") {
+        if (msg.flow_id !== flowId) return;
+        const messages = Array.isArray(msg.data?.messages)
+          ? msg.data.messages as RunningQueuedMessage[]
+          : [];
+        setFlowQueue(flowId, messages);
+        if (!dispatchingQueueIdRef.current || !messages.some((item) => item.id === dispatchingQueueIdRef.current)) {
+          dispatchingQueueIdRef.current = null;
+        }
         return;
       }
 
@@ -781,6 +821,13 @@ export default function LeaderChatPanel({
           ? rawTurns.map((turn) => normalizeUserTurn(turn)).filter((turn): turn is UserTurnDisplay => turn !== null)
           : [];
         setUserTurns(turns);
+        const serverQueue = Array.isArray(msg.data?.queued_messages)
+          ? msg.data.queued_messages as RunningQueuedMessage[]
+          : [];
+        setFlowQueue(flowId, serverQueue);
+        if (!dispatchingQueueIdRef.current || !serverQueue.some((item) => item.id === dispatchingQueueIdRef.current)) {
+          dispatchingQueueIdRef.current = null;
+        }
         setKnownRunningFlow(flowId, turns.some((turn) => turn.status === "active"));
         return;
       }
@@ -872,7 +919,7 @@ export default function LeaderChatPanel({
     });
 
     return unsubscribe;
-  }, [exitPlanMode, flowId, leaderAgentSessionId, planModeLocked, setKnownRunningFlow]);
+  }, [dashboardUserTurns, exitPlanMode, flowId, leaderAgentSessionId, planModeLocked, setFlowQueue, setKnownRunningFlow]);
 
   const transcriptOptimisticMessages = useMemo(
     () => [...initialOptimisticMessages, ...optimisticMessages, ...guidedMessages],
@@ -889,8 +936,7 @@ export default function LeaderChatPanel({
   const shouldQueueNewMessage =
     isWaiting
     || queuedMessages.length > 0
-    || isFlowStatePendingForKnownRunningFlow
-    || (restoredQueueNeedsFlowStateRef.current && !flowStateConfirmed);
+    || isFlowStatePendingForKnownRunningFlow;
   const pendingDecisionCards = decisionCards.filter((card) => decisionCardStatuses[card.card_id] === "pending" || card.status === "pending");
   const hasPendingDecisionCards = pendingDecisionCards.length > 0;
   const compactionDividerLabel = contextCompaction?.status === "running"
@@ -1108,6 +1154,7 @@ export default function LeaderChatPanel({
       setKnownRunningFlow(flowId, true);
       setFollowRequestKey((value) => value + 1);
 
+      pendingMessagesRef.current.set(logId, clientMessageId);
       wsClient.send({
         type: "flow:message",
         flow_id: flowId,
@@ -1123,57 +1170,40 @@ export default function LeaderChatPanel({
     [activeUserTurn, enterPlanMode, flowId, leaderModelConfigured, setKnownRunningFlow],
   );
 
-  useEffect(() => {
-    if (restoredQueueNeedsFlowStateRef.current && isWaiting) {
-      restoredQueueObservedWaitingRef.current = true;
-    }
-  }, [isWaiting]);
-
-  useEffect(() => {
-    if (isWaiting || !leaderModelConfigured) return;
-    if (!flowStateConfirmed && queuedMessages.length > 0) return;
-    if (
-      restoredQueueNeedsFlowStateRef.current
-      && (!flowStateConfirmed || !restoredQueueObservedWaitingRef.current)
-    ) return;
-    const next = queuedMessages[0];
-    if (!next) return;
-    updateQueuedMessages((messages) => messages.filter((message) => message.id !== next.id));
-    void (async () => {
-      const sent = await sendMessage(next.content, {
-        displayText: next.displayContent ?? next.content,
-        browserElementAttachments: next.browserElementAttachments,
-        imageAttachments: next.imageAttachments,
-        planFeedback: next.planFeedback,
-        outgoingAttachments: next.outgoingAttachments,
-        specRequested: next.specRequested,
-      });
-      if (sent && next.browserElementAttachments?.length) {
-        const bridge = getDesktopBrowserBridge();
-        void bridge?.stopElementPicker();
-      }
-    })();
-  }, [flowStateConfirmed, isWaiting, leaderModelConfigured, queuedMessages, sendMessage, updateQueuedMessages]);
-
   const enqueueMessage = useCallback((content: string, options: LeaderMessageOptions = {}) => {
-    if (isWaiting) {
-      restoredQueueNeedsFlowStateRef.current = false;
-      restoredQueueObservedWaitingRef.current = false;
-    }
-    updateQueuedMessages((messages) => [
-      ...messages,
-      {
-        id: `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        content,
-        ...(options.displayText && options.displayText !== content ? { displayContent: options.displayText } : {}),
-        ...(options.browserElementAttachments?.length ? { browserElementAttachments: options.browserElementAttachments } : {}),
-        ...(options.imageAttachments?.length ? { imageAttachments: options.imageAttachments } : {}),
-        ...(options.planFeedback?.length ? { planFeedback: options.planFeedback } : {}),
-        ...(options.outgoingAttachments?.length ? { outgoingAttachments: options.outgoingAttachments } : {}),
-        ...(options.specRequested ? { specRequested: true } : {}),
-      },
-    ]);
-  }, [isWaiting, updateQueuedMessages]);
+    if (!flowId) return;
+    const queueId = `msg-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const outgoingAttachments = outgoingAttachmentsForMessage(options);
+    const queuedMessage: RunningQueuedMessage = {
+      id: queueId,
+      content,
+      ...(options.displayText && options.displayText !== content ? { displayContent: options.displayText } : {}),
+      ...(options.browserElementAttachments?.length ? { browserElementAttachments: options.browserElementAttachments } : {}),
+      ...(options.imageAttachments?.length ? { imageAttachments: options.imageAttachments } : {}),
+      ...(options.planFeedback?.length ? { planFeedback: options.planFeedback } : {}),
+      ...(options.specRequested ? { specRequested: true } : {}),
+    };
+    updateQueuedMessages((messages) => [...messages, queuedMessage]);
+    wsClient.send({
+      type: "flow:queue_add",
+      flow_id: flowId,
+      queue_id: queueId,
+      content,
+      ...(queuedMessage.displayContent ? { display_content: queuedMessage.displayContent } : {}),
+      ...(queuedMessage.specRequested ? { spec_requested: true } : {}),
+      ...(outgoingAttachments.length ? { attachments: outgoingAttachments } : {}),
+      ...(options.planFeedback?.length ? {
+        plan_feedback: options.planFeedback.map((feedback) => ({
+          id: feedback.id,
+          plan_revision_id: feedback.planRevisionId,
+          plan_node_id: feedback.planNodeId,
+          marker_number: feedback.markerNumber,
+          comment: feedback.comment,
+        })),
+      } : {}),
+      client_payload: queuedClientPayload(queuedMessage),
+    });
+  }, [flowId, updateQueuedMessages]);
 
   const handleComposerSend = useCallback((text: string, options: LeaderMessageOptions = {}): Promise<boolean> | boolean => {
     if (runtimeSelectionUpdating) return false;
@@ -1233,17 +1263,23 @@ export default function LeaderChatPanel({
   }, [addImageAttachments]);
 
   const handleReorderQueuedMessage = useCallback((fromIndex: number, toIndex: number) => {
-    updateQueuedMessages((messages) => {
-      if (fromIndex < 0 || fromIndex >= messages.length || toIndex < 0 || toIndex >= messages.length) return messages;
-      const next = [...messages];
-      const [item] = next.splice(fromIndex, 1);
-      if (!item) return messages;
-      next.splice(toIndex, 0, item);
-      return next;
+    if (!flowId || fromIndex < 0 || fromIndex >= queuedMessages.length || toIndex < 0 || toIndex >= queuedMessages.length) return;
+    const next = [...queuedMessages];
+    const [item] = next.splice(fromIndex, 1);
+    if (!item) return;
+    next.splice(toIndex, 0, item);
+    updateQueuedMessages(() => next);
+    wsClient.send({
+      type: "flow:queue_reorder",
+      flow_id: flowId,
+      queue_ids: next.map((message) => message.id),
     });
-  }, [updateQueuedMessages]);
+  }, [flowId, queuedMessages, updateQueuedMessages]);
 
   const handleEditQueuedMessage = useCallback((message: RunningQueuedMessage) => {
+    if (flowId) {
+      wsClient.send({ type: "flow:queue_delete", flow_id: flowId, queue_id: message.id });
+    }
     updateQueuedMessages((messages) => messages.filter((item) => item.id !== message.id));
     handleComposerValueChange(message.displayContent ?? message.content);
     if (message.browserElementAttachments?.length) {
@@ -1254,11 +1290,14 @@ export default function LeaderChatPanel({
     if (message.planFeedback?.length) setPlanFeedback(message.planFeedback);
     if (message.specRequested) enterPlanMode();
     else if (!planModeLocked) setSpecRequested(false);
-  }, [addImageAttachments, enterPlanMode, handleComposerValueChange, planModeLocked, setBrowserElementAttachments, setPlanFeedback, updateQueuedMessages]);
+  }, [addImageAttachments, enterPlanMode, flowId, handleComposerValueChange, planModeLocked, setBrowserElementAttachments, setPlanFeedback, updateQueuedMessages]);
 
   const handleDeleteQueuedMessage = useCallback((messageId: string) => {
+    if (flowId) {
+      wsClient.send({ type: "flow:queue_delete", flow_id: flowId, queue_id: messageId });
+    }
     updateQueuedMessages((messages) => messages.filter((message) => message.id !== messageId));
-  }, [updateQueuedMessages]);
+  }, [flowId, updateQueuedMessages]);
 
   const handleStopCurrentTurn = useCallback(() => {
     if (!flowId || !activeUserTurn) return;
@@ -1266,6 +1305,7 @@ export default function LeaderChatPanel({
     setStatus("ready");
     setKnownRunningFlow(flowId, false);
     exitPlanMode();
+    wsClient.send({ type: "flow:queue_clear", flow_id: flowId });
     updateQueuedMessages(() => []);
     pendingGuidesRef.current.clear();
     handleComposerValueChange("");
@@ -1283,26 +1323,13 @@ export default function LeaderChatPanel({
     if (!flowId || !leaderModelConfigured) return;
     if (isStreaming && message.specRequested) return;
     if (!isStreaming) {
-      updateQueuedMessages((messages) => messages.filter((item) => item.id !== message.id));
-      void sendMessage(message.content, {
-        displayText: message.displayContent ?? message.content,
-        browserElementAttachments: message.browserElementAttachments,
-        imageAttachments: message.imageAttachments,
-        planFeedback: message.planFeedback,
-        outgoingAttachments: message.outgoingAttachments,
-        specRequested: message.specRequested,
-        reuseActiveUserTurn: true,
-      }).then((sent) => {
-        if (sent && message.browserElementAttachments?.length) {
-          const bridge = getDesktopBrowserBridge();
-          void bridge?.stopElementPicker();
-        }
-      });
+      if (dispatchingQueueIdRef.current === message.id) return;
+      dispatchingQueueIdRef.current = message.id;
+      wsClient.send({ type: "flow:queue_dispatch", flow_id: flowId, queue_id: message.id });
       return;
     }
     const logId = wsClient.genLogId();
     const clientMessageId = `msg-user-guided-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const outgoingAttachments = outgoingAttachmentsForMessage(message);
     const parsedDisplayText = message.displayContent ?? message.content;
     const displayText = parsedDisplayText
       || (message.planFeedback?.length
@@ -1310,7 +1337,6 @@ export default function LeaderChatPanel({
         : message.browserElementAttachments?.length
         ? `网页圈选评论（${message.browserElementAttachments.length} 条）`
         : message.content);
-    updateQueuedMessages((messages) => messages.filter((item) => item.id !== message.id));
     setKnownRunningFlow(flowId, true);
     pendingGuidesRef.current.set(logId, {
       clientMessageId,
@@ -1327,13 +1353,13 @@ export default function LeaderChatPanel({
       messages.some((item) => item.id === clientMessageId) ? messages : [...messages, guideMessage]
     );
     try {
-      if (message.planFeedback?.length) {
-        wsClient.sendFlowGuide(flowId, message.content, clientMessageId, logId, outgoingAttachments, message.planFeedback);
-      } else if (outgoingAttachments.length) {
-        wsClient.sendFlowGuide(flowId, message.content, clientMessageId, logId, outgoingAttachments);
-      } else {
-        wsClient.sendFlowGuide(flowId, message.content, clientMessageId, logId);
-      }
+      wsClient.send({
+        type: "flow:queue_guide",
+        flow_id: flowId,
+        queue_id: message.id,
+        client_message_id: clientMessageId,
+        log_id: logId,
+      });
       if (message.browserElementAttachments?.length) {
         const bridge = getDesktopBrowserBridge();
         void bridge?.stopElementPicker();
@@ -1342,7 +1368,7 @@ export default function LeaderChatPanel({
       pendingGuidesRef.current.delete(logId);
       setGuidedMessages((messages) => messages.filter((item) => item.id !== clientMessageId));
     }
-  }, [flowId, isStreaming, leaderModelConfigured, sendMessage, setKnownRunningFlow, updateQueuedMessages]);
+  }, [flowId, isStreaming, leaderModelConfigured, setKnownRunningFlow]);
 
   const composerDisabled = !flowId || !leaderModelConfigured || runtimeSelectionUpdating || hasPendingDecisionCards;
   const placeholder = hasPendingDecisionCards

@@ -238,18 +238,6 @@ function parsePlanCard(output: unknown): { planRevisionId: string } | null {
   return id ? { planRevisionId: id } : null;
 }
 
-function parseDecisionMarker(text: string): {
-  cardId: string;
-  status: "resolved" | "cancelled";
-} | null {
-  const match = /^clarification_card_id:\s*(\S+)/m.exec(text);
-  if (!match?.[1]) return null;
-  return {
-    cardId: match[1],
-    status: text.includes("用户取消了本次澄清卡片") ? "cancelled" : "resolved",
-  };
-}
-
 type BuildOptions = {
   message: TimelineInputMessage;
   activity: TranscriptActivity;
@@ -268,13 +256,14 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       .filter((part): part is Extract<TimelineInputPart, { type: "text" }> => part.type === "text")
       .map((part) => part.text)
       .join("");
-    const marker = parseDecisionMarker(text);
-    if (marker) {
+    const decisionCardId = message.metadata?.decisionCardId;
+    const decisionStatus = message.metadata?.decisionStatus;
+    if (decisionCardId && (decisionStatus === "resolved" || decisionStatus === "cancelled")) {
       return [{
-        id: `${message.id}:decision-card-result:${marker.cardId}`,
+        id: `${message.id}:decision-card-result:${decisionCardId}`,
         type: "decision-card-result",
-        cardId: marker.cardId,
-        status: marker.status,
+        cardId: decisionCardId,
+        status: decisionStatus,
         collapseState: "shallow",
       }];
     }
@@ -319,11 +308,6 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
     postGroupHasText = false;
   }
 
-  function askUserSignature(part: Extract<TimelineInputPart, { type: `tool-${string}` }>): string | null {
-    if (!part.toolName.endsWith("__ask_user")) return null;
-    return JSON.stringify(part.input ?? null);
-  }
-
   function addOrUpdateTool(part: Extract<TimelineInputPart, { type: `tool-${string}` }>, partIndex: number) {
     if (!currentGroup) {
       currentGroup = {
@@ -333,15 +317,7 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       };
     }
 
-    const askSignature = askUserSignature(part);
-    const existing = currentGroup.tools.find((tool) =>
-      tool.toolCallId === part.toolCallId
-      || (
-        askSignature !== null
-        && tool.toolName.endsWith("__ask_user")
-        && JSON.stringify(tool.input ?? null) === askSignature
-      ),
-    );
+    const existing = currentGroup.tools.find((tool) => tool.toolCallId === part.toolCallId);
     if (existing) {
       existing.toolName = part.toolName;
       existing.capability = part.capability ?? existing.capability;

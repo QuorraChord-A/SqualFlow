@@ -201,7 +201,7 @@ describe("ChatJournal", () => {
     expect(journal.getCurrentMessage("flow-1", "session-1")).toEqual({
       id: "msg-1",
       role: "assistant",
-      content: "",
+      content: "Hello world",
       createdAt: "2026-06-24T10:00:00.000Z",
       metadata: { turnTiming: { startedAt: "2026-06-24T10:00:00.000Z", finishedAt: null, durationMs: null } },
       parts: [
@@ -409,7 +409,7 @@ describe("WsPusher", () => {
         agent_session_id: "agent-session-1",
         flow_expert_id: "agent-session-1",
         log_id: "log-1",
-        data: { cursor: 1, event: { type: "turn-started", messageId: "msg-1", startedAt: "2026-06-24T10:00:00.000Z" } },
+        data: { stream_epoch: journal.getStreamEpoch(), cursor: 1, event: { type: "turn-started", messageId: "msg-1", startedAt: "2026-06-24T10:00:00.000Z" } },
       },
     ]);
     expect(journalDuringPublish).toEqual([
@@ -418,7 +418,7 @@ describe("WsPusher", () => {
     expect(journal.getCurrentMessage("flow-1", "session-1")?.id).toBe("msg-1");
   });
 
-  it("marks output completed before publishing the finish event", async () => {
+  it("publishes the committed finish event before secondary completion bookkeeping", async () => {
     const bus = new EventBus();
     const journal = new ChatJournal();
     const completionOrder: string[] = [];
@@ -431,12 +431,35 @@ describe("WsPusher", () => {
       completionOrder.push("complete");
     });
     await pusher.consume({
+      type: "start",
+      messageId: "msg-1",
+      startedAt: "2026-06-18T08:36:30.000Z",
+    });
+    completionOrder.length = 0;
+    await pusher.consume({
       type: "finish",
       durationMs: null,
       finishedAt: "2026-06-18T08:36:34.898Z",
     });
 
-    expect(completionOrder).toEqual(["complete", "publish"]);
+    expect(completionOrder).toEqual(["publish", "complete"]);
+  });
+
+  it("ignores late runtime events after the canonical turn is terminal", async () => {
+    const bus = new EventBus();
+    const journal = new ChatJournal();
+    const received: unknown[] = [];
+    bus.subscribe("flow-1", "client-1", (message) => received.push(message));
+    const pusher = new WsPusher("flow-1", () => "session-1", "agent-session-1", bus, journal);
+
+    await pusher.consume({ type: "start", messageId: "msg-1" });
+    await pusher.consume({ type: "finish", durationMs: null, finishedAt: "2026-06-18T08:36:34.898Z" });
+    const cursorAfterFinish = journal.getCursor("flow-1", "agent-session-1");
+    received.length = 0;
+    await pusher.consume({ type: "text-delta", messageId: "msg-1", id: "late", delta: "late" });
+
+    expect(received).toEqual([]);
+    expect(journal.getCursor("flow-1", "agent-session-1")).toBe(cursorAfterFinish);
   });
 
   it("publishes canonical assistant segment ids after guide boundaries", async () => {
@@ -592,6 +615,7 @@ describe("Fastify app and websocket gateway", () => {
           spec_revisions: [],
           agent_sessions: [],
           decision_cards: [],
+          queued_messages: [],
           artifacts: [],
           recent_events: [],
         },
@@ -701,233 +725,6 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("returns SDK session history for the requested agent session", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-history",
-      workspaceId: "ws-default",
-      name: "History Flow",
-      description: "",
-      projectId: null,
-    });
-    const leader = store.createAgentSession({
-      id: "ags-leader-history",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-leader-history",
-      displayName: "Leader",
-    });
-    const requestedSessionIds: string[] = [];
-    const app = createApp({
-      logger: false,
-      store,
-      sessionHistoryLoader: async (sessionId) => {
-        requestedSessionIds.push(sessionId);
-        return [
-          {
-            id: "msg-user-history",
-            role: "user",
-            parts: [{ type: "text", text: "写个 helloworld" }],
-            content: "写个 helloworld",
-          },
-          {
-            id: "msg-assistant-history",
-            role: "assistant",
-            parts: [{ type: "text", text: "我会整理方案。" }],
-            content: "我会整理方案。",
-          },
-        ];
-      },
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          session_id: "",
-          log_id: "log-history",
-        },
-      }));
-
-      expect(await nextWsMessage(ws)).toEqual({
-        type: "session:transcript_snapshot",
-        flow_id: flow.id,
-        session_id: "sdk-leader-history",
-        agent_session_id: leader.id,
-        data: {
-          cursor: 0,
-          messages: [
-            {
-              id: "msg-user-history",
-              role: "user",
-              parts: [{ type: "text", text: "写个 helloworld" }],
-              content: "写个 helloworld",
-            },
-            {
-              id: "msg-assistant-history",
-              role: "assistant",
-              parts: [{ type: "text", text: "我会整理方案。" }],
-              content: "我会整理方案。",
-            },
-          ],
-        },
-        pending_cards: [],
-        decision_cards: [],
-      });
-      expect(requestedSessionIds).toEqual(["sdk-leader-history"]);
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("returns SDK session history when the in-memory journal is empty", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-persisted-history",
-      workspaceId: "ws-default",
-      name: "Persisted History Flow",
-      description: "",
-      projectId: null,
-    });
-    const leader = store.createAgentSession({
-      id: "ags-leader-persisted",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-leader-persisted",
-      displayName: "Leader",
-    });
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [
-        {
-          id: "msg-user-sdk",
-          role: "user",
-          parts: [{ type: "text", text: "写个helloworld" }],
-          content: "写个helloworld",
-        },
-        {
-          id: "msg-assistant-sdk",
-          role: "assistant",
-          parts: [{ type: "text", text: "历史已恢复" }],
-          content: "历史已恢复",
-        },
-      ],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          session_id: "",
-        },
-      }));
-
-      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
-        type: "session:transcript_snapshot",
-        flow_id: flow.id,
-        session_id: "sdk-leader-persisted",
-        data: {
-          cursor: 0,
-          messages: [
-            expect.objectContaining({ id: "msg-user-sdk", role: "user", content: "写个helloworld" }),
-            expect.objectContaining({ id: "msg-assistant-sdk", role: "assistant", content: "历史已恢复" }),
-          ],
-        },
-      }));
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("loads persisted history for a completed Leader session while its UserTurn waits for approval", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const project = store.createProject({ name: "Waiting History", localPath: "/repo/waiting-history" });
-    const flow = store.createFlow({
-      id: "flow-waiting-history",
-      workspaceId: "ws-default",
-      name: "Waiting History Flow",
-      description: "",
-      projectId: project.id,
-    });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-user-waiting" })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
-    const leader = store.createAgentSession({
-      id: "ags-leader-waiting-history",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-leader-waiting-history",
-      displayName: "Leader",
-      status: "completed",
-    });
-    const requestedSessionIds: string[] = [];
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async (sessionId) => {
-        requestedSessionIds.push(sessionId);
-        return [
-          { id: "msg-user-waiting", role: "user", parts: [{ type: "text", text: "生成计划" }], content: "生成计划" },
-          { id: "msg-assistant-waiting", role: "assistant", parts: [{ type: "text", text: "计划已提交" }], content: "计划已提交" },
-        ];
-      },
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          log_id: "log-waiting-history",
-        },
-      }));
-
-      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
-        type: "session:transcript_snapshot",
-        flow_id: flow.id,
-        data: expect.objectContaining({
-          messages: [
-            expect.objectContaining({ id: "msg-user-waiting", content: "生成计划" }),
-            expect.objectContaining({ id: "msg-assistant-waiting", content: "计划已提交" }),
-          ],
-        }),
-      }));
-      expect(requestedSessionIds).toEqual(["sdk-leader-waiting-history"]);
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
   it("does not restore an interrupted Expert journal as an active turn", async () => {
     const store = createStore(":memory:");
     store.migrate();
@@ -963,20 +760,10 @@ describe("Fastify app and websocket gateway", () => {
       toolCallId: "tool-write",
       toolName: "Write",
     }, flowExpert.id);
-    const requestedSessionIds: string[] = [];
     const app = createApp({
       logger: false,
       store,
       chatJournal,
-      sessionHistoryLoader: async (sessionId) => {
-        requestedSessionIds.push(sessionId);
-        return [{
-          id: "msg-assistant-persisted",
-          role: "assistant",
-          parts: [{ type: "text", text: "已停止" }],
-          content: "已停止",
-        }];
-      },
     });
 
     try {
@@ -996,203 +783,6 @@ describe("Fastify app and websocket gateway", () => {
       expect(response.data.messages).toEqual([
         expect.objectContaining({ id: "msg-assistant-interrupted", role: "assistant" }),
       ]);
-      expect(requestedSessionIds).toEqual([]);
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("reports history loading failures instead of rebuilding completed history from the journal", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-history-unavailable",
-      workspaceId: "ws-default",
-      name: "History unavailable",
-      description: "",
-      projectId: null,
-    });
-    const leader = store.createAgentSession({
-      id: "ags-history-unavailable",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-history-unavailable",
-      displayName: "Leader",
-      status: "completed",
-    });
-    const chatJournal = new ChatJournal();
-    chatJournal.recordUserMessage(
-      flow.id,
-      leader.sessionId!,
-      "本地消息不能冒充历史",
-      "msg-user-local-only",
-      "2026-07-10T11:18:16.000Z",
-    );
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal,
-      sessionHistoryLoader: async () => {
-        throw new Error("thread not loaded");
-      },
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          session_id: "",
-          log_id: "log-history-unavailable",
-        },
-      }));
-
-      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
-        type: "system:error",
-        flow_id: flow.id,
-        log_id: "log-history-unavailable",
-        data: expect.objectContaining({ code: "SESSION_HISTORY_UNAVAILABLE" }),
-      }));
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("preserves SDK guide order instead of replacing split assistant history with the live journal", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-guide-history-order",
-      workspaceId: "ws-default",
-      name: "Guide History Order",
-      description: "",
-      projectId: null,
-    });
-    const leader = store.createAgentSession({
-      id: "ags-leader-guide-history",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-leader-guide-history",
-      displayName: "Leader",
-    });
-    const guideText = "请改为看整个目录";
-    store.appendEventLog({
-      flowId: flow.id,
-      agentSessionId: leader.id,
-      eventType: "flow.guide_message",
-      payload: { message_id: "msg-guide-local" },
-    });
-    const chatJournal = new ChatJournal();
-    chatJournal.recordUserMessage(
-      flow.id,
-      leader.sessionId!,
-      guideText,
-      "msg-guide-local",
-      "2026-06-29T00:00:02.000Z",
-      leader.id,
-      { localMessageKind: "running-guide" },
-    );
-    chatJournal.record(flow.id, leader.sessionId!, {
-      type: "start",
-      messageId: "msg-assistant-live",
-      startedAt: "2026-06-29T00:00:01.000Z",
-    });
-    chatJournal.record(flow.id, leader.sessionId!, {
-      type: "tool-input-available",
-      toolCallId: "call-live-only",
-      toolName: "mcp__squadflow-leader__get_flow_state",
-      input: { flow_id: flow.id },
-    });
-    chatJournal.record(flow.id, leader.sessionId!, {
-      type: "tool-output-available",
-      toolCallId: "call-live-only",
-      output: { content: "{}", is_error: false },
-    });
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-start", id: "text-live" });
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-delta", id: "text-live", delta: "引导前。引导后。" });
-    chatJournal.record(flow.id, leader.sessionId!, {
-      type: "finish",
-      messageId: "msg-assistant-live",
-      finishedAt: "2026-06-29T00:00:04.000Z",
-      durationMs: 3000,
-    });
-
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal,
-      sessionHistoryLoader: async () => [
-        {
-          id: "msg-user-sdk",
-          role: "user",
-          parts: [{ type: "text", text: "初始需求" }],
-          content: "初始需求",
-        },
-        {
-          id: "msg-assistant-before",
-          role: "assistant",
-          parts: [{ type: "text", text: "引导前。" }],
-          content: "引导前。",
-        },
-        {
-          id: "msg-guide-sdk",
-          role: "user",
-          parts: [{ type: "text", text: guideText }],
-          content: guideText,
-          metadata: {
-            localMessageKind: "running-guide",
-            guideStatusLabel: "已引导对话",
-          },
-        },
-        {
-          id: "msg-assistant-after",
-          role: "assistant",
-          parts: [{ type: "text", text: "引导后。" }],
-          content: "引导后。",
-        },
-      ],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          session_id: "",
-        },
-      }));
-
-      const response = await nextWsMessage(ws) as {
-        type: string;
-        data: { messages: Array<{ id: string; role: string; content: string; metadata?: Record<string, unknown> }> };
-      };
-      expect(response.type).toBe("session:transcript_snapshot");
-      expect(response.data.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
-        "user:初始需求",
-        "assistant:引导前。",
-        `user:${guideText}`,
-        "assistant:引导后。",
-      ]);
-      expect(response.data.messages[2]?.metadata).toEqual(expect.objectContaining({
-        localMessageKind: "running-guide",
-        guideStatusLabel: "已引导对话",
-      }));
-
       ws.terminate();
     } finally {
       await app.close();
@@ -1226,37 +816,20 @@ describe("Fastify app and websocket gateway", () => {
       "写个 helloworld",
       "msg-user-snapshot",
       "2026-06-24T09:59:59.000Z",
+      leader.id,
     );
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "start",
       messageId: "msg-assistant-current",
       startedAt: "2026-06-24T10:00:00.000Z",
-    });
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-start", id: "text-current" });
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-delta", id: "text-current", delta: "正在继续执行" });
+    }, leader.id);
+    chatJournal.record(flow.id, leader.sessionId!, { type: "text-start", id: "text-current" }, leader.id);
+    chatJournal.record(flow.id, leader.sessionId!, { type: "text-delta", id: "text-current", delta: "正在继续执行" }, leader.id);
 
-    let historyLoadCount = 0;
     const app = createApp({
       logger: false,
       store,
       chatJournal,
-      sessionHistoryLoader: async () => {
-        historyLoadCount += 1;
-        return [
-        {
-          id: "msg-user-snapshot",
-          role: "user",
-          parts: [{ type: "text", text: "写个 helloworld" }],
-          content: "写个 helloworld",
-        },
-        {
-          id: "msg-assistant-done",
-          role: "assistant",
-          parts: [{ type: "text", text: "我会先确认需求。" }],
-          content: "我会先确认需求。",
-        },
-        ];
-      },
     });
 
     try {
@@ -1278,9 +851,12 @@ describe("Fastify app and websocket gateway", () => {
         session_id: "sdk-leader-snapshot",
         agent_session_id: leader.id,
         data: {
-          cursor: 0,
+          stream_epoch: chatJournal.getStreamEpoch(),
+          cursor: 4,
           active_turn: {
             message_id: "msg-assistant-current",
+            root_message_id: "msg-assistant-current",
+            segment_index: 0,
             started_at: "2026-06-24T10:00:00.000Z",
           },
           messages: [
@@ -1295,7 +871,7 @@ describe("Fastify app and websocket gateway", () => {
               id: "msg-assistant-current",
               role: "assistant",
               parts: [{ type: "text", id: "text-current", text: "正在继续执行" }],
-              content: "",
+              content: "正在继续执行",
               createdAt: "2026-06-24T10:00:00.000Z",
               metadata: {
                 turnTiming: {
@@ -1310,7 +886,6 @@ describe("Fastify app and websocket gateway", () => {
         pending_cards: [],
         decision_cards: [],
       });
-      expect(historyLoadCount).toBe(0);
 
       ws.terminate();
     } finally {
@@ -1344,57 +919,31 @@ describe("Fastify app and websocket gateway", () => {
       leader.sessionId!,
       "写个 helloworld",
       "msg-user-overlap",
+      undefined,
+      leader.id,
     );
-    chatJournal.record(flow.id, leader.sessionId!, { type: "start", messageId: "msg-assistant-current" });
+    chatJournal.record(flow.id, leader.sessionId!, { type: "start", messageId: "msg-assistant-current" }, leader.id);
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "tool-input-start",
       toolCallId: "tool-card-1",
       toolName: "mcp__leader__decision_card",
-    });
+    }, leader.id);
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "tool-input-available",
       toolCallId: "tool-card-1",
       toolName: "mcp__leader__decision_card",
       input: { card_type: "SpecApprovalCard", questions: [] },
-    });
+    }, leader.id);
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "tool-output-available",
       toolCallId: "tool-card-1",
       output: { content: "{\"card_id\":\"dc-overlap\"}", is_error: false },
-    });
+    }, leader.id);
 
-    let historyLoadCount = 0;
     const app = createApp({
       logger: false,
       store,
       chatJournal,
-      sessionHistoryLoader: async () => {
-        historyLoadCount += 1;
-        return [
-        {
-          id: "msg-user-overlap",
-          role: "user",
-          parts: [{ type: "text", text: "写个 helloworld" }],
-          content: "写个 helloworld",
-        },
-        {
-          id: "msg-assistant-sdk-overlap",
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-mcp__leader__decision_card",
-              toolCallId: "tool-card-1",
-              toolName: "mcp__leader__decision_card",
-              state: "output-available",
-              inputText: "",
-              input: { card_type: "SpecApprovalCard", questions: [] },
-              output: { content: "{\"card_id\":\"dc-overlap\"}", is_error: false },
-            },
-          ],
-          content: "",
-        },
-        ];
-      },
     });
 
     try {
@@ -1419,7 +968,6 @@ describe("Fastify app and websocket gateway", () => {
           active_turn: expect.objectContaining({ message_id: "msg-assistant-current" }),
         }),
       }));
-      expect(historyLoadCount).toBe(0);
 
       ws.terminate();
     } finally {
@@ -1479,7 +1027,6 @@ describe("Fastify app and websocket gateway", () => {
       logger: false,
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
     });
 
     try {
@@ -1551,7 +1098,6 @@ describe("Fastify app and websocket gateway", () => {
       logger: false,
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
     });
 
     try {
@@ -1572,350 +1118,6 @@ describe("Fastify app and websocket gateway", () => {
       };
       expect(response.type).toBe("session:transcript_snapshot");
       expect(response.data.messages).toEqual([]);
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("rejects completed Expert history that is missing a locally observed user input", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-expert-local-user-history",
-      workspaceId: "ws-default",
-      name: "Expert Local User History",
-      description: "",
-      projectId: null,
-    });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
-    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-research" });
-    store.updateFlowExpertSession(flowExpert.id, "sdk-expert-history");
-    const task = store.createTask({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      title: "Research",
-      description: "Research",
-      expertId: "exp-research",
-      dependsOnTaskIds: [],
-    })!;
-    store.createAgentSession({
-      id: "ags-expert-history",
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      taskId: task.id,
-      expertId: "exp-research",
-      flowExpertId: flowExpert.id,
-      sessionId: "sdk-expert-history",
-      displayName: "Research",
-      status: "completed",
-    });
-    const chatJournal = new ChatJournal();
-    chatJournal.recordUserMessage(
-      flow.id,
-      "sdk-expert-history",
-      "用户想了解当前项目的工作目录是什么，包含哪些文件和结构。",
-      "msg-user-local-expert",
-      "2026-06-23T08:16:46.000Z",
-    );
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal,
-      sessionHistoryLoader: async () => [{
-        id: "msg-assistant-sdk",
-        role: "assistant",
-        parts: [{ type: "text", text: "目录探索完成" }],
-        content: "目录探索完成",
-        metadata: {
-          turnTiming: {
-            startedAt: "2026-06-23T08:16:46.000Z",
-            finishedAt: "2026-06-23T08:17:43.000Z",
-            durationMs: 57000,
-          },
-        },
-      }],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          flow_expert_id: flowExpert.id,
-          session_id: "",
-          log_id: "log-expert-local-user-history",
-        },
-      }));
-
-      const response = await nextWsMessage(ws) as {
-        type: string;
-        data: { code?: string };
-      };
-      expect(response.type).toBe("system:error");
-      expect(response.data.code).toBe("SESSION_HISTORY_INCOMPLETE");
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("accepts completed history for event-only plan feedback and browser comments", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-event-only-history",
-      workspaceId: "ws-default",
-      name: "Event-only History",
-      description: "",
-      projectId: null,
-    });
-    const leader = store.createAgentSession({
-      id: "ags-event-only-history",
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-event-only-history",
-      displayName: "Leader",
-      status: "completed",
-    });
-    const chatJournal = new ChatJournal();
-    chatJournal.recordUserMessage(
-      flow.id,
-      leader.sessionId!,
-      "",
-      "msg-plan-feedback-empty",
-      "2026-07-14T23:00:00.000Z",
-      leader.id,
-      { planFeedback: [{ marker_number: 1, comment: "调整计划" }] },
-    );
-    const browserMetadata = {
-      markerNumber: 1,
-      comment: "截图失败也不能丢",
-      ariaLabel: "特殊元素",
-      selector: 'button[data-value="]:special"] · span',
-      url: "https://example.test/settings",
-    };
-    chatJournal.recordUserMessage(
-      flow.id,
-      leader.sessionId!,
-      "",
-      "msg-browser-comment-empty",
-      "2026-07-14T23:01:00.000Z",
-      leader.id,
-      { browserElementAttachments: [browserMetadata] },
-    );
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal,
-      sessionHistoryLoader: async () => [
-        {
-          id: "sdk-plan-feedback",
-          role: "user",
-          parts: [{ type: "text", text: "计划评论" }],
-          content: "计划评论",
-        },
-        {
-          id: "sdk-browser-comment",
-          role: "user",
-          parts: [],
-          content: "",
-          metadata: {
-            browserElementAttachments: [{
-              markerNumber: 1,
-              comment: "截图失败也不能丢",
-              label: "特殊元素",
-              selector: 'button[data-value="]:special"] · span',
-              pageUrl: "https://example.test/settings",
-            }],
-          },
-        },
-      ],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          agent_session_id: leader.id,
-          session_id: "",
-        },
-      }));
-
-      const response = await nextWsMessage(ws) as {
-        type: string;
-        data: { messages: Array<{ role: string; content: string }> };
-      };
-      expect(response.type).toBe("session:transcript_snapshot");
-      expect(response.data.messages.map((message) => `${message.role}:${message.content}`)).toEqual([
-        "user:计划评论",
-        "user:",
-      ]);
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("preserves SDK Expert history order when assistant timing starts before the user timestamp", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-expert-sdk-order",
-      workspaceId: "ws-default",
-      name: "Expert SDK Order",
-      description: "",
-      projectId: null,
-    });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
-    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    store.updateFlowExpertSession(flowExpert.id, "sdk-expert-order");
-    store.createAgentSession({
-      id: "ags-expert-order",
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      taskId: null,
-      expertId: "exp-coder",
-      flowExpertId: flowExpert.id,
-      sessionId: "sdk-expert-order",
-      displayName: "Frontend",
-      status: "completed",
-    });
-    const app = createApp({
-      logger: false,
-      store,
-      sessionHistoryLoader: async () => [
-        {
-          id: "msg-user-sdk",
-          role: "user",
-          parts: [{ type: "text", text: "请修复一下吧" }],
-          content: "请修复一下吧",
-          createdAt: "2026-06-23T09:21:48.817Z",
-        },
-        {
-          id: "msg-assistant-sdk",
-          role: "assistant",
-          parts: [{ type: "text", text: "修复完成" }],
-          content: "修复完成",
-          metadata: {
-            turnTiming: {
-              startedAt: "2026-06-23T09:21:47.904Z",
-              finishedAt: "2026-06-23T09:22:12.000Z",
-              durationMs: 24096,
-            },
-          },
-        },
-      ],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          flow_expert_id: flowExpert.id,
-          session_id: "",
-          log_id: "log-expert-sdk-order",
-        },
-      }));
-
-      const response = await nextWsMessage(ws) as {
-        type: string;
-        data: { messages: Array<{ id: string; role: string; content: string }> };
-      };
-      expect(response.type).toBe("session:transcript_snapshot");
-      expect(response.data.messages.map((message) => message.id)).toEqual(["msg-user-sdk", "msg-assistant-sdk"]);
-      expect(response.data.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-
-      ws.terminate();
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("applies persisted turn timing for a flowExpert with no AgentSession row yet", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-expert-single-session-no-timing",
-      workspaceId: "ws-default",
-      name: "Expert Single Session No Timing",
-      description: "",
-      projectId: null,
-    });
-    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-research" });
-    store.updateFlowExpertSession(flowExpert.id, "sdk-expert-single-session");
-    // Intentionally do NOT create an AgentSession row for this flowExpert, so
-    // `uniqueSessions.length === 0` in sessionHistoryMessage (wsGateway.ts,
-    // ~432-443) and the single-session branch is taken instead of the
-    // multi-legacy-session loop that calls mergeTurnTimings.
-    store.appendEventLog({
-      flowId: flow.id,
-      eventType: "agent_session.turn_completed",
-      payload: {
-        message_id: "msg-assistant-single-session",
-        sdk_session_id: "sdk-expert-single-session",
-        started_at: "2026-06-23T08:16:46.000Z",
-        finished_at: "2026-06-23T08:17:43.000Z",
-        duration_ms: 57000,
-      },
-    });
-    const app = createApp({
-      logger: false,
-      store,
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [{
-        id: "msg-assistant-single-session",
-        role: "assistant",
-        parts: [{ type: "text", text: "目录探索完成" }],
-        content: "目录探索完成",
-      }],
-    });
-
-    try {
-      await app.ready();
-      const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({
-        data: {
-          type: "session:get",
-          flow_id: flow.id,
-          flow_expert_id: flowExpert.id,
-          session_id: "",
-          log_id: "log-expert-single-session-no-timing",
-        },
-      }));
-
-      const response = await nextWsMessage(ws) as {
-        type: string;
-        data: { messages: Array<{ role: string; content: string; metadata?: { turnTiming?: unknown } }> };
-      };
-      expect(response.type).toBe("session:transcript_snapshot");
-      const assistant = response.data.messages.find((message) => message.role === "assistant");
-      expect(assistant?.content).toBe("目录探索完成");
-      // Stage 1 of the transcript-collapse refactor aligned this branch with
-      // the Leader path and the multi-legacy-session flowExpert path: it now
-      // also merges persisted agent_session.turn_completed timing.
-      expect(assistant?.metadata?.turnTiming).toEqual({
-        startedAt: "2026-06-23T08:16:46.000Z",
-        finishedAt: "2026-06-23T08:17:43.000Z",
-        durationMs: 57000,
-      });
 
       ws.terminate();
     } finally {
@@ -1944,7 +1146,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => {
           capturedTurns.push({ userMessage: turn.userMessage, currentTurnInput: turn.currentTurnInput });
@@ -1987,6 +1188,185 @@ describe("Fastify app and websocket gateway", () => {
     );
   });
 
+  it("persists, reorders, and dispatches the backend queue exactly once", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-durable-queue",
+      workspaceId: "ws-default",
+      name: "Durable Queue",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const chatJournal = new ChatJournal(store);
+    const sent: any[] = [];
+    const runtimeInputs: Array<{ userMessage?: string; currentTurnInput?: unknown }> = [];
+    const connection: WsConnection = {
+      clientId: "queue-test",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal,
+      leaderRuntime: {
+        runLeaderTurn: async (turn) => {
+          runtimeInputs.push({ userMessage: turn.userMessage, currentTurnInput: turn.currentTurnInput });
+        },
+      },
+      send: async (message) => { sent.push(message); },
+    };
+
+    for (const [queueId, content] of [["msg-queue-1", "第一条"], ["msg-queue-2", "第二条"]] as const) {
+      await handleWsClientMessage(JSON.stringify({ data: {
+        type: "flow:queue_add",
+        flow_id: flow.id,
+        queue_id: queueId,
+        content,
+        log_id: `add-${queueId}`,
+      } }), connection);
+    }
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:queue_reorder",
+      flow_id: flow.id,
+      queue_ids: ["msg-queue-2", "msg-queue-1"],
+      log_id: "reorder-queue",
+    } }), connection);
+
+    expect(store.listQueuedMessages(flow.id).map((item) => item.id)).toEqual(["msg-queue-2", "msg-queue-1"]);
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:queue_dispatch",
+      flow_id: flow.id,
+      queue_id: "msg-queue-2",
+      log_id: "dispatch-queue",
+    } }), connection);
+
+    expect(runtimeInputs).toHaveLength(1);
+    expect(runtimeInputs[0]).toEqual(expect.objectContaining({
+      userMessage: "第二条",
+      currentTurnInput: expect.objectContaining({ message_id: "msg-queue-2" }),
+    }));
+    expect(store.listQueuedMessages(flow.id).map((item) => item.id)).toEqual(["msg-queue-1"]);
+    expect(store.getSubmission(flow.id, "msg-queue-2")).toEqual(expect.objectContaining({
+      receiptState: "materialized",
+      messageId: "msg-queue-2",
+      payload: {},
+    }));
+    const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
+    expect(chatJournal.getTranscriptMessages(flow.id, leader.id).filter((item) => item.id === "msg-queue-2")).toHaveLength(1);
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:queue_dispatch",
+      flow_id: flow.id,
+      queue_id: "msg-queue-2",
+      log_id: "retry-dispatch-queue",
+    } }), connection);
+    expect(runtimeInputs).toHaveLength(1);
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:queue_add",
+      flow_id: flow.id,
+      queue_id: "msg-queue-1",
+      content: "篡改后的第一条",
+      log_id: "conflicting-queue-retry",
+    } }), connection);
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "system:error",
+      data: expect.objectContaining({ code: "MESSAGE_ID_CONFLICT" }),
+    }));
+  });
+
+  it("restores queued attachment previews without storing duplicate base64 client payloads", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    const flow = store.createFlow({
+      id: "flow-queue-attachment",
+      workspaceId: "ws-default",
+      name: "Queue Attachment",
+      description: "",
+      projectId: null,
+    });
+    const sent: any[] = [];
+    const connection: WsConnection = {
+      clientId: "queue-attachment-test",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(store),
+      leaderRuntime: { runLeaderTurn: async () => {} },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:queue_add",
+      flow_id: flow.id,
+      queue_id: "msg-image-1",
+      content: "看图",
+      attachments: [{ id: "img-1", kind: "image", media_type: "image/png", data: "QUJD" }],
+      client_payload: {
+        id: "msg-image-1",
+        content: "看图",
+        imageAttachments: [{ id: "img-1", kind: "image", mediaType: "image/png", addedAt: 1 }],
+      },
+      log_id: "queue-image",
+    } }), connection);
+
+    expect(sent.at(-1)).toEqual(expect.objectContaining({
+      type: "flow:queue_state",
+      data: {
+        messages: [expect.objectContaining({
+          imageAttachments: [expect.objectContaining({ dataUrl: "data:image/png;base64,QUJD" })],
+        })],
+      },
+    }));
+    const storedPayload = JSON.stringify(store.getQueuedMessage(flow.id, "msg-image-1")?.payload);
+    expect(storedPayload.match(/QUJD/gu)).toHaveLength(1);
+  });
+
+  it("rejects a reused direct message id with different content without running twice", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-direct-idempotency",
+      workspaceId: "ws-default",
+      name: "Direct Idempotency",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const sent: any[] = [];
+    let runCount = 0;
+    const connection: WsConnection = {
+      clientId: "direct-idempotency-test",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(store),
+      leaderRuntime: { runLeaderTurn: async () => { runCount += 1; } },
+      send: async (message) => { sent.push(message); },
+    };
+
+    const send = (content: string, logId: string) => handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:message",
+      flow_id: flow.id,
+      content,
+      client_message_id: "msg-stable-1",
+      log_id: logId,
+    } }), connection);
+    await send("原始内容", "first");
+    await send("原始内容", "same-retry");
+    await send("不同内容", "conflicting-retry");
+
+    expect(runCount).toBe(1);
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "system:error",
+      log_id: "conflicting-retry",
+      data: expect.objectContaining({ code: "MESSAGE_ID_CONFLICT" }),
+    }));
+  });
+
   it("starts a fresh Leader runtime session when retrying a failed flow", async () => {
     const store = createStore(":memory:");
     store.migrate();
@@ -2016,7 +1396,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => {
           capturedTurns.push({
@@ -2045,98 +1424,6 @@ describe("Fastify app and websocket gateway", () => {
       leaderSessionId: restartedLeader.sessionId,
       resumeSessionId: undefined,
     }]);
-  });
-
-  it("preserves completed Leader history after a failed runtime session is restarted", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-restarted-leader-history",
-      workspaceId: "ws-default",
-      name: "Restarted Leader History",
-      description: "",
-      projectId: null,
-      ...testLeaderRuntimeBinding,
-    });
-    const leader = store.createAgentSession({
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-old",
-      displayName: "Leader",
-      status: "failed",
-      runtimeSdk: "claudecode",
-    })!;
-    store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
-    store.appendEventLog({
-      flowId: flow.id,
-      agentSessionId: leader.id,
-      eventType: "agent_session.turn_completed",
-      payload: {
-        message_id: "assistant-old",
-        agent_session_id: leader.id,
-        sdk_session_id: "sdk-old",
-      },
-    });
-
-    const requestedSessions: string[] = [];
-    const sent: unknown[] = [];
-    const connection: WsConnection = {
-      clientId: "client-restarted-history",
-      subscriptions: new Set(),
-      eventBus: new EventBus(),
-      store,
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async (sessionId) => {
-        requestedSessions.push(sessionId);
-        return [
-          {
-            id: "msg-0",
-            role: "user",
-            parts: [{ type: "text", text: sessionId === "sdk-old" ? "旧问题" : "新问题" }],
-            content: sessionId === "sdk-old" ? "旧问题" : "新问题",
-          },
-          {
-            id: "msg-1",
-            role: "assistant",
-            parts: [{ type: "text", text: sessionId === "sdk-old" ? "旧回复" : "新回复" }],
-            content: sessionId === "sdk-old" ? "旧回复" : "新回复",
-          },
-        ];
-      },
-      leaderRuntime: { runLeaderTurn: async () => undefined },
-      send: async (message) => { sent.push(message); },
-    };
-
-    await handleWsClientMessage(JSON.stringify({ data: {
-      type: "flow:message",
-      flow_id: flow.id,
-      content: "新问题",
-      client_message_id: "client-msg-new-session",
-    } }), connection);
-    const restarted = store.getAgentSession(leader.id)!;
-    store.updateAgentSessionStatus(leader.id, "completed");
-
-    await handleWsClientMessage(JSON.stringify({ data: {
-      type: "session:get",
-      flow_id: flow.id,
-      agent_session_id: leader.id,
-    } }), connection);
-
-    const response = sent.find((message) =>
-      (message as { type?: string }).type === "session:transcript_snapshot"
-    ) as { data: { messages: Array<{ id: string; content: string }> } };
-    expect(restarted.sessionId).not.toBe("sdk-old");
-    expect(requestedSessions).toEqual(["sdk-old", restarted.sessionId]);
-    expect(response.data.messages.map((message) => message.content)).toEqual([
-      "旧问题",
-      "旧回复",
-      "新问题",
-      "新回复",
-    ]);
-    expect(new Set(response.data.messages.map((message) => message.id)).size).toBe(4);
   });
 
   it("uses only the live journal while a restarted Leader session is running", async () => {
@@ -2178,25 +1465,26 @@ describe("Fastify app and websocket gateway", () => {
       leader.sessionId!,
       "正在运行的问题",
       "msg-user-current",
+      undefined,
+      leader.id,
     );
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "start",
       messageId: "msg-assistant-current",
       startedAt: "2026-07-17T17:00:00.000Z",
-    });
+    }, leader.id);
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "text-start",
       messageId: "msg-assistant-current",
       id: "text-current",
-    });
+    }, leader.id);
     chatJournal.record(flow.id, leader.sessionId!, {
       type: "text-delta",
       messageId: "msg-assistant-current",
       id: "text-current",
       delta: "正在输出",
-    });
+    }, leader.id);
 
-    const requestedSessions: string[] = [];
     const sent: unknown[] = [];
     const connection: WsConnection = {
       clientId: "client-running-restarted-leader",
@@ -2204,10 +1492,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async (sessionId) => {
-        requestedSessions.push(sessionId);
-        throw new Error("SDK history must not be read while running");
-      },
       leaderRuntime: { runLeaderTurn: async () => undefined },
       send: async (message) => { sent.push(message); },
     };
@@ -2222,7 +1506,6 @@ describe("Fastify app and websocket gateway", () => {
       type: string;
       data: { messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }> }> };
     };
-    expect(requestedSessions).toEqual([]);
     expect(response.type).toBe("session:transcript_snapshot");
     expect(response.data.messages).toEqual([
       expect.objectContaining({ id: "msg-user-current", role: "user" }),
@@ -2254,7 +1537,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async () => {
           throw new Error("should not run without a configured leader model");
@@ -2307,7 +1589,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => {
           capturedTurns.push(turn);
@@ -2381,7 +1662,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => { capturedTurns.push(turn as unknown as Record<string, unknown>); },
       },
@@ -2480,7 +1760,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => {
           capturedTurns.push(turn);
@@ -2564,7 +1843,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async () => undefined,
       },
@@ -2625,11 +1903,11 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async () => undefined,
         guideLeaderTurn: async (input) => {
           guided.push(input);
+          input.beforeDeliver?.();
           return { accepted: true, messageId: input.messageId ?? "msg-guide-generated" };
         },
       },
@@ -2714,7 +1992,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus: new EventBus(),
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => {
           capturedTurns.push({ currentTurnInput: turn.currentTurnInput });
@@ -2793,6 +2070,14 @@ describe("Fastify app and websocket gateway", () => {
 
       const status = await nextWsMessage(ws);
       expect(status).toEqual(expect.objectContaining({
+        type: "flow:message_ack",
+        flow_id: flow.id,
+        log_id: "log-message",
+        data: expect.objectContaining({ accepted: true }),
+      }));
+
+      const flowStatus = await nextWsMessage(ws);
+      expect(flowStatus).toEqual(expect.objectContaining({
         type: "flow:status",
         flow_id: flow.id,
         log_id: "log-message",
@@ -3225,7 +2510,6 @@ describe("Fastify app and websocket gateway", () => {
       eventBus,
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async () => undefined,
         cancelFlow: (flowId) => {
@@ -3321,7 +2605,6 @@ describe("Task 5 decision-card delivery", () => {
       eventBus: new EventBus(),
       store,
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: {
         runLeaderTurn: async (turn) => { capturedTurns.push(turn); },
       },
@@ -3415,138 +2698,7 @@ describe("Task 5 decision-card delivery", () => {
   });
 });
 
-describe("Task 8 legacy Flow Expert history", () => {
-  it("returns distinct legacy SDK histories through one Flow Expert tab", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({ id: "flow-legacy-history", workspaceId: "ws-default", projectId: null, name: "Legacy", description: "" });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
-    const first = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: null, expertId: "exp-coder", displayName: "Frontend 2482", sessionId: "legacy-sdk-1", status: "completed" });
-    const second = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: null, expertId: "exp-coder", displayName: "Frontend 5924", sessionId: "legacy-sdk-2", status: "completed" });
-    store.projectLegacyFlowExperts(flow.id);
-    const flowExpert = store.listFlowExperts(flow.id)[0]!;
-    const sent: unknown[] = [];
-    const connection: WsConnection = {
-      clientId: "client-legacy",
-      subscriptions: new Set(),
-      store,
-      eventBus: new EventBus(),
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async (sessionId) => [{
-        id: `message-${sessionId}`,
-        role: "assistant",
-        parts: [{ type: "text", text: sessionId }],
-        content: sessionId,
-        createdAt: sessionId === "legacy-sdk-1" ? "2026-06-22T00:00:00.000Z" : "2026-06-22T00:01:00.000Z",
-      }],
-      leaderRuntime: { runLeaderTurn: async () => undefined },
-      send: async (message) => { sent.push(message); },
-    };
-
-    await handleWsClientMessage(JSON.stringify({ data: { type: "session:get", flow_id: flow.id, flow_expert_id: flowExpert.id } }), connection);
-
-    const response = sent.find((message) => (message as { type?: string }).type === "session:transcript_snapshot") as {
-      data: {
-        messages: Array<{ content: string }>;
-        history_boundaries?: Array<{ kind: string; display_name: string; status: string; before_message_id?: string }>;
-      };
-    };
-    expect(first.flowExpertId).toBeNull();
-    expect(second.flowExpertId).toBeNull();
-    expect(response.data.messages.map((message) => message.content)).toEqual(["legacy-sdk-1", "legacy-sdk-2"]);
-    expect(response.data.history_boundaries).toEqual([expect.objectContaining({
-      kind: "history_session_boundary",
-      display_name: "Frontend 5924",
-      status: "loaded",
-      before_message_id: "message-legacy-sdk-2",
-    })]);
-  });
-
-  it("loads a shared new SDK session once without a history boundary", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({ id: "flow-shared-sdk", workspaceId: "ws-default", projectId: null, name: "Shared", description: "" });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
-    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    store.updateFlowExpertSession(flowExpert.id, "shared-sdk");
-    store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: null, expertId: "exp-coder", flowExpertId: flowExpert.id, displayName: "Frontend", sessionId: "shared-sdk", status: "completed" });
-    store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: null, expertId: "exp-coder", flowExpertId: flowExpert.id, displayName: "Frontend", sessionId: "shared-sdk", status: "completed" });
-    const requested: string[] = [];
-    const sent: unknown[] = [];
-    const connection: WsConnection = {
-      clientId: "client-shared",
-      subscriptions: new Set(),
-      store,
-      eventBus: new EventBus(),
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async (sessionId) => {
-        requested.push(sessionId);
-        return [{ id: "message-shared", role: "assistant", parts: [{ type: "text", text: "shared" }], content: "shared" }];
-      },
-      leaderRuntime: { runLeaderTurn: async () => undefined },
-      send: async (message) => { sent.push(message); },
-    };
-
-    await handleWsClientMessage(JSON.stringify({ data: { type: "session:get", flow_id: flow.id, flow_expert_id: flowExpert.id } }), connection);
-
-    const response = sent.find((message) => (message as { type?: string }).type === "session:transcript_snapshot") as {
-      data: { messages: Array<{ content: string }>; history_boundaries?: unknown[] };
-    };
-    expect(requested).toEqual(["shared-sdk"]);
-    expect(response.data.messages.map((message) => message.content)).toEqual(["shared"]);
-    expect(response.data.history_boundaries).toBeUndefined();
-  });
-});
-
 describe("Task 3 Flow Expert protocol", () => {
-  it("returns session history by flow_expert_id", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-session-flow-expert",
-      workspaceId: "ws-default",
-      name: "Flow Expert Session",
-      description: "",
-      projectId: null,
-    });
-    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    store.updateFlowExpertSession(flowExpert.id, "sdk-flow-expert-1");
-    const sent: unknown[] = [];
-    const connection: WsConnection = {
-      clientId: "client-1",
-      subscriptions: new Set(),
-      eventBus: new EventBus(),
-      store,
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async (sessionId) => [{
-        id: "msg-history-1",
-        role: "assistant",
-        parts: [{ type: "text", text: `history:${sessionId}` }],
-        content: `history:${sessionId}`,
-      }],
-      leaderRuntime: { runLeaderTurn: async () => undefined },
-      send: async (message) => { sent.push(message); },
-    };
-
-    await handleWsClientMessage(JSON.stringify({
-      data: {
-        type: "session:get",
-        flow_id: flow.id,
-        flow_expert_id: flowExpert.id,
-      },
-    }), connection);
-
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "session:transcript_snapshot",
-      flow_id: flow.id,
-      flow_expert_id: flowExpert.id,
-      session_id: "sdk-flow-expert-1",
-      data: expect.objectContaining({ messages: [expect.objectContaining({ content: "history:sdk-flow-expert-1" })] }),
-    }));
-  });
 
   it("accepts flow:decision_cancel in the websocket schema", () => {
     expect(() => ClientWsMessageSchema.parse({
@@ -3613,7 +2765,6 @@ describe("Task 3 Flow Expert protocol", () => {
       store,
       eventBus: new EventBus(),
       chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [],
       leaderRuntime: { runLeaderTurn: async () => undefined },
       expertRuntime: {
         cancelUserTurn: () => 0,
@@ -3683,59 +2834,5 @@ describe("Task 3 Flow Expert protocol", () => {
         data: expect.objectContaining({ code: "invalid_permission_decision" }),
       }));
     }
-  });
-});
-
-describe("Task 0 source-of-truth regressions", () => {
-  it("does not replay event-log message text as session history", async () => {
-    const store = createStore(":memory:");
-    store.migrate();
-    store.seedExperts();
-    const flow = store.createFlow({
-      id: "flow-sdk-history",
-      workspaceId: "ws-default",
-      projectId: null,
-      name: "History",
-      description: "",
-    });
-    const leader = store.createAgentSession({
-      flowId: flow.id,
-      userTurnId: null,
-      taskId: null,
-      expertId: "exp-leader",
-      sessionId: "sdk-leader",
-      displayName: "Leader",
-    });
-    store.appendEventLog({
-      flowId: flow.id,
-      agentSessionId: leader.id,
-      eventType: "agent_session.user_message",
-      payload: { message_id: "legacy-body", content: "不得从 event_log 回放这段文字" },
-    });
-    const sent: unknown[] = [];
-    const connection: WsConnection = {
-      clientId: "history-client",
-      subscriptions: new Set(),
-      store,
-      eventBus: new EventBus(),
-      chatJournal: new ChatJournal(),
-      sessionHistoryLoader: async () => [{
-        id: "sdk-body",
-        role: "assistant",
-        parts: [{ type: "text", text: "SDK 历史" }],
-        content: "SDK 历史",
-      }],
-      leaderRuntime: { runLeaderTurn: async () => undefined },
-      send: async (message) => { sent.push(message); },
-    };
-
-    await handleWsClientMessage(JSON.stringify({
-      data: { type: "session:get", flow_id: flow.id },
-    }), connection);
-
-    const response = sent.find((message) =>
-      (message as { type?: string }).type === "session:transcript_snapshot"
-    ) as { data: { messages: Array<{ content: string }> } };
-    expect(response.data.messages.map((message) => message.content)).toEqual(["SDK 历史"]);
   });
 });

@@ -56,6 +56,63 @@ export type AgentContextUsageSnapshotRow = {
   updatedAt: string;
 };
 
+export type CanonicalTranscriptEntry = {
+  flowId: string;
+  channelId: string;
+  messageId: string;
+  position: number;
+  sessionId: string;
+  agentSessionId: string;
+  lifecycle: "active" | "complete" | "sealed";
+  message: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanonicalQueueItem = {
+  id: string;
+  flowId: string;
+  position: number;
+  status: "accepted" | "dispatching";
+  revision: number;
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanonicalSubmission = {
+  flowId: string;
+  clientMessageId: string;
+  submissionType: "normal" | "guide";
+  payloadHash: string;
+  payload: Record<string, unknown>;
+  receiptState: "received" | "dispatching" | "materialized" | "rejected" | "cancelled" | "uncertain";
+  messageId: string | null;
+  lastErrorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type SubmissionAcceptance =
+  | { outcome: "created"; submission: CanonicalSubmission }
+  | { outcome: "duplicate"; submission: CanonicalSubmission }
+  | { outcome: "conflict"; submission: CanonicalSubmission };
+
+type CanonicalSubmissionRow = Omit<CanonicalSubmission, "payload"> & { payloadJson: string };
+
+function canonicalSubmissionFromRow(row: CanonicalSubmissionRow): CanonicalSubmission {
+  const { payloadJson, ...submission } = row;
+  const receiptState = ["received", "dispatching", "materialized", "rejected", "cancelled", "uncertain"].includes(submission.receiptState)
+    ? submission.receiptState
+    : "uncertain";
+  return {
+    ...submission,
+    submissionType: submission.submissionType === "guide" ? "guide" : "normal",
+    receiptState: receiptState as CanonicalSubmission["receiptState"],
+    payload: parseJsonObject(payloadJson),
+  };
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -280,6 +337,10 @@ export function createStore(databasePath: string) {
   const { sqlite, db } = openDatabase(databasePath);
   const clearAllFlowData = () => {
     sqlite.exec(`
+      DELETE FROM chat_queue_items;
+      DELETE FROM chat_submissions;
+      DELETE FROM chat_messages;
+      DELETE FROM chat_transcript_channels;
       DELETE FROM task_dependencies;
       DELETE FROM tasks;
       DELETE FROM agent_sessions;
@@ -314,6 +375,9 @@ export function createStore(databasePath: string) {
         sessions: Array<{ runtimeSdk: string | null; sessionId: string }>,
       ) => void;
     } = {}) {
+      if (hasTable(sqlite, "chat_messages") && !hasColumn(sqlite, "chat_messages", "flow_id")) {
+        sqlite.exec("DROP TABLE chat_messages");
+      }
       sqlite.exec(`
         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, local_path TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');
         CREATE TABLE IF NOT EXISTS flows (id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'ready', legacy_spec_flow INTEGER NOT NULL DEFAULT 0, risk_mode TEXT NOT NULL DEFAULT 'auto_edit', plan_approval TEXT NOT NULL DEFAULT 'on', is_pinned INTEGER NOT NULL DEFAULT 0, last_output_completed_at TEXT, leader_session_id TEXT, leader_runtime_sdk TEXT, leader_runtime_config_id TEXT, leader_runtime_model_id TEXT, leader_runtime_reasoning_effort TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -481,9 +545,62 @@ export function createStore(databasePath: string) {
           updated_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT, task_id TEXT, type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, source_agent_session_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-        DROP TABLE IF EXISTS chat_messages;
+        CREATE TABLE IF NOT EXISTS chat_transcript_channels (
+          flow_id TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          cursor INTEGER NOT NULL DEFAULT 0,
+          revision INTEGER NOT NULL DEFAULT 0,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (flow_id, channel_id)
+        );
+        CREATE TABLE IF NOT EXISTS chat_messages (
+          flow_id TEXT NOT NULL,
+          channel_id TEXT NOT NULL,
+          message_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          session_id TEXT NOT NULL,
+          agent_session_id TEXT NOT NULL,
+          lifecycle TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (flow_id, channel_id, message_id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_channel_position_unique
+          ON chat_messages(flow_id, channel_id, position);
+        CREATE INDEX IF NOT EXISTS chat_messages_session_idx
+          ON chat_messages(flow_id, session_id, position);
+        CREATE TABLE IF NOT EXISTS chat_queue_items (
+          id TEXT NOT NULL,
+          flow_id TEXT NOT NULL,
+          position INTEGER NOT NULL,
+          status TEXT NOT NULL DEFAULT 'accepted',
+          revision INTEGER NOT NULL DEFAULT 1,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (flow_id, id)
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS chat_queue_items_flow_position_unique
+          ON chat_queue_items(flow_id, position);
+        CREATE TABLE IF NOT EXISTS chat_submissions (
+          flow_id TEXT NOT NULL,
+          client_message_id TEXT NOT NULL,
+          submission_type TEXT NOT NULL,
+          payload_hash TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          receipt_state TEXT NOT NULL,
+          message_id TEXT,
+          last_error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          PRIMARY KEY (flow_id, client_message_id)
+        );
+        CREATE INDEX IF NOT EXISTS chat_submissions_state_idx
+          ON chat_submissions(flow_id, receipt_state, updated_at);
       `);
       addColumnIfMissing(sqlite, "projects", "updated_at", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(sqlite, "chat_queue_items", "revision", "INTEGER NOT NULL DEFAULT 1");
       dropColumnIfExists(sqlite, "projects", "agent_type");
       addColumnIfMissing(sqlite, "flows", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
       addColumnIfMissing(sqlite, "flows", "last_output_completed_at", "TEXT");
@@ -588,6 +705,19 @@ export function createStore(databasePath: string) {
             INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
           `).run(protocolMigrationKey, "2", now());
+        })();
+      }
+      const canonicalTranscriptMigrationKey = "canonical_transcript_version";
+      const canonicalTranscriptVersion = sqlite
+        .prepare("SELECT value FROM app_metadata WHERE key = ?")
+        .get(canonicalTranscriptMigrationKey) as { value?: string } | undefined;
+      if (canonicalTranscriptVersion?.value !== "2") {
+        sqlite.transaction(() => {
+          clearAllFlowData();
+          sqlite.prepare(`
+            INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+          `).run(canonicalTranscriptMigrationKey, "2", now());
         })();
       }
     },
@@ -737,6 +867,461 @@ export function createStore(databasePath: string) {
         .where(eq(flows.id, flowId))
         .run();
       return db.select().from(flows).where(eq(flows.id, flowId)).get()!;
+    },
+    commitTranscriptMutation(input: {
+      flowId: string;
+      channelId: string;
+      sessionId: string;
+      agentSessionId: string;
+      messages: Array<{ message: Record<string, unknown>; lifecycle: "active" | "complete" | "sealed" }>;
+      removedMessageIds?: string[];
+    }) {
+      const timestamp = now();
+      return sqlite.transaction(() => {
+        const channel = sqlite.prepare(`
+          SELECT cursor FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?
+        `).get(input.flowId, input.channelId) as { cursor: number } | undefined;
+        const cursor = (channel?.cursor ?? 0) + 1;
+        sqlite.prepare(`
+          INSERT INTO chat_transcript_channels (flow_id, channel_id, cursor, revision, updated_at)
+          VALUES (?, ?, ?, 1, ?)
+          ON CONFLICT(flow_id, channel_id) DO UPDATE SET
+            cursor = excluded.cursor,
+            revision = chat_transcript_channels.revision + 1,
+            updated_at = excluded.updated_at
+        `).run(input.flowId, input.channelId, cursor, timestamp);
+
+        const selectExisting = sqlite.prepare(`
+          SELECT position, session_id AS sessionId, agent_session_id AS agentSessionId,
+            lifecycle, payload_json AS payloadJson, created_at AS createdAt
+          FROM chat_messages
+          WHERE flow_id = ? AND channel_id = ? AND message_id = ?
+        `);
+        const selectNextPosition = sqlite.prepare(`
+          SELECT COALESCE(MAX(position), 0) + 1 AS position
+          FROM chat_messages
+          WHERE flow_id = ? AND channel_id = ?
+        `);
+        const upsert = sqlite.prepare(`
+          INSERT INTO chat_messages (
+            flow_id, channel_id, message_id, position, session_id, agent_session_id,
+            lifecycle, payload_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(flow_id, channel_id, message_id) DO UPDATE SET
+            session_id = excluded.session_id,
+            agent_session_id = excluded.agent_session_id,
+            lifecycle = excluded.lifecycle,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        `);
+        for (const item of input.messages) {
+          const messageId = typeof item.message.id === "string" ? item.message.id : "";
+          if (!messageId) throw new Error("Canonical transcript message is missing an id");
+          const existing = selectExisting.get(input.flowId, input.channelId, messageId) as
+            | { position: number; sessionId: string; agentSessionId: string; lifecycle: string; payloadJson: string; createdAt: string }
+            | undefined;
+          const position = existing?.position
+            ?? (selectNextPosition.get(input.flowId, input.channelId) as { position: number }).position;
+          const messageCreatedAt = typeof item.message.createdAt === "string"
+            ? item.message.createdAt
+            : existing?.createdAt ?? timestamp;
+          const payloadJson = JSON.stringify(item.message);
+          if (
+            existing
+            && existing.sessionId === input.sessionId
+            && existing.agentSessionId === input.agentSessionId
+            && existing.lifecycle === item.lifecycle
+            && existing.payloadJson === payloadJson
+          ) continue;
+          upsert.run(
+            input.flowId,
+            input.channelId,
+            messageId,
+            position,
+            input.sessionId,
+            input.agentSessionId,
+            item.lifecycle,
+            payloadJson,
+            messageCreatedAt,
+            timestamp,
+          );
+        }
+        if (input.removedMessageIds?.length) {
+          const remove = sqlite.prepare(`
+            DELETE FROM chat_messages WHERE flow_id = ? AND channel_id = ? AND message_id = ?
+          `);
+          for (const messageId of new Set(input.removedMessageIds)) {
+            remove.run(input.flowId, input.channelId, messageId);
+          }
+        }
+        return cursor;
+      })();
+    },
+    listTranscriptEntries(flowId: string, channelId: string): CanonicalTranscriptEntry[] {
+      const rows = sqlite.prepare(`
+        SELECT
+          flow_id AS flowId,
+          channel_id AS channelId,
+          message_id AS messageId,
+          position,
+          session_id AS sessionId,
+          agent_session_id AS agentSessionId,
+          lifecycle,
+          payload_json AS payloadJson,
+          created_at AS createdAt,
+          updated_at AS updatedAt
+        FROM chat_messages
+        WHERE flow_id = ? AND channel_id = ?
+        ORDER BY position ASC
+      `).all(flowId, channelId) as Array<Omit<CanonicalTranscriptEntry, "message"> & { payloadJson: string }>;
+      return rows.map(({ payloadJson, ...row }) => ({
+        ...row,
+        lifecycle: row.lifecycle === "active" ? "active" : row.lifecycle === "sealed" ? "sealed" : "complete",
+        message: parseJsonObject(payloadJson),
+      }));
+    },
+    sealActiveTranscriptMessages() {
+      return sqlite.prepare(`
+        UPDATE chat_messages SET lifecycle = 'sealed', updated_at = ? WHERE lifecycle = 'active'
+      `).run(now()).changes;
+    },
+    expireStaleLeaderRuntimeState() {
+      const timestamp = now();
+      return sqlite.transaction(() => {
+        const staleSessions = sqlite.prepare(`
+          SELECT id, flow_id AS flowId
+          FROM agent_sessions
+          WHERE expert_id = 'exp-leader'
+            AND task_id IS NULL
+            AND status IN ('queued', 'streaming')
+        `).all() as Array<{ id: string; flowId: string }>;
+
+        const updateSession = sqlite.prepare(`
+          UPDATE agent_sessions
+          SET status = 'interrupted', updated_at = ?
+          WHERE id = ? AND status IN ('queued', 'streaming')
+        `);
+        for (const session of staleSessions) updateSession.run(timestamp, session.id);
+
+        let finalizedUserTurns = 0;
+        for (const flowId of new Set(staleSessions.map((session) => session.flowId))) {
+          const turn = this.getOpenUserTurn(flowId);
+          if (!turn || turn.status !== "active") continue;
+
+          const hasRecoverableTask = this.listUserTurnTasks(turn.id).some((task) =>
+            ["queued_for_expert", "in_progress", "recovery_pending"].includes(task.status)
+          );
+          const hasPendingUserAction = this.listDecisionCards(flowId).some((card) =>
+            card.userTurnId === turn.id && card.status === "pending"
+          ) || this.listSpecApprovals(flowId).some((approval) =>
+            approval.userTurnId === turn.id && approval.status === "pending"
+          ) || this.listPlanApprovals(flowId).some((approval) =>
+            approval.userTurnId === turn.id && ["pending", "feedback_pending"].includes(approval.status)
+          );
+          const hasRecoverablePlanRun = this.listPlanRuns(flowId).some((run) =>
+            run.userTurnId === turn.id && ["running", "blocked", "paused_for_feedback"].includes(run.status)
+          );
+          if (hasRecoverableTask || hasPendingUserAction || hasRecoverablePlanRun) continue;
+
+          const finalized = this.failUserTurn(turn.id, "failed", timestamp);
+          if (finalized?.status === "failed") finalizedUserTurns += 1;
+        }
+
+        return { interruptedLeaderSessions: staleSessions.length, finalizedUserTurns };
+      })();
+    },
+    getTranscriptCursor(flowId: string, channelId: string) {
+      const row = sqlite.prepare(`
+        SELECT cursor FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?
+      `).get(flowId, channelId) as { cursor: number } | undefined;
+      return row?.cursor ?? 0;
+    },
+    renameTranscriptSession(flowId: string, fromSessionId: string, toSessionId: string) {
+      if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
+      sqlite.prepare(`
+        UPDATE chat_messages SET session_id = ?, updated_at = ?
+        WHERE flow_id = ? AND session_id = ?
+      `).run(toSessionId, now(), flowId, fromSessionId);
+    },
+    clearTranscript(flowId: string, channelId?: string) {
+      sqlite.transaction(() => {
+        if (channelId) {
+          sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ? AND channel_id = ?").run(flowId, channelId);
+          sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?").run(flowId, channelId);
+        } else {
+          sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ?").run(flowId);
+          sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ?").run(flowId);
+        }
+      })();
+    },
+    getSubmission(flowId: string, clientMessageId: string): CanonicalSubmission | undefined {
+      const row = sqlite.prepare(`
+        SELECT flow_id AS flowId, client_message_id AS clientMessageId,
+          submission_type AS submissionType, payload_hash AS payloadHash,
+          payload_json AS payloadJson, receipt_state AS receiptState,
+          message_id AS messageId, last_error_code AS lastErrorCode,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM chat_submissions WHERE flow_id = ? AND client_message_id = ?
+      `).get(flowId, clientMessageId) as CanonicalSubmissionRow | undefined;
+      return row ? canonicalSubmissionFromRow(row) : undefined;
+    },
+    acceptSubmission(input: {
+      flowId: string;
+      clientMessageId: string;
+      submissionType: "normal" | "guide";
+      payloadHash: string;
+      payload: Record<string, unknown>;
+    }): SubmissionAcceptance {
+      const timestamp = now();
+      return sqlite.transaction(() => {
+        const existing = this.getSubmission(input.flowId, input.clientMessageId);
+        if (existing) {
+          return {
+            outcome: existing.submissionType === input.submissionType && existing.payloadHash === input.payloadHash
+              ? "duplicate"
+              : "conflict",
+            submission: existing,
+          } as SubmissionAcceptance;
+        }
+        sqlite.prepare(`
+          INSERT INTO chat_submissions (
+            flow_id, client_message_id, submission_type, payload_hash, payload_json,
+            receipt_state, message_id, last_error_code, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'received', NULL, NULL, ?, ?)
+        `).run(
+          input.flowId,
+          input.clientMessageId,
+          input.submissionType,
+          input.payloadHash,
+          JSON.stringify(input.payload),
+          timestamp,
+          timestamp,
+        );
+        return {
+          outcome: "created",
+          submission: this.getSubmission(input.flowId, input.clientMessageId)!,
+        } as SubmissionAcceptance;
+      })();
+    },
+    markSubmissionMaterialized(flowId: string, clientMessageId: string, messageId: string) {
+      const result = sqlite.prepare(`
+        UPDATE chat_submissions
+        SET receipt_state = 'materialized', message_id = ?, payload_json = '{}',
+          last_error_code = NULL, updated_at = ?
+        WHERE flow_id = ? AND client_message_id = ?
+      `).run(messageId, now(), flowId, clientMessageId);
+      return result.changes > 0;
+    },
+    claimSubmission(flowId: string, clientMessageId: string) {
+      const result = sqlite.prepare(`
+        UPDATE chat_submissions SET receipt_state = 'dispatching', updated_at = ?
+        WHERE flow_id = ? AND client_message_id = ? AND receipt_state = 'received'
+      `).run(now(), flowId, clientMessageId);
+      return result.changes > 0;
+    },
+    releaseSubmission(flowId: string, clientMessageId: string) {
+      const result = sqlite.prepare(`
+        UPDATE chat_submissions SET receipt_state = 'received', updated_at = ?
+        WHERE flow_id = ? AND client_message_id = ? AND receipt_state = 'dispatching'
+      `).run(now(), flowId, clientMessageId);
+      return result.changes > 0;
+    },
+    markSubmissionRejected(flowId: string, clientMessageId: string, errorCode: string) {
+      const result = sqlite.prepare(`
+        UPDATE chat_submissions
+        SET receipt_state = 'rejected', last_error_code = ?, updated_at = ?
+        WHERE flow_id = ? AND client_message_id = ?
+          AND receipt_state IN ('received', 'dispatching')
+      `).run(errorCode, now(), flowId, clientMessageId);
+      return result.changes > 0;
+    },
+    recoverDanglingSubmissions() {
+      const timestamp = now();
+      return sqlite.transaction(() => {
+        const materialized = sqlite.prepare(`
+          UPDATE chat_submissions
+          SET receipt_state = 'materialized', message_id = client_message_id,
+            payload_json = '{}', last_error_code = NULL, updated_at = ?
+          WHERE receipt_state = 'dispatching'
+            AND EXISTS (
+              SELECT 1 FROM chat_messages
+              WHERE chat_messages.flow_id = chat_submissions.flow_id
+                AND chat_messages.message_id = chat_submissions.client_message_id
+            )
+        `).run(timestamp).changes;
+        const requeued = sqlite.prepare(`
+          UPDATE chat_submissions
+          SET receipt_state = 'received', last_error_code = NULL, updated_at = ?
+          WHERE receipt_state = 'dispatching'
+        `).run(timestamp).changes;
+        return { materialized, requeued };
+      })();
+    },
+    addQueuedMessage(input: {
+      id: string;
+      flowId: string;
+      payloadHash: string;
+      payload: Record<string, unknown>;
+    }): { acceptance: SubmissionAcceptance; item?: CanonicalQueueItem } {
+      const timestamp = now();
+      return sqlite.transaction(() => {
+        const existingSubmission = this.getSubmission(input.flowId, input.id);
+        if (existingSubmission) {
+          const acceptance: SubmissionAcceptance = {
+            outcome: existingSubmission.submissionType === "normal" && existingSubmission.payloadHash === input.payloadHash
+              ? "duplicate"
+              : "conflict",
+            submission: existingSubmission,
+          };
+          return { acceptance, item: this.getQueuedMessage(input.flowId, input.id) };
+        }
+        sqlite.prepare(`
+          INSERT INTO chat_submissions (
+            flow_id, client_message_id, submission_type, payload_hash, payload_json,
+            receipt_state, message_id, last_error_code, created_at, updated_at
+          ) VALUES (?, ?, 'normal', ?, ?, 'received', NULL, NULL, ?, ?)
+        `).run(input.flowId, input.id, input.payloadHash, JSON.stringify(input.payload), timestamp, timestamp);
+        const next = sqlite.prepare(`
+          SELECT COALESCE(MAX(position), 0) + 1 AS position FROM chat_queue_items WHERE flow_id = ?
+        `).get(input.flowId) as { position: number };
+        sqlite.prepare(`
+          INSERT INTO chat_queue_items (
+            id, flow_id, position, status, revision, payload_json, created_at, updated_at
+          ) VALUES (?, ?, ?, 'accepted', 1, ?, ?, ?)
+        `).run(input.id, input.flowId, next.position, JSON.stringify(input.payload), timestamp, timestamp);
+        const submission = this.getSubmission(input.flowId, input.id)!;
+        const acceptance: SubmissionAcceptance = { outcome: "created", submission };
+        return {
+          acceptance,
+          item: this.getQueuedMessage(input.flowId, input.id),
+        };
+      })();
+    },
+    listQueuedMessages(flowId: string): CanonicalQueueItem[] {
+      const rows = sqlite.prepare(`
+        SELECT id, flow_id AS flowId, position, status, revision, payload_json AS payloadJson,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM chat_queue_items WHERE flow_id = ? ORDER BY position ASC
+      `).all(flowId) as Array<Omit<CanonicalQueueItem, "payload"> & { payloadJson: string }>;
+      return rows.map(({ payloadJson, ...row }) => ({
+        ...row,
+        status: row.status === "dispatching" ? "dispatching" : "accepted",
+        payload: parseJsonObject(payloadJson),
+      }));
+    },
+    getQueuedMessage(flowId: string, queueId: string): CanonicalQueueItem | undefined {
+      return this.listQueuedMessages(flowId).find((item) => item.id === queueId);
+    },
+    claimQueuedMessage(flowId: string, queueId?: string): CanonicalQueueItem | undefined {
+      return sqlite.transaction(() => {
+        const first = this.listQueuedMessages(flowId)[0];
+        if (!first || first.status !== "accepted" || (queueId && first.id !== queueId)) return undefined;
+        const result = sqlite.prepare(`
+          UPDATE chat_queue_items
+          SET status = 'dispatching', revision = revision + 1, updated_at = ?
+          WHERE flow_id = ? AND id = ? AND status = 'accepted' AND revision = ?
+        `).run(now(), flowId, first.id, first.revision);
+        return result.changes > 0 ? this.getQueuedMessage(flowId, first.id) : undefined;
+      })();
+    },
+    claimQueuedMessageForGuide(flowId: string, queueId: string): CanonicalQueueItem | undefined {
+      return sqlite.transaction(() => {
+        const item = this.getQueuedMessage(flowId, queueId);
+        if (!item || item.status !== "accepted") return undefined;
+        const result = sqlite.prepare(`
+          UPDATE chat_queue_items
+          SET status = 'dispatching', revision = revision + 1, updated_at = ?
+          WHERE flow_id = ? AND id = ? AND status = 'accepted' AND revision = ?
+        `).run(now(), flowId, queueId, item.revision);
+        return result.changes > 0 ? this.getQueuedMessage(flowId, queueId) : undefined;
+      })();
+    },
+    releaseQueuedMessage(flowId: string, queueId: string) {
+      const result = sqlite.prepare(`
+        UPDATE chat_queue_items
+        SET status = 'accepted', revision = revision + 1, updated_at = ?
+        WHERE flow_id = ? AND id = ? AND status = 'dispatching'
+      `).run(now(), flowId, queueId);
+      return result.changes > 0;
+    },
+    completeQueuedMessage(flowId: string, queueId: string, messageId = queueId) {
+      return sqlite.transaction(() => {
+        const result = sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ? AND id = ?")
+          .run(flowId, queueId);
+        this.markSubmissionMaterialized(flowId, queueId, messageId);
+        return result.changes > 0;
+      })();
+    },
+    completeGuidedQueuedMessage(flowId: string, queueId: string) {
+      return sqlite.transaction(() => {
+        const result = sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ? AND id = ?")
+          .run(flowId, queueId);
+        sqlite.prepare(`
+          UPDATE chat_submissions SET receipt_state = 'cancelled', updated_at = ?
+          WHERE flow_id = ? AND client_message_id = ?
+        `).run(now(), flowId, queueId);
+        return result.changes > 0;
+      })();
+    },
+    markQueuedMessageUncertain(flowId: string, queueId: string) {
+      return sqlite.transaction(() => {
+        const result = sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ? AND id = ?")
+          .run(flowId, queueId);
+        sqlite.prepare(`
+          UPDATE chat_submissions
+          SET receipt_state = 'uncertain', last_error_code = 'PROCESS_RESTART', updated_at = ?
+          WHERE flow_id = ? AND client_message_id = ?
+        `).run(now(), flowId, queueId);
+        return result.changes > 0;
+      })();
+    },
+    deleteQueuedMessage(flowId: string, queueId: string) {
+      return sqlite.transaction(() => {
+        const item = this.getQueuedMessage(flowId, queueId);
+        if (!item || item.status !== "accepted") return false;
+        const result = sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ? AND id = ? AND status = 'accepted'")
+          .run(flowId, queueId);
+        if (result.changes > 0) {
+          sqlite.prepare(`
+            UPDATE chat_submissions
+            SET receipt_state = 'cancelled', updated_at = ?
+            WHERE flow_id = ? AND client_message_id = ?
+          `).run(now(), flowId, queueId);
+        }
+        return result.changes > 0;
+      })();
+    },
+    clearQueuedMessages(flowId: string) {
+      sqlite.transaction(() => {
+        const ids = this.listQueuedMessages(flowId)
+          .filter((item) => item.status === "accepted")
+          .map((item) => item.id);
+        if (ids.length === 0) return;
+        sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ? AND status = 'accepted'").run(flowId);
+        const update = sqlite.prepare(`
+          UPDATE chat_submissions SET receipt_state = 'cancelled', updated_at = ?
+          WHERE flow_id = ? AND client_message_id = ?
+        `);
+        const timestamp = now();
+        for (const id of ids) update.run(timestamp, flowId, id);
+      })();
+    },
+    reorderQueuedMessages(flowId: string, queueIds: string[]) {
+      const existing = this.listQueuedMessages(flowId);
+      if (existing.length !== queueIds.length || new Set(queueIds).size !== queueIds.length) return false;
+      if (existing.some((item) => !queueIds.includes(item.id))) return false;
+      if (existing.some((item) => item.status !== "accepted")) return false;
+      const timestamp = now();
+      sqlite.transaction(() => {
+        sqlite.prepare("UPDATE chat_queue_items SET position = -position WHERE flow_id = ?").run(flowId);
+        const update = sqlite.prepare(`
+          UPDATE chat_queue_items
+          SET position = ?, revision = revision + 1, updated_at = ?
+          WHERE flow_id = ? AND id = ? AND status = 'accepted'
+        `);
+        queueIds.forEach((queueId, index) => update.run(index + 1, timestamp, flowId, queueId));
+      })();
+      return true;
     },
     markFlowRead(flowId: string, viewerId = "local-default", timestamp = now()) {
       const existing = db.select().from(flows).where(eq(flows.id, flowId)).get();
@@ -1162,6 +1747,10 @@ export function createStore(databasePath: string) {
       const existing = db.select().from(flows).where(eq(flows.id, flowId)).get();
       if (!existing) return false;
       sqlite.transaction(() => {
+        sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM chat_submissions WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ?").run(flowId);
         for (const task of db.select().from(tasks).where(eq(tasks.flowId, flowId)).all()) {
           db.delete(taskDependencies).where(eq(taskDependencies.taskId, task.id)).run();
           db.delete(taskDependencies).where(eq(taskDependencies.dependsOnTaskId, task.id)).run();

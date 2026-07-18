@@ -1146,7 +1146,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.queryByText("hello")).not.toBeInTheDocument();
   });
 
-  it("pulls final Expert history as soon as the Expert completes", async () => {
+  it("does not replace the committed Expert transcript when the Expert completes", async () => {
     const { wsClient } = await import("../../lib/ws");
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId={null} flowExpertId="fexp-research" readonly />);
     vi.mocked(wsClient.sendSessionGet).mockClear();
@@ -1162,7 +1162,7 @@ describe("SessionTranscriptPanel", () => {
       },
     });
 
-    expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", undefined, "fexp-research");
+    expect(wsClient.sendSessionGet).not.toHaveBeenCalled();
   });
 
   it("finishes an active Expert transcript when its session is interrupted", async () => {
@@ -1210,7 +1210,6 @@ describe("SessionTranscriptPanel", () => {
 
     expect(screen.getByText("已中断")).toBeVisible();
     expect(screen.getByTestId("chat-message-assistant")).not.toHaveAttribute("data-transcript-activity", "tool-running");
-    expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", undefined, "fexp-coder");
   });
 
   it("keeps a freshly resolved card result expanded throughout the live page session", async () => {
@@ -1231,26 +1230,25 @@ describe("SessionTranscriptPanel", () => {
     );
 
     emit({
-      type: "flow:decision_card_resolved",
-      flow_id: "flow-1",
-      data: {
-        card_id: "dc-1",
-        status: "resolved",
-        answers: card.answers,
-        message_id: "msg-decision-1",
-      },
-    });
-
-    expect(screen.getByTestId("decision-card-result-details")).toBeVisible();
-
-    emit({
-      type: "session:history",
+      type: "session:transcript_snapshot",
       flow_id: "flow-1",
       agent_session_id: "leader-1",
-      data: [userMessage(
-        "msg-decision-1",
-        "clarification_card_id: dc-1\n用户已回答澄清卡片。\n\n1. 选择\n回答：重新优化 Hello World",
-      )],
+      data: { cursor: 0, messages: [] },
+    });
+    emit({
+      type: "session:transcript_event",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: {
+        cursor: 1,
+        event: {
+          type: "message-added",
+          message: {
+            ...userMessage("msg-decision-1", "clarification_card_id: dc-1\n用户已回答澄清卡片。"),
+            metadata: { decisionCardId: "dc-1", decisionStatus: "resolved" },
+          },
+        },
+      },
     });
 
     expect(screen.getByTestId("decision-card-result-details")).toBeVisible();
@@ -1300,7 +1298,10 @@ describe("SessionTranscriptPanel", () => {
         messages: [
           userMessage("msg-user-1", "开始"),
           message("assistant-before-card", "我已经向你提出了一个问题"),
-          userMessage("msg-decision-1", "clarification_card_id: dc-1\n用户取消了本次澄清卡片。"),
+          {
+            ...userMessage("msg-decision-1", "clarification_card_id: dc-1\n用户取消了本次澄清卡片。"),
+            metadata: { decisionCardId: "dc-1", decisionStatus: "cancelled" },
+          } as UIMessage,
           message("assistant-after-card", "后续说明"),
         ],
       },
@@ -1331,10 +1332,13 @@ describe("SessionTranscriptPanel", () => {
       type: "session:history",
       flow_id: "flow-1",
       agent_session_id: "leader-1",
-      data: [userMessage(
-        "msg-decision-1",
-        "clarification_card_id: dc-1\n用户已回答澄清卡片。\n\n1. 选择\n回答：重新优化 Hello World",
-      )],
+      data: [{
+        ...userMessage(
+          "msg-decision-1",
+          "clarification_card_id: dc-1\n用户已回答澄清卡片。\n\n1. 选择\n回答：重新优化 Hello World",
+        ),
+        metadata: { decisionCardId: "dc-1", decisionStatus: "resolved" },
+      } as UIMessage],
     });
 
     expect(screen.queryByTestId("decision-card-result-details")).not.toBeInTheDocument();
@@ -1857,7 +1861,7 @@ describe("SessionTranscriptPanel", () => {
       act(() => {
         // Streaming text/tool updates are intentionally merged once per
         // animation frame; advance that frame before asserting the UI.
-        vi.advanceTimersByTime(16);
+        vi.advanceTimersByTime(20);
       });
       expect(screen.getByText("工作中 6 秒")).toBeInTheDocument();
 
@@ -2179,30 +2183,6 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("已读取")).toBeInTheDocument();
   });
 
-  it("keeps an optimistic user message before a later assistant snapshot", async () => {
-    const { container } = render(
-      <SessionTranscriptPanel
-        flowId="flow-1"
-        agentSessionId="leader-1"
-        readonly
-        optimisticMessages={[userMessage("msg-user-1", "你好")]}
-      />,
-    );
-
-    expect(await screen.findByText("你好")).toBeInTheDocument();
-
-    emit({
-      type: "session:snapshot",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: [message("assistant-1", "Leader says hi")],
-    });
-
-    await waitFor(() => expect(screen.getByText("Leader says hi")).toBeInTheDocument());
-    const text = container.textContent || "";
-    expect(text.indexOf("你好")).toBeLessThan(text.indexOf("Leader says hi"));
-  });
-
   it("keeps an immediately submitted next turn after the completed turn it follows", async () => {
     const previousUser = {
       ...userMessage("msg-user-previous", "上一轮问题"),
@@ -2433,70 +2413,6 @@ describe("SessionTranscriptPanel", () => {
     expect(text.indexOf("请修复一下吧")).toBeLessThan(text.indexOf("修复完成"));
   });
 
-  it("deduplicates the same Expert prompt when refreshed history uses a different user message id", async () => {
-    render(
-      <SessionTranscriptPanel
-        flowId="flow-1"
-        agentSessionId={null}
-        flowExpertId="fexp-verify"
-        readonly
-      />,
-    );
-
-    emit({
-      type: "session:snapshot",
-      flow_id: "flow-1",
-      flow_expert_id: "fexp-verify",
-      data: [userMessage("msg-user-live", "请验证合并后的 HTML 页面是否符合预期。")],
-    });
-
-    emit({
-      type: "session:history",
-      flow_id: "flow-1",
-      flow_expert_id: "fexp-verify",
-      data: [
-        userMessage("msg-user-history", "请验证合并后的 HTML 页面是否符合预期。"),
-        message("msg-assistant-history", "全部 5 项验收标准均通过。"),
-      ],
-    });
-
-    await waitFor(() => expect(screen.getByText("全部 5 项验收标准均通过。")).toBeInTheDocument());
-    expect(screen.getAllByText("请验证合并后的 HTML 页面是否符合预期。")).toHaveLength(1);
-  });
-
-  it("does not append a duplicate optimistic user message after history already contains it", async () => {
-    const { rerender } = render(
-      <SessionTranscriptPanel
-        flowId="flow-1"
-        agentSessionId="leader-1"
-        readonly
-      />,
-    );
-
-    emit({
-      type: "session:snapshot",
-      flow_id: "flow-1",
-      agent_session_id: "leader-1",
-      data: [
-        userMessage("msg-user-history", "给 leader-agent 页面添加多语言翻译"),
-        message("msg-assistant-history", "已发起翻译范围确认，等待你的回答。"),
-      ],
-    });
-
-    await waitFor(() => expect(screen.getByText("已发起翻译范围确认，等待你的回答。")).toBeInTheDocument());
-
-    rerender(
-      <SessionTranscriptPanel
-        flowId="flow-1"
-        agentSessionId="leader-1"
-        readonly
-        optimisticMessages={[userMessage("msg-user-optimistic", "给 leader-agent 页面添加多语言翻译")]}
-      />,
-    );
-
-    expect(screen.getAllByText("给 leader-agent 页面添加多语言翻译")).toHaveLength(1);
-  });
-
   it("keeps the fixed thinking slot through reasoning and hides it after the first text appears", async () => {
     function emitEvent(event: any) {
       emit({
@@ -2665,7 +2581,7 @@ describe("SessionTranscriptPanel", () => {
       expect(marker).toHaveAttribute("data-transcript-activity", "waiting");
     });
 
-    it("requests a canonical snapshot after a live turn finishes", async () => {
+    it("keeps the committed live turn without reloading a second history source", async () => {
       const { wsClient } = await import("../../lib/ws");
       render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
       vi.mocked(wsClient.sendSessionGet).mockClear();
@@ -2673,38 +2589,7 @@ describe("SessionTranscriptPanel", () => {
       emitEvent({ type: "start", messageId: "a1" });
       emitEvent({ type: "finish", messageId: "a1", durationMs: 9000, finishedAt: "2026-06-24T08:57:52.463Z" });
 
-      await waitFor(() => {
-        expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", "leader-1", undefined);
-      });
-    });
-
-    it("rechecks the canonical snapshot after finish to catch delayed final history", async () => {
-      vi.useFakeTimers();
-      try {
-        const { wsClient } = await import("../../lib/ws");
-        render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
-        vi.mocked(wsClient.sendSessionGet).mockClear();
-
-        emitEvent({ type: "start", messageId: "a1" });
-        emitEvent({ type: "finish", messageId: "a1", durationMs: 9000, finishedAt: "2026-06-24T08:57:52.463Z" });
-
-        expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(1);
-        expect(wsClient.sendSessionGet).toHaveBeenLastCalledWith("flow-1", "", "leader-1", undefined);
-
-        act(() => {
-          vi.advanceTimersByTime(750);
-        });
-        expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(2);
-        expect(wsClient.sendSessionGet).toHaveBeenLastCalledWith("flow-1", "", "leader-1", undefined);
-
-        act(() => {
-          vi.advanceTimersByTime(1_750);
-        });
-        expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(3);
-        expect(wsClient.sendSessionGet).toHaveBeenLastCalledWith("flow-1", "", "leader-1", undefined);
-      } finally {
-        vi.useRealTimers();
-      }
+      expect(wsClient.sendSessionGet).not.toHaveBeenCalled();
     });
 
     it("replaces an incomplete live finished turn with snapshot final text", async () => {

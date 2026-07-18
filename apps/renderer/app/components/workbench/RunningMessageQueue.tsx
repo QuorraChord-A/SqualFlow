@@ -53,11 +53,14 @@ export default function RunningMessageQueue({
       </div>
       <div className="max-h-[218px] space-y-0.5 overflow-y-auto overscroll-contain pr-1">
         {messages.map((message, index) => {
+          const isDispatching = message.status === "dispatching";
           const visibleContent = message.displayContent ?? message.content;
           const displayContent = visibleContent || (message.planFeedback?.length ? `对编排计划添加了 ${message.planFeedback.length} 条评论` : "附件消息");
           const previewImages = queuePreviewImages(message);
           const waitsForNextTurn = actionLabel === "引导" && message.specRequested === true;
-          const actionAriaLabel = waitsForNextTurn
+          const actionAriaLabel = isDispatching
+            ? `消息 ${index + 1} 正在发送`
+            : waitsForNextTurn
             ? `Spec 消息 ${index + 1} 需等待当前任务结束`
             : actionLabel === "引导"
             ? `引导消息 ${index + 1}`
@@ -74,11 +77,14 @@ export default function RunningMessageQueue({
             >
               <button
                 type="button"
-                draggable
-                onDragStart={() => setDraggedIndex(index)}
+                draggable={!isDispatching}
+                disabled={isDispatching}
+                onDragStart={() => {
+                  if (!isDispatching) setDraggedIndex(index);
+                }}
                 onDragEnd={() => setDraggedIndex(null)}
                 aria-label={`拖动消息 ${index + 1}`}
-                className="flex size-7 cursor-grab items-center justify-center rounded-lg text-muted-foreground/70 transition-colors hover:bg-background/60"
+                className="flex size-7 cursor-grab items-center justify-center rounded-lg text-muted-foreground/70 transition-colors hover:bg-background/60 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <GripVertical className="size-[16px]" />
               </button>
@@ -109,26 +115,28 @@ export default function RunningMessageQueue({
                 <button
                   type="button"
                   aria-label={actionAriaLabel}
-                  disabled={waitsForNextTurn}
+                  disabled={waitsForNextTurn || isDispatching}
                   onClick={() => onGuide(message)}
                   className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-ui-control-hover px-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-background/70 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <CornerUpRight className="size-[17px]" />
-                  {waitsForNextTurn ? "等待" : actionLabel}
+                  {isDispatching ? "发送中" : waitsForNextTurn ? "等待" : actionLabel}
                 </button>
                 <button
                   type="button"
                   aria-label={`编辑消息 ${index + 1}`}
+                  disabled={isDispatching}
                   onClick={() => onEdit(message)}
-                  className="flex size-8 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background/70"
+                  className="flex size-8 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background/70 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Pencil className="size-[18px]" />
                 </button>
                 <button
                   type="button"
                   aria-label={`删除消息 ${index + 1}`}
+                  disabled={isDispatching}
                   onClick={() => onDelete(message.id)}
-                  className="flex size-8 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background/70"
+                  className="flex size-8 items-center justify-center rounded-lg text-foreground transition-colors hover:bg-background/70 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <Trash2 className="size-[18px]" />
                 </button>

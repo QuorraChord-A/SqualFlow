@@ -40,8 +40,8 @@ function recordCompleteTurn(journal: ChatJournal, flowId: string, sessionId: str
   journal.record(flowId, sessionId, { type: "finish", messageId, durationMs: 1000, finishedAt: "2026-06-24T11:18:22.000Z" }, flowExpertId);
 }
 
-describe("expert snapshot requires complete SDK history", () => {
-  it("returns an explicit error instead of replacing incomplete history with journal content", async () => {
+describe("expert snapshot uses the canonical transcript", () => {
+  it("returns committed final text without consulting SDK history", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -55,22 +55,12 @@ describe("expert snapshot requires complete SDK history", () => {
       flowExpertId: flowExpert.id, sessionId: "sdk-expert-stale", displayName: "Research", status: "completed",
     });
 
-    const chatJournal = new ChatJournal();
+    const chatJournal = new ChatJournal(store);
     recordCompleteTurn(chatJournal, flow.id, "sdk-expert-stale", flowExpert.id);
-
-    // The on-disk SDK session lags: it has the StructuredOutput tool call but
-    // NOT the trailing assistant text.
     const app = createApp({
       logger: false,
       store,
       chatJournal,
-      sessionHistoryLoader: async () => [{
-        id: "msg-disk-1",
-        role: "assistant",
-        parts: [{ type: "tool-StructuredOutput", toolCallId: "call-structured", toolName: "StructuredOutput", state: "output-available", inputText: "", input: { status: "success" }, output: { content: "Structured output provided successfully", is_error: false } }],
-        content: "",
-        metadata: { turnTiming: { startedAt: "2026-06-24T11:17:56.000Z", finishedAt: "2026-06-24T11:18:22.000Z", durationMs: 1000 } },
-      }] as any,
     });
 
     try {
@@ -79,9 +69,14 @@ describe("expert snapshot requires complete SDK history", () => {
       ws.send(JSON.stringify({ data: { type: "session:get", flow_id: flow.id, flow_expert_id: flowExpert.id, session_id: "", log_id: "log-stale" } }));
       const response = await nextWsMessage(ws);
       expect(response).toEqual(expect.objectContaining({
-        type: "system:error",
+        type: "session:transcript_snapshot",
         flow_id: flow.id,
-        data: expect.objectContaining({ code: "SESSION_HISTORY_INCOMPLETE" }),
+        data: expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ id: "msg-user-live-1", content: "调查这个项目" }),
+            expect.objectContaining({ id: "msg-assistant-live-1", content: "调查完成。以下是核心发现摘要。" }),
+          ]),
+        }),
       }));
       ws.terminate();
     } finally {

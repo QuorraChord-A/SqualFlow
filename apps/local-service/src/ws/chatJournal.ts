@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import type { UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { isRuntimeCapability, type RuntimeCapability } from "../domain/runtimeCapabilities.js";
+import type { CanonicalTranscriptEntry, Store } from "../db/store.js";
 
 type TextPart = { type: "text"; id?: string; text: string };
 type ReasoningPart = { type: "reasoning"; id?: string; text: string; state: "done" };
@@ -48,7 +50,23 @@ type JournalEvent = UiMessageChunk | Record<string, unknown>;
 export type JournalRecordResult = {
   cursor: number;
   messageId?: string;
+  ignored?: boolean;
+  removedMessageIds?: string[];
+  activeTurn?: {
+    messageId: string;
+    rootMessageId: string;
+    segmentIndex: number;
+    startedAt: string;
+  };
 };
+
+type TranscriptPersistence = Pick<
+  Store,
+  | "commitTranscriptMutation"
+  | "getTranscriptCursor"
+  | "listTranscriptEntries"
+  | "renameTranscriptSession"
+>;
 
 function keyFor(flowId: string, sessionId: string): string {
   return `${flowId}:${sessionId}`;
@@ -85,6 +103,19 @@ export class ChatJournal {
   private readonly rootMessageIds = new Map<string, string>();
   private readonly segmentIndex = new Map<string, number>();
   private readonly pendingGuideMessages = new Map<string, UserUIMessage[]>();
+  private readonly dirtyMessageIds = new Map<string, Set<string>>();
+  private readonly removedMessageIds = new Map<string, Set<string>>();
+  private readonly transcriptSessions = new Map<string, Set<string>>();
+  private readonly agentSessionIds = new Map<string, string>();
+
+  constructor(
+    private readonly persistence?: TranscriptPersistence,
+    private readonly streamEpoch = randomUUID(),
+  ) {}
+
+  getStreamEpoch(): string {
+    return this.streamEpoch;
+  }
 
   recordUserMessage(
     flowId: string,
@@ -94,8 +125,10 @@ export class ChatJournal {
     createdAt?: string,
     transcriptId = sessionId,
     metadata?: Record<string, unknown>,
-  ): { cursor: number; message: ChatUIMessage } {
+    agentSessionId = transcriptId,
+  ): { cursor: number; message: ChatUIMessage } & Pick<JournalRecordResult, "removedMessageIds" | "activeTurn"> {
     const key = keyFor(flowId, sessionId);
+    this.registerSession(flowId, sessionId, transcriptId, agentSessionId);
     const message: UserUIMessage = {
       id: messageId,
       role: "user",
@@ -105,17 +138,32 @@ export class ChatJournal {
       ...(metadata ? { metadata } : {}),
     };
     if (metadata?.localMessageKind === "running-guide") {
-      this.recordPendingGuideBoundary(flowId, sessionId, message);
-      return { cursor: this.nextCursor(flowId, transcriptId), message };
+      const activeMessageIdBefore = this.current.get(key)?.id;
+      const removedMessageIds = this.recordPendingGuideBoundary(flowId, sessionId, message);
+      const cursor = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+      const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
+      return {
+        cursor,
+        message,
+        ...(removedMessageIds.length > 0 ? { removedMessageIds } : {}),
+        ...(activeTurn ? { activeTurn } : {}),
+      };
     }
     this.appendHistory(flowId, sessionId, message);
-    return { cursor: this.nextCursor(flowId, transcriptId), message };
+    return { cursor: this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), message };
   }
 
-  record(flowId: string, sessionId: string, event: JournalEvent, transcriptId = sessionId): JournalRecordResult {
+  record(
+    flowId: string,
+    sessionId: string,
+    event: JournalEvent,
+    transcriptId = sessionId,
+    agentSessionId = transcriptId,
+  ): JournalRecordResult {
     const eventRecord = event as Record<string, unknown>;
     const eventType = typeof eventRecord.type === "string" ? eventRecord.type : "";
     const key = keyFor(flowId, sessionId);
+    this.registerSession(flowId, sessionId, transcriptId, agentSessionId);
 
     if (eventType === "start") {
       const startedAt = stringValue(eventRecord, "startedAt") || new Date().toISOString();
@@ -132,15 +180,17 @@ export class ChatJournal {
       this.segmentIndex.set(key, 0);
       this.textIndex.set(key, -1);
       this.reasoningIndex.set(key, -1);
-      return { cursor: this.nextCursor(flowId, transcriptId), messageId };
+      this.markMessageDirty(flowId, sessionId, messageId);
+      return { cursor: this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), messageId };
     }
 
     const message = this.current.get(key);
-    if (!message) return { cursor: this.nextCursor(flowId, transcriptId) };
+    if (!message) return { cursor: this.getCursor(flowId, transcriptId), ignored: true };
+    const activeMessageIdBefore = message.id;
 
     this.flushPendingGuideBoundaryBeforeEvent(flowId, sessionId, eventType);
     const activeMessage = this.current.get(key);
-    if (!activeMessage) return { cursor: this.nextCursor(flowId, transcriptId) };
+    if (!activeMessage) return { cursor: this.getCursor(flowId, transcriptId), ignored: true };
     let canonicalMessageId = activeMessage.id;
 
     switch (eventType) {
@@ -227,15 +277,76 @@ export class ChatJournal {
         break;
     }
     this.flushPendingGuideBoundaryAfterEvent(flowId, sessionId, eventType);
-    return { cursor: this.nextCursor(flowId, transcriptId), messageId: canonicalMessageId };
+    const currentAfterEvent = this.current.get(key);
+    if (currentAfterEvent) this.updateMessageContent(currentAfterEvent);
+    this.markMessageDirty(flowId, sessionId, canonicalMessageId);
+    const cursor = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+    const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
+    return {
+      cursor,
+      messageId: canonicalMessageId,
+      ...(activeTurn ? { activeTurn } : {}),
+    };
   }
 
   getCursor(flowId: string, transcriptId: string): number {
+    if (this.persistence) return this.persistence.getTranscriptCursor(flowId, transcriptId);
     return this.cursors.get(keyFor(flowId, transcriptId)) ?? 0;
+  }
+
+  getTranscriptEntries(flowId: string, transcriptId: string): CanonicalTranscriptEntry[] {
+    if (this.persistence) return this.persistence.listTranscriptEntries(flowId, transcriptId);
+    const transcriptKey = keyFor(flowId, transcriptId);
+    const sessionIds = this.transcriptSessions.get(transcriptKey) ?? new Set([transcriptId]);
+    let position = 0;
+    const entries: CanonicalTranscriptEntry[] = [];
+    const seen = new Set<string>();
+    for (const sessionId of sessionIds) {
+      const sessionKey = keyFor(flowId, sessionId);
+      const messages = this.messagesForPersistence(flowId, sessionId);
+      for (const item of messages) {
+        if (seen.has(item.message.id)) continue;
+        seen.add(item.message.id);
+        const timestamp = typeof item.message.createdAt === "string" ? item.message.createdAt : "";
+        entries.push({
+          flowId,
+          channelId: transcriptId,
+          messageId: item.message.id,
+          position: ++position,
+          sessionId,
+          agentSessionId: this.agentSessionIds.get(sessionKey) ?? transcriptId,
+          lifecycle: item.lifecycle,
+          message: item.message as unknown as Record<string, unknown>,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        });
+      }
+    }
+    return entries;
+  }
+
+  getTranscriptMessages(flowId: string, transcriptId: string): ChatUIMessage[] {
+    return this.getTranscriptEntries(flowId, transcriptId)
+      .map((entry) => entry.message as ChatUIMessage);
   }
 
   getCurrentMessage(flowId: string, sessionId: string): AssistantUIMessage | null {
     return this.current.get(keyFor(flowId, sessionId)) ?? null;
+  }
+
+  getActiveTurn(flowId: string, sessionId: string): {
+    message: AssistantUIMessage;
+    rootMessageId: string;
+    segmentIndex: number;
+  } | null {
+    const key = keyFor(flowId, sessionId);
+    const message = this.current.get(key);
+    if (!message) return null;
+    return {
+      message,
+      rootMessageId: this.rootMessageIds.get(key) ?? message.id,
+      segmentIndex: this.segmentIndex.get(key) ?? 0,
+    };
   }
 
   getHistory(flowId: string, sessionId: string): ChatUIMessage[] {
@@ -251,10 +362,13 @@ export class ChatJournal {
     this.rootMessageIds.delete(key);
     this.segmentIndex.delete(key);
     this.pendingGuideMessages.delete(key);
+    this.dirtyMessageIds.delete(key);
+    this.removedMessageIds.delete(key);
   }
 
   renameSession(flowId: string, fromSessionId: string, toSessionId: string): void {
     if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
+    this.persistence?.renameTranscriptSession(flowId, fromSessionId, toSessionId);
 
     const fromKey = keyFor(flowId, fromSessionId);
     const toKey = keyFor(flowId, toSessionId);
@@ -288,6 +402,28 @@ export class ChatJournal {
       this.pendingGuideMessages.set(toKey, this.pendingGuideMessages.get(fromKey) ?? []);
       this.pendingGuideMessages.delete(fromKey);
     }
+    if (this.dirtyMessageIds.has(fromKey)) {
+      this.dirtyMessageIds.set(toKey, new Set([
+        ...(this.dirtyMessageIds.get(toKey) ?? []),
+        ...(this.dirtyMessageIds.get(fromKey) ?? []),
+      ]));
+      this.dirtyMessageIds.delete(fromKey);
+    }
+    if (this.removedMessageIds.has(fromKey)) {
+      this.removedMessageIds.set(toKey, new Set([
+        ...(this.removedMessageIds.get(toKey) ?? []),
+        ...(this.removedMessageIds.get(fromKey) ?? []),
+      ]));
+      this.removedMessageIds.delete(fromKey);
+    }
+    if (this.agentSessionIds.has(fromKey)) {
+      this.agentSessionIds.set(toKey, this.agentSessionIds.get(fromKey) ?? "");
+      this.agentSessionIds.delete(fromKey);
+    }
+    for (const sessions of this.transcriptSessions.values()) {
+      if (!sessions.delete(fromSessionId)) continue;
+      sessions.add(toSessionId);
+    }
   }
 
   private nextCursor(flowId: string, transcriptId: string): number {
@@ -295,6 +431,101 @@ export class ChatJournal {
     const cursor = (this.cursors.get(key) ?? 0) + 1;
     this.cursors.set(key, cursor);
     return cursor;
+  }
+
+  private registerSession(
+    flowId: string,
+    sessionId: string,
+    transcriptId: string,
+    agentSessionId: string,
+  ): void {
+    const transcriptKey = keyFor(flowId, transcriptId);
+    const sessions = this.transcriptSessions.get(transcriptKey) ?? new Set<string>();
+    sessions.add(sessionId);
+    this.transcriptSessions.set(transcriptKey, sessions);
+    this.agentSessionIds.set(keyFor(flowId, sessionId), agentSessionId);
+  }
+
+  private messagesForPersistence(
+    flowId: string,
+    sessionId: string,
+    onlyMessageIds?: ReadonlySet<string>,
+  ): Array<{ message: ChatUIMessage; lifecycle: "active" | "complete" }> {
+    const key = keyFor(flowId, sessionId);
+    const ordered = new Map<string, { message: ChatUIMessage; lifecycle: "active" | "complete" }>();
+    for (const message of this.history.get(key) ?? []) {
+      ordered.set(message.id, { message, lifecycle: "complete" });
+    }
+    const current = this.current.get(key);
+    if (current) ordered.set(current.id, { message: current, lifecycle: "active" });
+    for (const message of this.pendingGuideMessages.get(key) ?? []) {
+      ordered.set(message.id, { message, lifecycle: "complete" });
+    }
+    if (!onlyMessageIds) return [...ordered.values()];
+    return [...ordered.values()].filter((item) => onlyMessageIds.has(item.message.id));
+  }
+
+  private commitMutation(
+    flowId: string,
+    sessionId: string,
+    transcriptId: string,
+    agentSessionId: string,
+  ): number {
+    const sessionKey = keyFor(flowId, sessionId);
+    if (!this.persistence) {
+      this.dirtyMessageIds.delete(sessionKey);
+      this.removedMessageIds.delete(sessionKey);
+      return this.nextCursor(flowId, transcriptId);
+    }
+    try {
+      const dirtyMessageIds = this.dirtyMessageIds.get(sessionKey) ?? new Set<string>();
+      const cursor = this.persistence.commitTranscriptMutation({
+        flowId,
+        channelId: transcriptId,
+        sessionId,
+        agentSessionId,
+        messages: this.messagesForPersistence(flowId, sessionId, dirtyMessageIds).map((item) => ({
+          message: item.message as unknown as Record<string, unknown>,
+          lifecycle: item.lifecycle,
+        })),
+        removedMessageIds: [...(this.removedMessageIds.get(sessionKey) ?? [])],
+      });
+      this.dirtyMessageIds.delete(sessionKey);
+      this.removedMessageIds.delete(sessionKey);
+      return cursor;
+    } catch (error) {
+      this.clearMemorySession(flowId, sessionId);
+      throw error;
+    }
+  }
+
+  private clearMemorySession(flowId: string, sessionId: string): void {
+    const key = keyFor(flowId, sessionId);
+    this.current.delete(key);
+    this.history.delete(key);
+    this.textIndex.delete(key);
+    this.reasoningIndex.delete(key);
+    this.rootMessageIds.delete(key);
+    this.segmentIndex.delete(key);
+    this.pendingGuideMessages.delete(key);
+    this.dirtyMessageIds.delete(key);
+    this.removedMessageIds.delete(key);
+    this.agentSessionIds.delete(key);
+  }
+
+  private markMessageRemoved(flowId: string, sessionId: string, messageId: string): void {
+    const key = keyFor(flowId, sessionId);
+    const removed = this.removedMessageIds.get(key) ?? new Set<string>();
+    removed.add(messageId);
+    this.removedMessageIds.set(key, removed);
+  }
+
+  private markMessageDirty(flowId: string, sessionId: string, messageId: string): void {
+    if (!messageId) return;
+    const key = keyFor(flowId, sessionId);
+    const dirty = this.dirtyMessageIds.get(key) ?? new Set<string>();
+    dirty.add(messageId);
+    this.dirtyMessageIds.set(key, dirty);
   }
 
   private appendHistory(flowId: string, sessionId: string, message: ChatUIMessage): void {
@@ -305,27 +536,52 @@ export class ChatJournal {
       const next = [...messages];
       next[existingIndex] = message;
       this.history.set(key, next);
+      this.markMessageDirty(flowId, sessionId, message.id);
       return;
     }
     this.history.set(key, [...messages, message]);
+    this.markMessageDirty(flowId, sessionId, message.id);
   }
 
-  private recordPendingGuideBoundary(flowId: string, sessionId: string, message: UserUIMessage): void {
+  private recordPendingGuideBoundary(flowId: string, sessionId: string, message: UserUIMessage): string[] {
     const key = keyFor(flowId, sessionId);
     const current = this.current.get(key);
     if (!current) {
       this.appendHistory(flowId, sessionId, message);
-      return;
+      return [];
     }
     const pending = this.pendingGuideMessages.get(key) ?? [];
     this.pendingGuideMessages.set(key, [...pending, message]);
+    this.markMessageDirty(flowId, sessionId, message.id);
     if (!this.hasMeaningfulParts(current)) {
+      this.markMessageRemoved(flowId, sessionId, current.id);
       this.flushPendingGuides(flowId, sessionId);
-      return;
+      const nextAssistant = this.createNextAssistantSegment(key, current);
+      this.current.set(key, nextAssistant);
+      this.markMessageDirty(flowId, sessionId, nextAssistant.id);
+      this.textIndex.set(key, -1);
+      this.reasoningIndex.set(key, -1);
+      return [current.id];
     }
     if (this.canCloseAssistantSegment(current)) {
       this.closeCurrentSegmentBeforePendingGuides(flowId, sessionId);
     }
+    return [];
+  }
+
+  private activeTurnAfterTransition(
+    flowId: string,
+    sessionId: string,
+    previousMessageId: string | undefined,
+  ): JournalRecordResult["activeTurn"] {
+    const active = this.getActiveTurn(flowId, sessionId);
+    if (!active || active.message.id === previousMessageId) return undefined;
+    return {
+      messageId: active.message.id,
+      rootMessageId: active.rootMessageId,
+      segmentIndex: active.segmentIndex,
+      startedAt: active.message.metadata?.turnTiming?.startedAt ?? active.message.createdAt ?? new Date().toISOString(),
+    };
   }
 
   private flushPendingGuideBoundaryBeforeEvent(flowId: string, sessionId: string, eventType: string): void {
@@ -374,7 +630,9 @@ export class ChatJournal {
     }
     this.flushPendingGuides(flowId, sessionId);
     if (createNextSegment && current) {
-      this.current.set(key, this.createNextAssistantSegment(key, current));
+      const nextAssistant = this.createNextAssistantSegment(key, current);
+      this.current.set(key, nextAssistant);
+      this.markMessageDirty(flowId, sessionId, nextAssistant.id);
       this.textIndex.set(key, -1);
       this.reasoningIndex.set(key, -1);
     } else {

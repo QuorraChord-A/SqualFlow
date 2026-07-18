@@ -66,6 +66,7 @@ export type LeaderRuntime = {
     leaderAgentSessionId: string;
     messageId?: string;
     attachments?: MessageImageAttachment[];
+    beforeDeliver?: () => void;
   }) => Promise<{ accepted: true; messageId: string }>;
   getContextUsage: (flowId: string) => Promise<ContextUsageSnapshot | null>;
   compactContext: (flowId: string) => Promise<ContextUsageSnapshot | null>;
@@ -312,6 +313,7 @@ class LeaderFlowStream {
     leaderAgentSessionId: string;
     messageId?: string;
     attachments?: MessageImageAttachment[];
+    beforeDeliver?: () => void;
   }) {
     if (!this.acceptsInput || !this.active) {
       throw new Error("Leader is not currently running");
@@ -319,6 +321,7 @@ class LeaderFlowStream {
     if (this.active.turn.leaderAgentSessionId !== input.leaderAgentSessionId) {
       throw new Error("Leader session does not match the running stream");
     }
+    input.beforeDeliver?.();
     this.active.guideResultDeferrals = (this.active.guideResultDeferrals ?? 0) + 1;
     this.input.push(this.runtimeAdapter.createLeaderGuideMessage(
       input.flowId,

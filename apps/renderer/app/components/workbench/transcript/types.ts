@@ -69,6 +69,10 @@ export type TimelineInputMessage = {
   id: string;
   role: "assistant" | "user";
   parts: TimelineInputPart[];
+  metadata?: {
+    decisionCardId?: string;
+    decisionStatus?: "resolved" | "cancelled";
+  } & Record<string, unknown>;
 };
 
 export type ToolKind =

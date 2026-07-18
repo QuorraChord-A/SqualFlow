@@ -26,14 +26,18 @@ export type HistorySessionBoundary = {
 
 export type TranscriptActiveTurn = {
   message_id: string;
+  root_message_id?: string;
+  segment_index?: number;
   started_at: string;
 };
 
 export type WsInMessage =
   | { type: "flow:state"; flow_id: string; data: any }
+  | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
   | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
-  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { cursor: number; event: any } }
-  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { cursor: number; messages: UIMessage[]; history_boundaries?: HistorySessionBoundary[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
+  | { type: "flow:queue_state"; flow_id: string; log_id?: string; data: { messages: Array<Record<string, unknown>> } }
+  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
+  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; messages: UIMessage[]; history_boundaries?: HistorySessionBoundary[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
   | { type: "flow:status"; flow_id: string; data: any }
   | { type: "task:event"; flow_id: string; data: any }
   | { type: "user_turn:event"; flow_id: string; data: any }
@@ -69,6 +73,136 @@ export type WsInMessage =
 export type WsMessageHandler = (msg: WsInMessage) => void;
 export type WsEventHandler = (msg: any) => void;
 
+const MESSAGE_OUTBOX_STORAGE_KEY = "squadflow.messageOutbox.v1";
+const MESSAGE_OUTBOX_DB_NAME = "squadflow-message-outbox";
+const MESSAGE_OUTBOX_DB_VERSION = 1;
+const MESSAGE_OUTBOX_STORE = "messages";
+let indexedOutboxSequence = 0;
+let indexedOutboxChain: Promise<void> = Promise.resolve();
+type IndexedOutboxRecord = { logId: string; sequence: number; data: Record<string, any> };
+const OUTBOX_MESSAGE_TYPES = new Set([
+  "flow:message",
+  "flow:guide",
+  "flow:queue_add",
+  "flow:queue_delete",
+  "flow:queue_reorder",
+  "flow:queue_dispatch",
+  "flow:queue_guide",
+  "flow:queue_clear",
+]);
+
+function readOutbox(): Record<string, any>[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MESSAGE_OUTBOX_STORAGE_KEY) ?? "[]") as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is Record<string, any> => Boolean(item && typeof item === "object" && !Array.isArray(item)))
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeOutbox(messages: Record<string, any>[]): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    if (messages.length === 0) {
+      window.localStorage.removeItem(MESSAGE_OUTBOX_STORAGE_KEY);
+      return true;
+    }
+    window.localStorage.setItem(MESSAGE_OUTBOX_STORAGE_KEY, JSON.stringify(messages));
+    return true;
+  } catch (error) {
+    console.error("[ws] failed to persist message outbox", error);
+    return false;
+  }
+}
+
+function openIndexedOutbox(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === "undefined") return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const request = indexedDB.open(MESSAGE_OUTBOX_DB_NAME, MESSAGE_OUTBOX_DB_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(MESSAGE_OUTBOX_STORE)) {
+        request.result.createObjectStore(MESSAGE_OUTBOX_STORE, { keyPath: "logId" });
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+    request.onblocked = () => resolve(null);
+  });
+}
+
+function runIndexedOutboxTransaction(
+  mode: IDBTransactionMode,
+  operation: (store: IDBObjectStore) => void,
+): Promise<boolean> {
+  return openIndexedOutbox().then((database) => {
+    if (!database) return false;
+    return new Promise<boolean>((resolve, reject) => {
+      const transaction = database.transaction(MESSAGE_OUTBOX_STORE, mode);
+      transaction.oncomplete = () => {
+        database.close();
+        resolve(true);
+      };
+      transaction.onerror = () => {
+        database.close();
+        reject(transaction.error ?? new Error("IndexedDB outbox transaction failed"));
+      };
+      transaction.onabort = transaction.onerror;
+      operation(transaction.objectStore(MESSAGE_OUTBOX_STORE));
+    });
+  });
+}
+
+function enqueueIndexedOutboxOperation(operation: () => Promise<boolean>): Promise<boolean> {
+  const result = indexedOutboxChain
+    .then(operation)
+    .catch((error) => {
+      console.error("[ws] failed to update IndexedDB message outbox", error);
+      return false;
+    });
+  indexedOutboxChain = result.then(() => undefined);
+  return result;
+}
+
+function persistIndexedOutboxMessage(data: Record<string, any>): Promise<boolean> {
+  const logId = typeof data.log_id === "string" ? data.log_id : "";
+  if (!logId) return Promise.resolve(false);
+  const sequence = Date.now() * 10_000 + (++indexedOutboxSequence % 10_000);
+  return enqueueIndexedOutboxOperation(() => runIndexedOutboxTransaction("readwrite", (store) => {
+    store.put({ logId, sequence, data });
+  }));
+}
+
+function deleteIndexedOutboxMessage(logId: string) {
+  enqueueIndexedOutboxOperation(() => runIndexedOutboxTransaction("readwrite", (store) => {
+    store.delete(logId);
+  }));
+}
+
+async function readIndexedOutbox(): Promise<IndexedOutboxRecord[]> {
+  await indexedOutboxChain;
+  const database = await openIndexedOutbox();
+  if (!database) return [];
+  return new Promise((resolve) => {
+    const transaction = database.transaction(MESSAGE_OUTBOX_STORE, "readonly");
+    const request = transaction.objectStore(MESSAGE_OUTBOX_STORE).getAll();
+    request.onsuccess = () => {
+      const records = (request.result as Array<{ logId?: unknown; sequence?: unknown; data?: unknown }>)
+        .filter((record): record is IndexedOutboxRecord =>
+          typeof record.logId === "string"
+          && typeof record.sequence === "number"
+          && Boolean(record.data && typeof record.data === "object" && !Array.isArray(record.data)))
+        .sort((left, right) => left.sequence - right.sequence);
+      resolve(records);
+    };
+    request.onerror = () => resolve([]);
+    transaction.oncomplete = () => database.close();
+    transaction.onerror = () => database.close();
+  });
+}
+
 export class SquadFlowWs {
   private ws: WebSocket | null = null;
   private handlers: Set<WsMessageHandler> = new Set();
@@ -78,6 +212,7 @@ export class SquadFlowWs {
   private _connected = false;
   private _logSeq = 0;
   private pendingMessages: Record<string, any>[] = [];
+  private outboxFlush: Promise<void> | null = null;
   private subscribedFlowIds: Set<string> = new Set();
   private subscriptionRefs: Map<string, number> = new Map();
 
@@ -116,16 +251,26 @@ export class SquadFlowWs {
         }));
       }
 
-      while (this.pendingMessages.length > 0) {
-        const data = this.pendingMessages.shift()!;
-        this.ws!.send(JSON.stringify({ data }));
-      }
+      const socket = this.ws!;
+      const flush = this.flushPersistedMessages(socket);
+      this.outboxFlush = flush;
+      void flush.finally(() => {
+        if (this.outboxFlush !== flush) return;
+        this.outboxFlush = null;
+        if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+        while (this.pendingMessages.length > 0) this.sendRaw(this.pendingMessages.shift()!, socket);
+      });
     };
 
     this.ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
         const logId = msg.log_id || '';
+        if (logId) {
+          const remaining = readOutbox().filter((item) => item.log_id !== logId);
+          writeOutbox(remaining);
+          deleteIndexedOutboxMessage(logId);
+        }
         if (logId) {
           console.log(`[ws][${logId}] ← recv`, msg.type, msg.session_id?.slice(0, 8),
             msg.data?.event?.type || msg.data?.length || '');
@@ -178,19 +323,62 @@ export class SquadFlowWs {
     if (!data.log_id) {
       data.log_id = this.genLogId();
     }
+    const shouldPersistUntilReceipt = OUTBOX_MESSAGE_TYPES.has(String(data.type ?? ""));
+    let persistedUntilReceipt = false;
+    let indexedPersistence = Promise.resolve(false);
+    if (shouldPersistUntilReceipt) {
+      const outbox = readOutbox().filter((item) => item.log_id !== data.log_id);
+      persistedUntilReceipt = writeOutbox([...outbox, data]);
+      indexedPersistence = persistIndexedOutboxMessage(data);
+    }
 
-    if (this.ws?.readyState !== WebSocket.OPEN) {
+    if (this.ws?.readyState !== WebSocket.OPEN || this.outboxFlush) {
       // Queue message if not intentionally disconnected
-      if (!this.intentionalDisconnect) {
+      if (!this.intentionalDisconnect && (this.outboxFlush !== null || !shouldPersistUntilReceipt || !persistedUntilReceipt)) {
         this.pendingMessages.push(data);
       }
       console.warn('[ws] not connected, message queued');
       return;
     }
+    if (shouldPersistUntilReceipt && !persistedUntilReceipt) {
+      void indexedPersistence.then(() => {
+        if (this.ws?.readyState === WebSocket.OPEN && !this.outboxFlush) {
+          this.sendRaw(data);
+        } else if (!this.intentionalDisconnect) {
+          this.pendingMessages.push(data);
+        }
+      });
+      return;
+    }
+    this.sendRaw(data);
+  }
+
+  private sendRaw(data: Record<string, any>, expectedSocket?: WebSocket) {
+    const socket = expectedSocket ?? this.ws;
+    if (!socket || this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
     const logId = data.log_id;
     console.log(`[ws][${logId}] → send`, data.type, data.flow_id?.slice(0, 12),
       data.content?.slice(0, 50) || '');
-    this.ws.send(JSON.stringify({ data }));
+    socket.send(JSON.stringify({ data }));
+  }
+
+  private async flushPersistedMessages(socket: WebSocket) {
+    const indexedRecords = await readIndexedOutbox();
+    if (this.ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    const localOutbox = readOutbox();
+    const indexedLogIds = new Set(indexedRecords.map((record) => record.logId));
+    const replay = [
+      ...indexedRecords.map((record) => record.data),
+      ...localOutbox.filter((data) => !indexedLogIds.has(data.log_id)),
+      ...this.pendingMessages.splice(0),
+    ];
+    const sentLogIds = new Set<string>();
+    for (const data of replay) {
+      const logId = typeof data.log_id === "string" ? data.log_id : "";
+      if (logId && sentLogIds.has(logId)) continue;
+      if (logId) sentLogIds.add(logId);
+      this.sendRaw(data, socket);
+    }
   }
 
   private sendSubscriptionMessage(type: "flow:subscribe" | "flow:unsubscribe", flowId: string) {

@@ -186,7 +186,7 @@ describe("ws schemas", () => {
       agent_session_id: "as-1",
       flow_expert_id: "as-1",
       log_id: "L1",
-      data: { cursor: 7, event: { type: "text-delta", messageId: "msg-1", id: "blk-1", delta: "hello" } },
+      data: { stream_epoch: "epoch-1", cursor: 7, event: { type: "text-delta", messageId: "msg-1", id: "blk-1", delta: "hello" } },
     });
     expect(parsed.type).toBe("session:transcript_event");
   });
@@ -200,6 +200,7 @@ describe("ws schemas", () => {
       flow_expert_id: "as-1",
       log_id: "L1",
       data: {
+        stream_epoch: "epoch-1",
         cursor: 7,
         event: { type: "text-delta", messageId: "msg-1", id: "blk-1", delta: "hello" },
         agent: "Frontend",

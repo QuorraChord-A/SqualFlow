@@ -38,6 +38,8 @@ function markRuntimeMessageProtocolV2(store: ReturnType<typeof createStore>) {
     CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
     INSERT INTO app_metadata (key, value, updated_at)
     VALUES ('runtime_message_protocol_version', '2', 'now');
+    INSERT INTO app_metadata (key, value, updated_at)
+    VALUES ('canonical_transcript_version', '2', 'now');
   `);
 }
 
@@ -219,6 +221,19 @@ describe("store", () => {
 
     expect(columnNames(store, "flows")).not.toEqual(expect.arrayContaining(["workspace_id"]));
     expect(store.getFlow("flow-legacy")).toEqual(expect.objectContaining({ isPinned: 0 }));
+  });
+
+  it("clears pre-canonical Flows instead of retaining a mixed history architecture", () => {
+    const store = tempStore();
+    store.migrate();
+    store.createFlow({ id: "flow-pre-canonical", workspaceId: "ws-default", name: "Old Flow", description: "", projectId: null });
+    store.sqlite.prepare("DELETE FROM app_metadata WHERE key = 'canonical_transcript_version'").run();
+
+    store.migrate();
+
+    expect(store.getFlow("flow-pre-canonical")).toBeUndefined();
+    expect(store.sqlite.prepare("SELECT value FROM app_metadata WHERE key = 'canonical_transcript_version'").get())
+      .toEqual({ value: "2" });
   });
 
   it("requires decision cards to belong to an active UserTurn", () => {
@@ -782,10 +797,9 @@ describe("store", () => {
     }
   });
 
-  it("does not keep deprecated message and legacy runtime tables in the business schema", () => {
+  it("replaces the deprecated message table and removes legacy runtime tables", () => {
     const store = tempStore();
     const deprecatedTables = [
-      "chat_messages",
       "team_messages",
       "agent_inbox",
       "send_messages",
@@ -810,6 +824,13 @@ describe("store", () => {
       ).toEqual([]);
     }
     expect(tableNames(store)).toContain("flow_experts");
+    expect(columnNames(store, "chat_messages")).toEqual(expect.arrayContaining([
+      "flow_id",
+      "channel_id",
+      "message_id",
+      "position",
+      "payload_json",
+    ]));
     expect(columnNames(store, "flow_experts")).toEqual(expect.arrayContaining([
       "flow_id",
       "expert_id",

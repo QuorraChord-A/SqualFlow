@@ -593,7 +593,7 @@ describe("LeaderChatPanel", () => {
           flow_id: "flow-1",
           session_id: "sdk-leader-1",
           agent_session_id: "leader-session-1",
-          data: { cursor: 0, messages: [] },
+          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
         } as unknown as WsInMessage);
         handler({
           type: "session:transcript_event",
@@ -608,7 +608,11 @@ describe("LeaderChatPanel", () => {
     await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "排队消息 1");
     await user.keyboard("{Enter}");
 
-    expect(wsClient.send).not.toHaveBeenCalled();
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_add",
+      flow_id: "flow-1",
+      content: "排队消息 1",
+    }));
     expect(screen.getByText("拖拽排序")).toBeInTheDocument();
     expect(screen.getByText("排队消息 1")).toBeInTheDocument();
 
@@ -622,41 +626,29 @@ describe("LeaderChatPanel", () => {
     await user.type(composerInput, "排队消息 33");
     await user.keyboard("{Enter}");
 
-    expect(wsClient.send).not.toHaveBeenCalled();
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_add",
+      flow_id: "flow-1",
+      content: "排队消息 33",
+    }));
     expect(screen.getByText("排队消息 33")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "引导消息 1" }));
 
-    expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
-    expect(wsClient.sendFlowGuide).toHaveBeenCalledWith(
-      "flow-1",
-      "排队消息 33",
-      expect.stringMatching(/^msg-user-guided-/),
-      "log-1",
-    );
+    const queueGuideCall = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:queue_guide");
+    expect(queueGuideCall).toEqual(expect.objectContaining({
+      type: "flow:queue_guide",
+      flow_id: "flow-1",
+      client_message_id: expect.stringMatching(/^msg-user-guided-/),
+      log_id: "log-1",
+    }));
+    expect(screen.getByTestId("running-message-queue")).toBeInTheDocument();
     expect(await screen.findByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
     expect(screen.getByText("已引导对话")).toBeInTheDocument();
 
-    const clientMessageId = vi.mocked(wsClient.sendFlowGuide).mock.calls[0]?.[2] ?? "msg-user-guided-test";
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "flow:guide_ack",
-          flow_id: "flow-1",
-          log_id: "log-1",
-          data: {
-            accepted: true,
-            message_id: clientMessageId,
-            client_message_id: clientMessageId,
-            leader_agent_session_id: "leader-session-1",
-          },
-        });
-      }
-    });
-
-    expect(screen.getByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
-    expect(screen.getByText("已引导对话")).toBeInTheDocument();
-
+    const clientMessageId = String(queueGuideCall?.client_message_id ?? "msg-user-guided-test");
     act(() => {
       for (const handler of wsMessageHandlers) {
         handler({
@@ -673,13 +665,44 @@ describe("LeaderChatPanel", () => {
                 role: "user",
                 parts: [{ type: "text", text: "排队消息 33" }],
                 content: "排队消息 33",
-                metadata: { localMessageKind: "running-guide" },
+                metadata: { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
               },
             },
           },
         } as unknown as WsInMessage);
       }
     });
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "flow:guide_ack",
+          flow_id: "flow-1",
+          log_id: "log-1",
+          data: {
+            accepted: true,
+            message_id: clientMessageId,
+            client_message_id: clientMessageId,
+            leader_agent_session_id: "leader-session-1",
+          },
+        });
+      }
+    });
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "flow:queue_state",
+          flow_id: "flow-1",
+          log_id: "log-1",
+          data: { messages: [] },
+        } as unknown as WsInMessage);
+      }
+    });
+    expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
+
+    expect(screen.getByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
+    expect(screen.getByText("已引导对话")).toBeInTheDocument();
 
     expect(screen.getByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
     expect(screen.queryByTestId("chat-message-guide")).not.toBeInTheDocument();
@@ -692,14 +715,14 @@ describe("LeaderChatPanel", () => {
           flow_id: "flow-1",
           session_id: "sdk-leader-1",
           agent_session_id: "leader-session-1",
-          data: { cursor: 3, event: { type: "text-start", messageId: "msg-assistant-1", id: "text-after-guide" } },
+          data: { cursor: 3, event: { type: "text-start", messageId: "msg-assistant-1:guide-1", id: "text-after-guide" } },
         } as unknown as WsInMessage);
         handler({
           type: "session:transcript_event",
           flow_id: "flow-1",
           session_id: "sdk-leader-1",
           agent_session_id: "leader-session-1",
-          data: { cursor: 4, event: { type: "text-delta", messageId: "msg-assistant-1", id: "text-after-guide", delta: "已收到引导" } },
+          data: { cursor: 4, event: { type: "text-delta", messageId: "msg-assistant-1:guide-1", id: "text-after-guide", delta: "已收到引导" } },
         } as unknown as WsInMessage);
       }
     });
@@ -804,7 +827,18 @@ describe("LeaderChatPanel", () => {
     expect(queue).toHaveTextContent("那这也发出来吧");
     expect(queue).not.toHaveTextContent("Browser comments");
     expect(queue).not.toHaveTextContent("打开任务：你好");
-    expect(wsClient.send).not.toHaveBeenCalled();
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_add",
+      flow_id: "flow-1",
+      content: "那这也发出来吧",
+      attachments: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "browser_comment",
+          selector: "button#task-open",
+          marker_number: 1,
+        }),
+      ]),
+    }));
 
     act(() => {
       for (const handler of wsMessageHandlers) {
@@ -824,21 +858,52 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    await waitFor(() => {
-      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-        type: "flow:message",
-        flow_id: "flow-1",
-        content: "那这也发出来吧",
-        attachments: expect.arrayContaining([
-          expect.objectContaining({
-            kind: "browser_comment",
-            selector: "button#task-open",
-            marker_number: 1,
-          }),
-        ]),
-      }));
+    expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_dispatch",
+      flow_id: "flow-1",
+    }));
+
+    const queueAddCall = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:queue_add");
+    const queuedMessageId = String(queueAddCall?.client_message_id ?? "msg-user-browser-queued");
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "session:transcript_snapshot",
+          flow_id: "flow-1",
+          session_id: "sdk-leader-1",
+          agent_session_id: "leader-session-1",
+          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
+        } as unknown as WsInMessage);
+        handler({
+          type: "flow:queue_state",
+          flow_id: "flow-1",
+          data: { messages: [] },
+        } as unknown as WsInMessage);
+        handler({
+          type: "session:transcript_event",
+          flow_id: "flow-1",
+          session_id: "sdk-leader-1",
+          agent_session_id: "leader-session-1",
+          data: {
+            cursor: 1,
+            event: {
+              type: "message-added",
+              message: {
+                id: queuedMessageId,
+                role: "user",
+                parts: [{ type: "text", text: "那这也发出来吧" }],
+                content: "那这也发出来吧",
+                metadata: queueAddCall?.client_payload,
+              },
+            },
+          },
+        } as unknown as WsInMessage);
+      }
     });
-    expect(await screen.findByText("那这也发出来吧")).toBeInTheDocument();
+
+    expect(await screen.findByTestId("chat-message-user")).toHaveTextContent("那这也发出来吧");
     expect(screen.getByText("1 条注释")).toBeInTheDocument();
   });
 
@@ -1136,14 +1201,18 @@ describe("LeaderChatPanel", () => {
     await user.keyboard("{Enter}");
     await user.click(screen.getByRole("button", { name: "引导消息 1" }));
 
-    const call = vi.mocked(wsClient.sendFlowGuide).mock.calls[0];
-    expect(call).toEqual([
-      "flow-1",
-      "这个是什么",
-      expect.stringMatching(/^msg-user-guided-/),
-      "log-1",
-      expect.any(Array),
-    ]);
+    const call = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:queue_guide");
+    const queuedCall = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:queue_add");
+    expect(call).toEqual(expect.objectContaining({
+      type: "flow:queue_guide",
+      flow_id: "flow-1",
+      client_message_id: expect.stringMatching(/^msg-user-guided-/),
+      log_id: "log-1",
+    }));
     expect(reset).not.toHaveBeenCalled();
     expect(stopElementPicker).toHaveBeenCalled();
     expect(await screen.findByTestId("chat-message-user")).toHaveTextContent("这个是什么");
@@ -1151,8 +1220,8 @@ describe("LeaderChatPanel", () => {
     expect(screen.getByText("已引导对话")).toBeInTheDocument();
     expect(screen.queryByText(/Browser comments/i)).not.toBeInTheDocument();
 
-    const guideContent = String(call?.[1] ?? "missing guide content");
-    const clientMessageId = String(call?.[2] ?? "msg-user-guided-test");
+    const guideContent = "这个是什么";
+    const clientMessageId = String(call?.client_message_id ?? "msg-user-guided-test");
     act(() => {
       for (const handler of wsMessageHandlers) {
         handler({
@@ -1169,7 +1238,12 @@ describe("LeaderChatPanel", () => {
                 role: "user",
                 parts: [{ type: "text", text: guideContent }],
                 content: guideContent,
-                metadata: { localMessageKind: "running-guide" },
+                metadata: {
+                  localMessageKind: "running-guide",
+                  guideStatusLabel: "已引导对话",
+                  browserElementAttachments: queuedCall?.client_payload?.browserElementAttachments,
+                  imageAttachments: queuedCall?.client_payload?.imageAttachments,
+                },
               },
             },
           },
@@ -1185,95 +1259,9 @@ describe("LeaderChatPanel", () => {
 
   });
 
-  it("queues input after returning to a running flow before flow state is confirmed", async () => {
-    const user = userEvent.setup();
-    const { wsClient } = await import("../../lib/ws");
-    const activeTurn = {
-      id: "turn-flow-1",
-      triggerMessageId: "msg-user-1",
-      status: "active",
-      startedAt: "2026-06-29T07:00:00.000Z",
-      activeStartedAt: "2026-06-29T07:00:00.000Z",
-      activeDurationMs: 0,
-      completedAt: null,
-    };
-
-    const { rerender } = renderPanel({ userTurns: [activeTurn] });
-
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "22次就行");
-    await user.keyboard("{Enter}");
-    await user.click(screen.getByRole("button", { name: "发送给 Leader 消息 1" }));
-    expect(wsClient.sendFlowGuide).not.toHaveBeenCalled();
-    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-      type: "flow:message",
-      flow_id: "flow-1",
-      content: "22次就行",
-      client_message_id: expect.stringMatching(/^msg-user-/),
-      log_id: "log-1",
-    }));
-
-    vi.mocked(wsClient.send).mockClear();
-
-    rerender(
-      <LeaderChatPanel
-        flowId="flow-2"
-        leaderAgentSessionId="leader-session-2"
-        flowStatus="ready"
-        decisionCardStatuses={{}}
-        decisionCardAnswers={{}}
-        decisionCards={[]}
-        specCards={{}}
-        userTurns={[]}
-        onOpenSpecPreview={vi.fn()}
-      />,
-    );
-
-    rerender(
-      <LeaderChatPanel
-        flowId="flow-1"
-        leaderAgentSessionId="leader-session-1"
-        flowStatus="ready"
-        decisionCardStatuses={{}}
-        decisionCardAnswers={{}}
-        decisionCards={[]}
-        specCards={{}}
-        userTurns={[]}
-        onOpenSpecPreview={vi.fn()}
-      />,
-    );
-
-    await user.type(screen.getByRole("textbox"), "25次就行");
-    await user.keyboard("{Enter}");
-
-    expect(wsClient.send).not.toHaveBeenCalled();
-    expect(screen.getByTestId("running-message-queue")).toHaveTextContent("25次就行");
-
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "flow:state",
-          flow_id: "flow-1",
-          data: {
-            user_turns: [{
-              user_turn_id: "turn-flow-1",
-              trigger_message_id: "msg-user-1",
-              status: "active",
-              started_at: "2026-06-29T07:00:00.000Z",
-              active_started_at: "2026-06-29T07:00:00.000Z",
-              active_duration_ms: 0,
-              completed_at: null,
-            }],
-          },
-        } as unknown as WsInMessage);
-      }
-    });
-
-    expect(screen.getByTestId("running-message-queue")).toHaveTextContent("25次就行");
-    expect(wsClient.send).not.toHaveBeenCalled();
-  });
-
   it("shares queued running messages between full and compact composer instances", async () => {
     const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
     const activeTurn = {
       id: "turn-shared",
       triggerMessageId: "msg-user-shared",
@@ -1322,184 +1310,11 @@ describe("LeaderChatPanel", () => {
 
     expect(within(screen.getByTestId("compact-panel")).getByText("共享排队消息")).toBeInTheDocument();
     expect(within(screen.getByTestId("full-panel")).getByText("共享排队消息")).toBeInTheDocument();
-    expect(window.localStorage.getItem("squadflow.runningMessageQueue.v1:flow-1")).toContain("共享排队消息");
-  });
-
-  it("does not drain restored queued messages before the flow state is known", async () => {
-    const { wsClient } = await import("../../lib/ws");
-    window.localStorage.setItem(
-      "squadflow.runningMessageQueue.v1:flow-1",
-      JSON.stringify([{ id: "queued-restored-1", content: "刷新后仍在的排队消息" }]),
-    );
-
-    renderPanel({ userTurns: [] });
-
-    expect(await screen.findByText("刷新后仍在的排队消息")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "flow:state",
-          flow_id: "flow-1",
-          data: {
-            user_turns: [{
-              user_turn_id: "turn-active",
-              trigger_message_id: "msg-user-active",
-              status: "active",
-              started_at: "2026-06-29T07:00:00.000Z",
-              active_started_at: "2026-06-29T07:00:00.000Z",
-              active_duration_ms: 0,
-              completed_at: null,
-            }],
-          },
-        } as unknown as WsInMessage);
-      }
-    });
-
-    expect(screen.getByText("刷新后仍在的排队消息")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-  });
-
-  it("queues new input when a restored queue is still waiting for flow state", async () => {
-    const user = userEvent.setup();
-    const { wsClient } = await import("../../lib/ws");
-    window.localStorage.setItem(
-      "squadflow.runningMessageQueue.v1:flow-1",
-      JSON.stringify([{ id: "queued-restored-4", content: "刷新前排队消息" }]),
-    );
-
-    renderPanel({ userTurns: [] });
-
-    expect(await screen.findByText("刷新前排队消息")).toBeInTheDocument();
-
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "刷新后第二条排队消息");
-    await user.keyboard("{Enter}");
-
-    expect(wsClient.send).not.toHaveBeenCalled();
-    expect(screen.getByText("刷新前排队消息")).toBeInTheDocument();
-    expect(screen.getByText("刷新后第二条排队消息")).toBeInTheDocument();
-    expect(screen.queryByText("正在思考")).not.toBeInTheDocument();
-    expect(window.localStorage.getItem("squadflow.runningMessageQueue.v1:flow-1")).toContain("刷新前排队消息");
-    expect(window.localStorage.getItem("squadflow.runningMessageQueue.v1:flow-1")).toContain("刷新后第二条排队消息");
-  });
-
-  it("keeps restored queued messages when the flow is already idle after navigation", async () => {
-    const { wsClient } = await import("../../lib/ws");
-    window.localStorage.setItem(
-      "squadflow.runningMessageQueue.v1:flow-1",
-      JSON.stringify([{ id: "queued-restored-2", content: "切回来仍保留" }]),
-    );
-
-    renderPanel({ userTurns: [] });
-
-    expect(await screen.findByText("切回来仍保留")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "flow:state",
-          flow_id: "flow-1",
-          data: { user_turns: [] },
-        } as unknown as WsInMessage);
-      }
-    });
-
-    expect(screen.getByText("切回来仍保留")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-  });
-
-  it("drains restored queued messages after the restored running flow finishes", async () => {
-    const { wsClient } = await import("../../lib/ws");
-    const restoredBrowserAttachment = {
-      tagName: "button",
-      text: "恢复后的按钮",
-      selector: "button[data-testid=\"restored]:·button\"]",
-      role: "button",
-      ariaLabel: "恢复后的按钮",
-      title: "",
-      url: "https://restored.test/page",
-      pageTitle: "恢复页面",
-      markerNumber: 1,
-      comment: "截图失败也要保留这条评论",
-      viewport: { width: 1280, height: 720 },
-      rect: { x: 10, y: 20, width: 100, height: 40 },
-      attributes: { id: "", className: "", href: "", name: "", type: "button" },
-      id: "restored-browser-comment",
-      addedAt: Date.now(),
-    };
-    window.localStorage.setItem(
-      "squadflow.runningMessageQueue.v1:flow-1",
-      JSON.stringify([{
-        id: "queued-restored-3",
-        content: "运行结束后发送",
-        browserElementAttachments: [restoredBrowserAttachment],
-      }]),
-    );
-
-    renderPanel({ userTurns: [] });
-
-    expect(await screen.findByText("运行结束后发送")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "flow:state",
-          flow_id: "flow-1",
-          data: {
-            user_turns: [{
-              user_turn_id: "turn-restored-active",
-              trigger_message_id: "msg-user-restored-active",
-              status: "active",
-              started_at: "2026-06-29T07:00:00.000Z",
-              active_started_at: "2026-06-29T07:00:00.000Z",
-              active_duration_ms: 0,
-              completed_at: null,
-            }],
-          },
-        } as unknown as WsInMessage);
-      }
-    });
-
-    expect(screen.getByText("运行结束后发送")).toBeInTheDocument();
-    expect(wsClient.send).not.toHaveBeenCalled();
-
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "user_turn:event",
-          flow_id: "flow-1",
-          data: {
-            user_turn_id: "turn-restored-active",
-            trigger_message_id: "msg-user-restored-active",
-            status: "completed",
-            started_at: "2026-06-29T07:00:00.000Z",
-            active_started_at: null,
-            active_duration_ms: 10_000,
-            completed_at: "2026-06-29T07:00:10.000Z",
-          },
-        } as unknown as WsInMessage);
-      }
-    });
-
-    await waitFor(() => {
-      expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
-        type: "flow:message",
-        flow_id: "flow-1",
-        content: "运行结束后发送",
-        attachments: [{
-          id: "restored-browser-comment",
-          kind: "browser_comment",
-          marker_number: 1,
-          comment: "截图失败也要保留这条评论",
-          label: "恢复后的按钮",
-          page_url: "https://restored.test/page",
-          selector: "button[data-testid=\"restored]:·button\"]",
-        }],
-      }));
-    });
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_add",
+      flow_id: "flow-1",
+      content: "共享排队消息",
+    }));
   });
 
   it("shows the submitted user message and chat loading state immediately", async () => {
@@ -1513,7 +1328,7 @@ describe("LeaderChatPanel", () => {
           type: "session:transcript_snapshot",
           flow_id: "flow-1",
           agent_session_id: "leader-session-1",
-          data: { cursor: 0, messages: [] },
+          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
         });
       }
     });
@@ -1530,8 +1345,9 @@ describe("LeaderChatPanel", () => {
           type: "session:transcript_snapshot",
           flow_id: "flow-1",
           agent_session_id: "leader-session-1",
-          data: {
-            cursor: 0,
+        data: {
+          stream_epoch: "legacy",
+          cursor: 0,
             messages: [
               {
                 id: "msg-user-remote",
@@ -2421,7 +2237,7 @@ describe("LeaderChatPanel", () => {
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
   });
 
-  it("groups historical SDK messages when the SDK rebuilt the original user message id", async () => {
+  it("groups canonical messages by the stable UserTurn trigger id", async () => {
     renderPanel({
       userTurns: [{
         id: "utn-1",
@@ -2444,7 +2260,7 @@ describe("LeaderChatPanel", () => {
             cursor: 0,
             messages: [
               {
-                id: "msg-0",
+                id: "msg-user-original",
                 role: "user",
                 parts: [{ type: "text", text: "调研一下" }],
                 content: "调研一下",

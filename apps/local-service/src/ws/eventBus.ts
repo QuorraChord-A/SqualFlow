@@ -4,6 +4,15 @@ type Handler = (message: ServerWsMessage) => Promise<void> | void;
 
 export class EventBus {
   private readonly subscriptions = new Map<string, Map<string, Handler>>();
+  private readonly observers = new Map<string, Handler>();
+
+  subscribeAll(observerId: string, handler: Handler): void {
+    this.observers.set(observerId, handler);
+  }
+
+  unsubscribeAll(observerId: string): void {
+    this.observers.delete(observerId);
+  }
 
   subscribe(flowId: string, clientId: string, handler: Handler): void {
     const flowSubscriptions = this.subscriptions.get(flowId) ?? new Map<string, Handler>();
@@ -33,7 +42,10 @@ export class EventBus {
       throw new Error(`Event flow_id mismatch: expected ${flowId}, got ${parsedMessage.flow_id}`);
     }
 
-    const handlers = [...(this.subscriptions.get(flowId)?.values() ?? [])];
+    const handlers = [
+      ...(this.subscriptions.get(flowId)?.values() ?? []),
+      ...this.observers.values(),
+    ];
 
     await Promise.allSettled(handlers.map((handler) => Promise.resolve().then(() => handler(parsedMessage))));
   }
