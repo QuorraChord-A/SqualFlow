@@ -70,6 +70,29 @@ describe("seedExperts browser tool authorization", () => {
     expect(coder!.systemPrompt).toContain("不得把沙箱拒绝或工具错误报告成退出状态 0");
   });
 
+  it("keeps role prompts tool-aware without hard-coding the target stack", () => {
+    const store = tempStore();
+    const research = store.getExpert("exp-research");
+    const coder = store.getExpert("exp-coder");
+    const verify = store.getExpert("exp-verify");
+    const codeReview = store.getExpert("exp-codereview");
+
+    expect(research!.systemPrompt).toContain("仅在任务需要外部或时效性信息时使用 web_search");
+    expect(research!.systemPrompt).toContain("外部事实优先官方文档、规范或论文");
+
+    expect(coder!.systemPrompt).toContain("不预设语言、框架、版本、包管理器或目录结构");
+    expect(coder!.systemPrompt).toContain("任务涉及可见 Web UI 时使用 browser_*");
+    expect(coder!.systemPrompt).not.toContain("Next.js 15");
+    expect(coder!.systemPrompt).not.toContain("Fastify 后端");
+
+    expect(verify!.systemPrompt).toContain("自己执行命令和用户路径");
+    expect(verify!.systemPrompt).toContain("不替 Coder 修改项目");
+
+    expect(codeReview!.systemPrompt).toContain("只使用 read/search");
+    expect(codeReview!.systemPrompt).toContain("不得声称测试已运行");
+    expect(codeReview!.systemPrompt).not.toContain("Shell 与风险操作纪律");
+  });
+
   it("distinguishes an explicit pause from resuming a feedback-frozen run", () => {
     const store = tempStore();
     const leader = store.getExpert("exp-leader");
