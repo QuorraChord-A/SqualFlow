@@ -312,10 +312,6 @@ html[data-squadflow-desktop="true"] :where(
   box-shadow: none;
 }
 
-.sf-markdown [data-streamdown="table-wrapper"] > div:first-child:not([data-streamdown]) {
-  display: none;
-}
-
 .sf-markdown [data-streamdown="table"] {
   background: color-mix(in srgb, var(--ui-surface-card) 42%, transparent);
   box-shadow: none;
