@@ -229,6 +229,10 @@ desktop_build_production_services() {
     echo "Production local-service output is missing: $ROOT/apps/local-service/dist/main.js" >&2
     return 1
   }
+  # The asar root package.json is CJS (desktop). Node resolves module type from the nearest
+  # package.json, so dist ships its own minimal ESM marker; the dist copy rule places it in
+  # the asar as local-service/package.json. Prevents MODULE_TYPELESS_PACKAGE_JSON at startup.
+  printf '{\n  "type": "module"\n}\n' > "$ROOT/apps/local-service/dist/package.json"
   [[ -f "$ROOT/apps/renderer/.next/standalone/server.js" ]] || {
     echo "Standalone renderer output is missing: $ROOT/apps/renderer/.next/standalone/server.js" >&2
     return 1
@@ -273,6 +277,16 @@ desktop_verify_artifacts() {
       return 1
     }
   done
+
+  echo "Verifying packaged local-service module type..."
+  node -e '
+    const asar = require(require.resolve("@electron/asar", { paths: [process.argv[2]] }));
+    const pkg = JSON.parse(asar.extractFile(process.argv[1], "local-service/package.json").toString("utf8"));
+    if (pkg.type !== "module") throw new Error("asar local-service/package.json must declare \"type\": \"module\"");
+  ' "$APP_PATH/Contents/Resources/app.asar" "$ELECTRON_DIR" || {
+    echo "Packaged app.asar is missing an ESM local-service/package.json." >&2
+    return 1
+  }
 
   echo "Verifying DMG..."
   hdiutil verify "$DMG_PATH"
@@ -339,6 +353,12 @@ desktop_verify_packaged_runtime() (
     echo "Packaged backend became ready but did not create its application database." >&2
     exit 1
   }
+
+  if grep -R -I -q "MODULE_TYPELESS_PACKAGE_JSON" "$temp_dir"; then
+    echo "Packaged startup logs contain MODULE_TYPELESS_PACKAGE_JSON; the local-service ESM marker is missing." >&2
+    grep -R -I -n "MODULE_TYPELESS_PACKAGE_JSON" "$temp_dir" >&2 || true
+    exit 1
+  fi
   echo "Self-contained packaged App smoke test passed."
 )
 

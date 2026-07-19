@@ -2,14 +2,15 @@ import type { Store } from "../db/store.js";
 import { latestUserTurnReview } from "./userTurnReview.js";
 import { currentPlanView } from "./orchestrationView.js";
 
-function roleLabel(expertId: string) {
+function roleTitle(store: Store, expertId: string | null | undefined) {
+  if (!expertId) return "专家";
   if (expertId === "exp-leader") return "Leader";
-  if (expertId.includes("coder")) return "全栈开发";
-  if (expertId.includes("frontend")) return "前端开发";
-  if (expertId.includes("backend")) return "后端开发";
-  if (expertId.includes("verify")) return "测试验证";
-  if (expertId.includes("codereview")) return "代码审查";
-  if (expertId.includes("research")) return "调研员";
+  const expert = store.getExpert(expertId);
+  if (expert?.name) return expert.name;
+  if (expertId.includes("coder")) return "全栈开发专家";
+  if (expertId.includes("verify")) return "测试验证专家";
+  if (expertId.includes("codereview")) return "代码审查专家";
+  if (expertId.includes("research")) return "调研专家";
   return "专家";
 }
 
@@ -63,6 +64,7 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
   const team = [
     ...(leaderSession ? [{
       id: leaderSession.id,
+      // Primary line: person/name; secondary: role title.
       display_name: "Leader",
       role: "Leader",
       status: memberStatus(leaderSession.status),
@@ -81,8 +83,9 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
         );
         return {
           id: flowExpert.id,
-          display_name: flowExpert.displayName || store.getExpert(flowExpert.expertId)?.name || flowExpert.expertId,
-          role: roleLabel(flowExpert.expertId),
+          // UI: person name on top, fixed Chinese role title below.
+          display_name: flowExpert.displayName || roleTitle(store, flowExpert.expertId),
+          role: roleTitle(store, flowExpert.expertId),
           status: memberStatus(flowExpert.status),
           current_task_title: activeTask?.title ?? null,
           last_active_at: flowExpert.updatedAt || flowExpert.createdAt,
@@ -143,7 +146,7 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
         owner_flow_expert_id: flowExpert?.id ?? null,
         owner_expert_id: ownerExpertId,
         owner_name: flowExpert?.displayName ?? ownerSession?.displayName ?? null,
-        owner_role: ownerExpertId ? roleLabel(ownerExpertId) : null,
+        owner_role: ownerExpertId ? roleTitle(store, ownerExpertId) : null,
         active_form: task.activeForm,
         blocked_by: store.listTaskDependencies(task.id),
       };

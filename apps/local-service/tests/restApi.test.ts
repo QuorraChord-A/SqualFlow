@@ -577,8 +577,9 @@ describe("REST API", () => {
           is_leader: true,
         }),
         expect.objectContaining({
-          display_name: "Coder",
-          role: "全栈开发",
+          // Person name on top; fixed Chinese role title below.
+          display_name: expect.stringMatching(/^.{2,3}$/),
+          role: "全栈开发专家",
           status: "idle",
           flow_expert_id: expect.any(String),
           expert_id: "exp-coder",
@@ -586,6 +587,8 @@ describe("REST API", () => {
           is_leader: false,
         }),
       ]);
+      expect(workbench.team[1]?.display_name).not.toBe("Coder");
+      expect(workbench.team[1]?.display_name).not.toBe("全栈开发专家");
       expect(workbench.artifacts.specs).toEqual([
         expect.objectContaining({
           id: spec.id,
@@ -624,8 +627,9 @@ describe("REST API", () => {
           id: task.id,
           subject: "Build hello",
           status: "pending",
-          owner_name: "Coder",
-          owner_role: "全栈开发",
+          owner_name: workbench.team[1]?.display_name,
+          owner_role: "全栈开发专家",
+          owner_expert_id: "exp-coder",
           active_form: "",
           blocked_by: [],
         }),
@@ -1344,11 +1348,12 @@ describe("REST API", () => {
         id: expert.id,
         flow_expert_id: expert.id,
         expert_id: "exp-coder",
-        display_name: "Coder",
+        display_name: expert.displayName,
         agent_session_id: second.id,
         session_id: "sdk-frontend",
         current_task_title: "实现页面",
       })]);
+      expect(expert.displayName).not.toBe("Coder");
       expect(response.json()).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: first.id })]));
     } finally {
       await app.close();

@@ -5,6 +5,11 @@ import type * as schema from "./schema.js";
 import { BROWSER_MCP_TOOL_NAMES } from "../mcp/browserServer.js";
 import { DEFAULT_LEADER_SYSTEM_PROMPT } from "./defaultLeaderSystemPrompt.js";
 
+/**
+ * Leader tools:
+ * - single expert: create_task + dispatch_agent (+ update_task / save_execution_plan as needed)
+ * - multi expert (2+): submit_orchestration_plan; system schedules after approval
+ */
 const leaderMcpTools = [
   "get_context",
   "ask_user",
@@ -21,39 +26,53 @@ const leaderMcpTools = [
   "send_message",
 ].map((tool) => `mcp__squadflow-leader__${tool}`);
 
-const stableExperts = [
+const stableExperts: Array<{
+  id: string;
+  role: string;
+  /** Fixed Chinese role title (UI subtitle). */
+  name: string;
+  /** 2–3 character person-name pool; assigned when FlowExpert is first created. */
+  personNameCandidates: string[];
+  builtinTools: string[];
+  mcpTools: string[];
+}> = [
   {
     id: "exp-leader",
     role: "leader",
     name: "Leader",
+    personNameCandidates: [],
     builtinTools: ["read", "search"],
     mcpTools: [...leaderMcpTools, ...BROWSER_MCP_TOOL_NAMES],
   },
   {
     id: "exp-research",
     role: "research",
-    name: "Research",
+    name: "调研专家",
+    personNameCandidates: ["知远", "明察", "闻道", "探微", "阿查", "远舟", "观微", "阿研"],
     builtinTools: ["read", "search", "web_search"],
     mcpTools: [],
   },
   {
     id: "exp-coder",
     role: "coder",
-    name: "Coder",
+    name: "全栈开发专家",
+    personNameCandidates: ["阿码", "小栈", "码仔", "修修", "北辰", "青禾", "灵犀", "通哥"],
     builtinTools: ["read", "write", "edit", "search", "shell"],
     mcpTools: BROWSER_MCP_TOOL_NAMES,
   },
   {
     id: "exp-verify",
     role: "verify",
-    name: "Verify",
+    name: "测试验证专家",
+    personNameCandidates: ["笃实", "守真", "证行", "镜川", "阿验", "照照", "严严", "清验"],
     builtinTools: ["read", "search", "shell"],
     mcpTools: BROWSER_MCP_TOOL_NAMES,
   },
   {
     id: "exp-codereview",
     role: "codereview",
-    name: "CodeReview",
+    name: "代码审查专家",
+    personNameCandidates: ["正己", "琢玉", "衡文", "审微", "阿审", "明鉴", "守约", "剔瑕"],
     builtinTools: ["read", "search"],
     mcpTools: [],
   },
@@ -177,6 +196,7 @@ export function seedExpertsIntoStore(db: BetterSQLite3Database<typeof schema>) {
       id: expert.id,
       role: expert.role,
       name: expert.name,
+      personNameCandidates: JSON.stringify(expert.personNameCandidates),
       systemPrompt: systemPrompts[expert.role] ?? `You are SquadFlow ${expert.name}. Follow the current UserTurn task contract and end your final reply with a clear conclusion.`,
       builtinTools: JSON.stringify(expert.builtinTools),
       mcpTools: JSON.stringify(expert.mcpTools),
@@ -191,6 +211,7 @@ export function seedExpertsIntoStore(db: BetterSQLite3Database<typeof schema>) {
         set: {
           role: row.role,
           name: row.name,
+          personNameCandidates: row.personNameCandidates,
           systemPrompt: row.systemPrompt,
           builtinTools: row.builtinTools,
           mcpTools: row.mcpTools,

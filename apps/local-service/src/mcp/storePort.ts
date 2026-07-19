@@ -1,8 +1,10 @@
 import type { Store } from "../db/store.js";
 import type { AgentDispatcher } from "../runtime/agentDispatcher.js";
+import { isExpertRuntimeEnabled, readAgentRuntimeConfigSnapshotSync } from "../config/agentRuntimeConfig.js";
 import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
 import type { StorePort } from "./leaderServer.js";
 import { DeclarativeOrchestrationRuleSchema, diffPlanNodes, evaluateDeclarativeRules, lintOrchestrationPlan } from "../domain/orchestration.js";
+import type { PlanLintIssue, SubmitOrchestrationPlanInput } from "../domain/orchestration.js";
 
 type AgentDispatchResult = {
   agent_session_id: string;
@@ -67,10 +69,24 @@ function taskToPlatform(
   };
 }
 
+export type StorePortOptions = {
+  /** Template expert ids whose runtime role is enabled. Injectable for tests; the default reads the runtime config synchronously. */
+  getEnabledExpertIds?: () => Set<string>;
+};
+
 export function createStorePort(
   store: Store,
   agentDispatcher?: AgentDispatcher,
+  options?: StorePortOptions,
 ): StorePort {
+  const getEnabledExpertIds = options?.getEnabledExpertIds ?? (() => {
+    const roles = readAgentRuntimeConfigSnapshotSync().roles;
+    return new Set(
+      store.listExperts()
+        .filter((expert) => isExpertRuntimeEnabled(roles, expert.role))
+        .map((expert) => expert.id),
+    );
+  });
   function activeCurrentTurn(flowId: string, currentTurnInput: { user_turn_id?: string } | undefined) {
     const userTurnId = currentTurnInput?.user_turn_id;
     const turn = userTurnId ? store.getUserTurn(userTurnId) : undefined;
@@ -161,54 +177,67 @@ export function createStorePort(
     },
 
     createTask(input) {
+      const createTaskError = (code: string, message: string) => ({ error: { code, message } });
       const userTurnId = input.currentTurnInput?.user_turn_id;
       const turn = userTurnId ? store.getUserTurn(userTurnId) : undefined;
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") return null;
-      if (input.currentTurnInput?.spec_requested === true) return null;
-      if (store.listOrchestrationPlans(input.flowId).some((plan) => plan.userTurnId === turn.id)) return null;
-      if (turn.workSource) {
-        if (turn.workSource === "spec") {
-          const hasPlan = store.listArtifacts(input.flowId)
-            .some((artifact) => artifact.userTurnId === turn.id && artifact.type === "execution_plan");
-          if (!hasPlan) return null;
-        }
-        const task = store.createTask({
-          flowId: input.flowId,
-          userTurnId: turn.id,
-          title: input.subject,
-          description: input.description,
-          expertId: null,
-          activeForm: input.activeForm,
-          dependsOnTaskIds: [],
-        });
-        return task ? {
-          user_turn_id: turn.id,
-          task: taskToPlatform(task, store.listTaskDependencies(task.id)),
-        } : null;
+      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") {
+        return createTaskError("ACTIVE_USER_TURN_REQUIRED", "Task could not be created for the current UserTurn.");
+      }
+      if (input.currentTurnInput?.spec_requested === true) {
+        return createTaskError("SPEC_REQUEST_ACTIVE", "本消息要求 Spec：先 create_plan 并等待批准，不要直接创建任务。");
+      }
+      // Multi-expert orchestration owns task creation for this turn.
+      if (store.listOrchestrationPlans(input.flowId).some((plan) => plan.userTurnId === turn.id)) {
+        return createTaskError("ORCHESTRATION_PLAN_ACTIVE", "本轮已有编排计划，任务由计划系统创建；不要再 create_task 或手工 dispatch 计划内节点。");
       }
 
       const current = input.currentTurnInput;
-      if (store.listUserTurnTasks(turn.id).length === 0) return null;
-      if (!current || (current.trigger_kind !== "user_message" && current.trigger_kind !== "decision_resolved")) {
-        return null;
-      }
       const pendingActions = [
         ...store.listDecisionCards(input.flowId).filter((card) => card.status === "pending"),
         ...store.listSpecApprovals(input.flowId).filter((approval) => approval.status === "pending"),
       ];
-      if (pendingActions.length > 0) return null;
+      if (pendingActions.length > 0) {
+        return createTaskError("PENDING_USER_ACTION", "存在待用户处理的卡片；等待用户完成后再创建任务。");
+      }
 
-      const created = store.createDirectUserTurnTask({
+      // First task(s) for a direct message turn: start work + create task.
+      if (!turn.workSource) {
+        if (!current || (current.trigger_kind !== "user_message" && current.trigger_kind !== "decision_resolved")) {
+          return createTaskError("INVALID_TRIGGER", "当前触发类型不能开启新工作；仅用户消息或决策解决可创建本轮首个任务。");
+        }
+        const created = store.createDirectUserTurnTask({
+          flowId: input.flowId,
+          subject: input.subject,
+          description: input.description,
+          activeForm: input.activeForm,
+          currentTurnInput: current,
+        });
+        return created ? {
+          user_turn_id: created.userTurn.id,
+          task: taskToPlatform(created.task, store.listTaskDependencies(created.task.id)),
+        } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current UserTurn.");
+      }
+
+      if (turn.workSource === "spec") {
+        const hasPlan = store.listArtifacts(input.flowId)
+          .some((artifact) => artifact.userTurnId === turn.id && artifact.type === "execution_plan");
+        if (!hasPlan) {
+          return createTaskError("EXECUTION_PLAN_REQUIRED", "Spec 轮次需先 save_execution_plan，再创建任务。");
+        }
+      }
+      const task = store.createTask({
         flowId: input.flowId,
-        subject: input.subject,
+        userTurnId: turn.id,
+        title: input.subject,
         description: input.description,
+        expertId: null,
         activeForm: input.activeForm,
-        currentTurnInput: current,
+        dependsOnTaskIds: [],
       });
-      return created ? {
-        user_turn_id: created.userTurn.id,
-        task: taskToPlatform(created.task, store.listTaskDependencies(created.task.id)),
-      } : null;
+      return task ? {
+        user_turn_id: turn.id,
+        task: taskToPlatform(task, store.listTaskDependencies(task.id)),
+      } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current UserTurn.");
     },
 
     saveExecutionPlan(input) {
@@ -258,6 +287,52 @@ export function createStorePort(
       if (!flow?.projectId) return null;
       const current = input.currentTurnInput;
       if (current?.spec_requested === true) return null;
+      // Resolve and lint before mutating the turn so a rejected submission has no side effects
+      // and the Leader can fall back to the single-expert path in the same turn.
+      // Leader may pass person_name, role_title, role, or template expert_id.
+      // Does not pre-create FlowExperts; they appear when the plan runs / dispatch happens.
+      const unresolved: string[] = [];
+      const resolvedNodes = input.nodes.map((node) => {
+        const templateId = store.resolveExpertRef(input.flow_id, node.expert_id);
+        if (!templateId) unresolved.push(node.expert_id);
+        return { ...node, expert_id: templateId ?? node.expert_id };
+      });
+      if (unresolved.length > 0) {
+        return {
+          error: {
+            code: "PLAN_LINT_REJECTED",
+            issues: unresolved.map((name) => ({
+              code: "EXPERT_UNAVAILABLE",
+              severity: "block" as const,
+              message: `无法识别专家「${name}」：请使用 get_context.experts 中 enabled 的角色中文名/expert_id，或 team 中已有 person_name`,
+            })),
+          },
+        };
+      }
+      const resolvedInput: SubmitOrchestrationPlanInput = { ...input, nodes: resolvedNodes };
+      const availableExperts = new Set(store.listExperts().map((expert) => expert.id));
+      const enabledExpertIds = getEnabledExpertIds();
+      const runtimeDisabledIssues: PlanLintIssue[] = resolvedInput.nodes
+        .filter((node) => availableExperts.has(node.expert_id) && !enabledExpertIds.has(node.expert_id))
+        .map((node) => ({
+          code: "EXPERT_RUNTIME_DISABLED",
+          severity: "block" as const,
+          message: `专家「${store.getExpert(node.expert_id)?.name ?? node.expert_id}」当前未启用（智能体配置）；请向用户说明该角色未启用并等待用户决定，不要改派其它角色顶替`,
+          node_id: node.node_id,
+        }));
+      const customRules = store.listOrchestrationRules({ flowId: flow.id, projectId: flow.projectId })
+        .filter((row) => row.enabled)
+        .flatMap((row) => {
+          const parsed = DeclarativeOrchestrationRuleSchema.safeParse(parseJsonObject(row.ruleJson));
+          return parsed.success ? [{ id: row.id, name: row.name, severity: row.severity as "block" | "warn" | "info", rule: parsed.data }] : [];
+        });
+      const lint = [
+        ...lintOrchestrationPlan(resolvedInput, availableExperts),
+        ...runtimeDisabledIssues,
+        ...evaluateDeclarativeRules(resolvedInput, customRules),
+      ];
+      const blocking = lint.filter((issue) => issue.severity === "block");
+      if (blocking.length > 0) return { error: { code: "PLAN_LINT_REJECTED", issues: lint } };
       if (!turn.workSource) {
         const initialized = store.startUserTurnWork({
           flowId: input.flow_id,
@@ -271,19 +346,6 @@ export function createStorePort(
         });
         if (!initialized) return null;
       }
-      const availableExperts = new Set(store.listExperts().map((expert) => expert.id));
-      const customRules = store.listOrchestrationRules({ flowId: flow.id, projectId: flow.projectId })
-        .filter((row) => row.enabled)
-        .flatMap((row) => {
-          const parsed = DeclarativeOrchestrationRuleSchema.safeParse(parseJsonObject(row.ruleJson));
-          return parsed.success ? [{ id: row.id, name: row.name, severity: row.severity as "block" | "warn" | "info", rule: parsed.data }] : [];
-        });
-      const lint = [
-        ...lintOrchestrationPlan(input, availableExperts),
-        ...evaluateDeclarativeRules(input, customRules),
-      ];
-      const blocking = lint.filter((issue) => issue.severity === "block");
-      if (blocking.length > 0) return { error: { code: "PLAN_LINT_REJECTED", issues: lint } };
 
       const feedbackApproval = store.listPlanApprovals(input.flow_id)
         .find((approval) => approval.userTurnId === turn.id && approval.status === "feedback_pending");
@@ -312,7 +374,7 @@ export function createStorePort(
         }));
       }
       const requiresUserApproval = store.getPlanApprovalMode(flow.id) === "on";
-      const diff = diffPlanNodes(previousNodes, input.nodes);
+      const diff = diffPlanNodes(previousNodes, resolvedInput.nodes);
       const created = store.createOrchestrationPlanRevision({
         flowId: input.flow_id,
         userTurnId: turn.id,
@@ -327,7 +389,7 @@ export function createStorePort(
         status: requiresUserApproval ? "pending_approval" : "approved",
         lint,
         diff,
-        nodes: input.nodes.map((node) => ({
+        nodes: resolvedInput.nodes.map((node) => ({
           nodeId: node.node_id,
           expertId: node.expert_id,
           title: node.title,

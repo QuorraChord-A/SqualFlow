@@ -35,10 +35,6 @@
       {
         "from": "../local-service/dist",
         "to": "local-service"
-      },
-      {
-        "from": "../local-service/package.json",
-        "to": "local-service/package.json"
       }
     ],
     "asarUnpack": [

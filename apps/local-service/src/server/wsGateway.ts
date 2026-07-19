@@ -29,6 +29,7 @@ import { captureUserTurnBaseline } from "../runtime/userTurnDiff.js";
 import type { ChatJournal, ChatUIMessage } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
 import type { OperationalLogger } from "../observability/operationalLogger.js";
+import { logWsWire } from "../observability/wsWireLog.js";
 
 type SendServerMessage = (message: ServerWsMessage) => Promise<void> | void;
 
@@ -1797,11 +1798,27 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
   const parsed = parseClientMessage(rawMessage);
 
   if (!parsed.ok) {
+    logWsWire({
+      direction: "in",
+      channel: "api_ws",
+      clientId: connection.clientId,
+      flowId: parsed.flowId,
+      type: "invalid_message",
+      payload: { raw: typeof rawMessage === "string" ? rawMessage.slice(0, 2000) : String(rawMessage).slice(0, 2000) },
+    });
     await connection.send(errorMessage("invalid_message", "Invalid websocket message", parsed.flowId, parsed.logId));
     return;
   }
 
   const message = parsed.message;
+  logWsWire({
+    direction: "in",
+    channel: "api_ws",
+    clientId: connection.clientId,
+    flowId: "flow_id" in message ? message.flow_id : null,
+    type: message.type,
+    payload: message,
+  });
   switch (message.type) {
     case "flow:subscribe": {
       const startedAt = Date.now();
@@ -1934,7 +1951,16 @@ export function registerWsGateway(app: FastifyInstance, deps: WsGatewayDeps): vo
     const clientId = randomUUID();
     const subscriptions = new Set<string>();
     const send: SendServerMessage = (message) => {
-      socket.send(JSON.stringify(ServerWsMessageSchema.parse(message)));
+      const parsed = ServerWsMessageSchema.parse(message);
+      logWsWire({
+        direction: "out",
+        channel: "api_ws",
+        clientId,
+        flowId: "flow_id" in parsed ? parsed.flow_id : null,
+        type: parsed.type,
+        payload: parsed,
+      });
+      socket.send(JSON.stringify(parsed));
     };
     let incomingMessages = Promise.resolve();
 

@@ -95,7 +95,7 @@ describe("createStorePort", () => {
     }));
   });
 
-  it("requires a structured plan before creating tasks for a new UserTurn", () => {
+  it("allows create_task on a new UserTurn without orchestration plan (single-expert path)", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Direct", localPath: "/repo/direct" });
     const flow = store.createFlow({
@@ -122,8 +122,11 @@ describe("createStorePort", () => {
       },
     });
 
-    expect(created).toBeNull();
-    expect(store.listTasks(flow.id)).toEqual([]);
+    expect(created).toEqual(expect.objectContaining({
+      user_turn_id: userTurn.id,
+      task: expect.objectContaining({ subject: "Build", status: "pending" }),
+    }));
+    expect(store.listTasks(flow.id)).toHaveLength(1);
   });
 
   it("rejects direct UserTurn work outside execute mode or valid triggers", () => {
@@ -149,7 +152,7 @@ describe("createStorePort", () => {
         content: "build it",
         created_at: new Date().toISOString(),
       },
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "TASK_CREATE_FAILED" } });
 
     store.createDecisionCard({
       flowId: flow.id,
@@ -171,9 +174,16 @@ describe("createStorePort", () => {
         content: "build it",
         created_at: new Date().toISOString(),
       },
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "PENDING_USER_ACTION" } });
 
-    store.resolveDecisionCard("dc-1", flow.id, {});
+    store.resolveDecisionCard({
+      cardId: "dc-1",
+      flowId: flow.id,
+      answers: {},
+      actionId: "action-1",
+      messageId: "msg-resolve",
+      leaderInputContent: "resolved",
+    });
 
     expect(port.createTask({
       flowId: flow.id,
@@ -186,16 +196,16 @@ describe("createStorePort", () => {
         content: "build it",
         created_at: new Date().toISOString(),
       },
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "INVALID_TRIGGER" } });
 
     expect(port.createTask({
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "ACTIVE_USER_TURN_REQUIRED" } });
   });
 
-  it("returns null when creating a task without an active UserTurn", () => {
+  it("returns a structured error when creating a task without an active UserTurn", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-no-exec",
@@ -210,7 +220,7 @@ describe("createStorePort", () => {
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "ACTIVE_USER_TURN_REQUIRED" } });
   });
 
   it("saves an execution plan artifact on the active UserTurn", () => {
@@ -338,17 +348,30 @@ describe("createStorePort", () => {
         objective: "实现页面",
         work_kind: "change",
         risk_level: "low",
-        nodes: [{
-          node_id: "code",
-          expert_id: "exp-coder",
-          title: "实现",
-          description: "实现页面",
-          depends_on: [],
-          acceptance_criteria: ["完成"],
-          risk_tags: [],
-          side_effects: [],
-          resource_keys: [],
-        }],
+        nodes: [
+          {
+            node_id: "code",
+            expert_id: "exp-coder",
+            title: "实现",
+            description: "实现页面",
+            depends_on: [],
+            acceptance_criteria: ["完成"],
+            risk_tags: [],
+            side_effects: [],
+            resource_keys: [],
+          },
+          {
+            node_id: "verify",
+            expert_id: "exp-verify",
+            title: "验证",
+            description: "验证页面",
+            depends_on: ["code"],
+            acceptance_criteria: ["通过"],
+            risk_tags: [],
+            side_effects: [],
+            resource_keys: [],
+          },
+        ],
         currentTurnInput: currentTurnInput(turn.id),
       });
     };
@@ -363,6 +386,187 @@ describe("createStorePort", () => {
       approval: expect.objectContaining({ status: "auto_approved" }),
       auto_approved: true,
     }));
+  });
+
+  it("rejects a single-role plan without side effects and allows same-turn single-expert fallback", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "Single role", localPath: "/repo/single-role" });
+    const flow = store.createFlow({ id: "flow-single-role", name: "Single role", description: "", projectId: project.id });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const port = createStorePort(store);
+    const input = currentTurnInput(turn.id);
+
+    const rejected = port.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "单角色",
+      objective: "单角色计划",
+      work_kind: "change",
+      risk_level: "low",
+      nodes: [
+        { node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+      ],
+      currentTurnInput: input,
+    });
+
+    expect(rejected).toMatchObject({
+      error: {
+        code: "PLAN_LINT_REJECTED",
+        issues: expect.arrayContaining([expect.objectContaining({ code: "ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS" })]),
+      },
+    });
+    expect(store.listOrchestrationPlans(flow.id)).toEqual([]);
+    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+
+    expect(port.createTask({
+      flowId: flow.id,
+      subject: "Build",
+      description: "Build feature",
+      currentTurnInput: input,
+    })).toEqual(expect.objectContaining({
+      user_turn_id: turn.id,
+      task: expect.objectContaining({ subject: "Build", status: "pending" }),
+    }));
+  });
+
+  it("rejects same-role nodes referenced through different aliases as a single-role plan", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "Alias", localPath: "/repo/alias" });
+    const flow = store.createFlow({ id: "flow-alias", name: "Alias", description: "", projectId: project.id });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+
+    const rejected = createStorePort(store).submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "别名",
+      objective: "同角色两种写法",
+      work_kind: "change",
+      risk_level: "low",
+      nodes: [
+        { node_id: "a", expert_id: "全栈开发专家", title: "步骤一", description: "步骤一", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+        { node_id: "b", expert_id: "exp-coder", title: "步骤二", description: "步骤二", depends_on: ["a"], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+      ],
+      currentTurnInput: currentTurnInput(turn.id),
+    });
+
+    expect(rejected).toMatchObject({
+      error: {
+        code: "PLAN_LINT_REJECTED",
+        issues: expect.arrayContaining([expect.objectContaining({ code: "ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS" })]),
+      },
+    });
+  });
+
+  it("rejects plan nodes whose runtime role is disabled and allows same-turn fallback", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "Disabled", localPath: "/repo/disabled" });
+    const flow = store.createFlow({ id: "flow-disabled", name: "Disabled", description: "", projectId: project.id, planApproval: "off" });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const input = currentTurnInput(turn.id);
+    const nodes = [
+      { node_id: "research", expert_id: "exp-research", title: "调研", description: "调研", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+      { node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现", depends_on: ["research"], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+    ];
+
+    const disabledPort = createStorePort(store, undefined, {
+      getEnabledExpertIds: () => new Set(["exp-coder", "exp-verify", "exp-codereview"]),
+    });
+    const rejected = disabledPort.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "禁用角色",
+      objective: "含禁用角色",
+      work_kind: "change",
+      risk_level: "low",
+      nodes,
+      currentTurnInput: input,
+    });
+
+    expect(rejected).toMatchObject({
+      error: {
+        code: "PLAN_LINT_REJECTED",
+        issues: expect.arrayContaining([expect.objectContaining({ code: "EXPERT_RUNTIME_DISABLED", node_id: "research" })]),
+      },
+    });
+    expect(store.listOrchestrationPlans(flow.id)).toEqual([]);
+    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+
+    const enabledPort = createStorePort(store, undefined, {
+      getEnabledExpertIds: () => new Set(["exp-coder", "exp-research", "exp-verify", "exp-codereview"]),
+    });
+    expect(enabledPort.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "启用后",
+      objective: "启用后可提交",
+      work_kind: "change",
+      risk_level: "low",
+      nodes,
+      currentTurnInput: input,
+    })).toEqual(expect.objectContaining({
+      revision: expect.objectContaining({ status: "approved" }),
+    }));
+  });
+
+  it("rejects unresolved expert names without side effects and allows same-turn fallback", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "Unknown", localPath: "/repo/unknown" });
+    const flow = store.createFlow({ id: "flow-unknown", name: "Unknown", description: "", projectId: project.id });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const input = currentTurnInput(turn.id);
+    const port = createStorePort(store);
+
+    expect(port.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "未知专家",
+      objective: "未知专家",
+      work_kind: "change",
+      risk_level: "low",
+      nodes: [
+        { node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+        { node_id: "ghost", expert_id: "不存在的专家", title: "幽灵", description: "幽灵", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+      ],
+      currentTurnInput: input,
+    })).toMatchObject({
+      error: {
+        code: "PLAN_LINT_REJECTED",
+        issues: expect.arrayContaining([expect.objectContaining({ code: "EXPERT_UNAVAILABLE" })]),
+      },
+    });
+    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+
+    expect(port.createTask({
+      flowId: flow.id,
+      subject: "Build",
+      description: "Build feature",
+      currentTurnInput: input,
+    })).toEqual(expect.objectContaining({ user_turn_id: turn.id }));
+  });
+
+  it("blocks create_task with a dedicated error once an orchestration plan exists for the turn", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "Plan active", localPath: "/repo/plan-active" });
+    const flow = store.createFlow({ id: "flow-plan-active", name: "Plan active", description: "", projectId: project.id, planApproval: "off" });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const input = currentTurnInput(turn.id);
+    const port = createStorePort(store);
+
+    const submitted = port.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "实现并验证",
+      objective: "实现并验证",
+      work_kind: "change",
+      risk_level: "low",
+      nodes: [
+        { node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+        { node_id: "verify", expert_id: "exp-verify", title: "验证", description: "验证", depends_on: ["code"], acceptance_criteria: ["通过"], risk_tags: [], side_effects: [], resource_keys: [] },
+      ],
+      currentTurnInput: input,
+    });
+    expect(submitted).toEqual(expect.objectContaining({ revision: expect.anything() }));
+
+    expect(port.createTask({
+      flowId: flow.id,
+      subject: "抢活",
+      description: "不应创建",
+      currentTurnInput: input,
+    })).toMatchObject({ error: { code: "ORCHESTRATION_PLAN_ACTIVE" } });
   });
 
   it("requires a saved execution plan before creating tasks for spec UserTurns", () => {
@@ -387,7 +591,7 @@ describe("createStorePort", () => {
       subject: "Build",
       description: "Build feature",
       currentTurnInput: currentTurnInput(userTurn.id),
-    })).toBeNull();
+    })).toMatchObject({ error: { code: "EXECUTION_PLAN_REQUIRED" } });
 
     port.saveExecutionPlan({
       flowId: flow.id,
@@ -551,7 +755,7 @@ describe("createStorePort", () => {
     const port = createStorePort(store);
 
     expect(port.saveExecutionPlan({ flowId: flow.id, title: "Bypass", plan: "Do it", currentTurnInput: input })).toBeNull();
-    expect(port.createTask({ flowId: flow.id, subject: "Bypass", description: "Do it", currentTurnInput: input })).toBeNull();
+    expect(port.createTask({ flowId: flow.id, subject: "Bypass", description: "Do it", currentTurnInput: input })).toMatchObject({ error: { code: "SPEC_REQUEST_ACTIVE" } });
     expect(port.submitOrchestrationPlan({
       flow_id: flow.id,
       title: "Bypass",

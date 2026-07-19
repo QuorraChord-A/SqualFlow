@@ -31,6 +31,7 @@ import {
 } from "./schema.js";
 import { seedExpertsIntoStore } from "./seedExperts.js";
 import type { ContextUsageCategory } from "../domain/contextUsage.js";
+import { parsePersonNameCandidates, pickPersonDisplayName } from "../domain/expertIdentity.js";
 
 export type AgentContextUsageSnapshotRow = {
   id: string;
@@ -462,7 +463,7 @@ export function createStore(databasePath: string) {
           sequence INTEGER NOT NULL,
           created_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS experts (id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL, system_prompt TEXT NOT NULL, builtin_tools TEXT NOT NULL DEFAULT '[]', mcp_tools TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS experts (id TEXT PRIMARY KEY, role TEXT NOT NULL, name TEXT NOT NULL, person_name_candidates TEXT NOT NULL DEFAULT '[]', system_prompt TEXT NOT NULL, builtin_tools TEXT NOT NULL DEFAULT '[]', mcp_tools TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS app_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS flow_experts (
           id TEXT PRIMARY KEY,
@@ -640,6 +641,7 @@ export function createStore(databasePath: string) {
       addColumnIfMissing(sqlite, "flow_experts", "runtime_sdk", "TEXT");
       addColumnIfMissing(sqlite, "flow_experts", "runtime_config_id", "TEXT");
       addColumnIfMissing(sqlite, "flow_experts", "runtime_model_id", "TEXT");
+      addColumnIfMissing(sqlite, "experts", "person_name_candidates", "TEXT NOT NULL DEFAULT '[]'");
       addColumnIfMissing(sqlite, "spec_approvals", "user_turn_id", "TEXT");
       addColumnIfMissing(sqlite, "user_turns", "active_started_at", "TEXT");
       addColumnIfMissing(sqlite, "user_turns", "active_duration_ms", "INTEGER NOT NULL DEFAULT 0");
@@ -795,6 +797,7 @@ export function createStore(databasePath: string) {
         updatedAt: timestamp,
       };
       db.insert(flows).values(row).run();
+      // Do not pre-create FlowExperts: team UI only shows experts after they are first used.
       return db.select().from(flows).where(eq(flows.id, row.id)).get()!;
     },
     listFlows(projectId?: string) {
@@ -2784,12 +2787,19 @@ export function createStore(databasePath: string) {
       if (existing) return existing;
       const expert = db.select().from(experts).where(eq(experts.id, input.expertId)).get();
       if (!expert) throw new Error(`expert not found: ${input.expertId}`);
+      const usedNames = db.select().from(flowExperts).where(eq(flowExperts.flowId, input.flowId)).all()
+        .map((row) => row.displayName);
+      const displayName = pickPersonDisplayName({
+        candidates: parsePersonNameCandidates(expert.personNameCandidates),
+        usedNames,
+        fallback: expert.name || input.expertId,
+      });
       const timestamp = now();
       const row = {
         id: id("fexp"),
         flowId: input.flowId,
         expertId: input.expertId,
-        displayName: expert.name || input.expertId,
+        displayName,
         status: "idle",
         sdkSessionId: null,
         runtimeSdk: null,
@@ -2807,6 +2817,26 @@ export function createStore(databasePath: string) {
         .all()
         .find((candidate) => candidate.expertId === input.expertId)!;
     },
+    /**
+     * Resolve a Leader-facing expert reference to a template expert id.
+     * Does not pre-create FlowExperts.
+     * Accepts: existing person_name, template expert_id, role, or role_title (experts.name).
+     */
+    resolveExpertRef(flowId: string, ref: string): string | null {
+      const trimmed = ref.trim();
+      if (!trimmed) return null;
+      const byTemplate = db.select().from(experts).where(eq(experts.id, trimmed)).get();
+      if (byTemplate && byTemplate.role !== "leader") return byTemplate.id;
+      const byPerson = db.select().from(flowExperts).where(eq(flowExperts.flowId, flowId)).all()
+        .find((row) => row.displayName === trimmed);
+      if (byPerson) return byPerson.expertId;
+      const lower = trimmed.toLowerCase();
+      const byRoleOrTitle = db.select().from(experts).all().find((expert) => {
+        if (expert.role === "leader") return false;
+        return expert.role === lower || expert.role === trimmed || expert.name === trimmed;
+      });
+      return byRoleOrTitle?.id ?? null;
+    },
     projectLegacyFlowExperts(flowId: string) {
       const sessions = db.select().from(agentSessions).where(eq(agentSessions.flowId, flowId)).all()
         .filter((session) => session.expertId !== "exp-leader");
@@ -2814,24 +2844,7 @@ export function createStore(databasePath: string) {
         let flowExpert = db.select().from(flowExperts).where(eq(flowExperts.flowId, flowId)).all()
           .find((candidate) => candidate.expertId === session.expertId);
         if (!flowExpert) {
-          const expert = db.select().from(experts).where(eq(experts.id, session.expertId)).get();
-          if (!expert) continue;
-          const timestamp = now();
-          db.insert(flowExperts).values({
-            id: id("fexp"),
-            flowId,
-            expertId: session.expertId,
-            displayName: expert.name || session.expertId,
-            status: "idle",
-            sdkSessionId: null,
-            runtimeSdk: null,
-            runtimeConfigId: null,
-            runtimeModelId: null,
-            createdAt: timestamp,
-            updatedAt: timestamp,
-          }).onConflictDoNothing({ target: [flowExperts.flowId, flowExperts.expertId] }).run();
-          flowExpert = db.select().from(flowExperts).where(eq(flowExperts.flowId, flowId)).all()
-            .find((candidate) => candidate.expertId === session.expertId);
+          flowExpert = this.getOrCreateFlowExpert({ flowId, expertId: session.expertId });
         }
         if (!flowExpert) continue;
         if (!session.flowExpertId) {

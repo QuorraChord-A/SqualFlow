@@ -359,7 +359,7 @@ describe("FlowSidePanel", () => {
     expect(screen.getByText("Verify")).toBeInTheDocument();
     expect(screen.getByText("任务 1 · 执行中")).toBeInTheDocument();
     expect(screen.getByText("Build hello")).toBeInTheDocument();
-    expect(screen.getByText("前端开发 Frontend")).toBeInTheDocument();
+    expect(screen.getByText("Frontend · 前端开发")).toBeInTheDocument();
     expect(screen.getByText("当前步骤：Writing page")).toBeInTheDocument();
   });
 

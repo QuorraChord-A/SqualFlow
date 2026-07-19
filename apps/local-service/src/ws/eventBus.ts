@@ -1,3 +1,4 @@
+import { logWsWire } from "../observability/wsWireLog.js";
 import { ServerWsMessageSchema, type ServerWsMessage } from "../protocol/wsMessages.js";
 
 type Handler = (message: ServerWsMessage) => Promise<void> | void;
@@ -41,6 +42,15 @@ export class EventBus {
     if ("flow_id" in parsedMessage && parsedMessage.flow_id !== flowId) {
       throw new Error(`Event flow_id mismatch: expected ${flowId}, got ${parsedMessage.flow_id}`);
     }
+
+    // Independent wire log (logs/ws.log); does not go through desktop.log.
+    logWsWire({
+      direction: "out",
+      channel: "event_bus",
+      flowId,
+      type: parsedMessage.type,
+      payload: parsedMessage,
+    });
 
     const handlers = [
       ...(this.subscriptions.get(flowId)?.values() ?? []),

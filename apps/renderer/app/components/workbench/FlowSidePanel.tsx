@@ -436,7 +436,7 @@ function TaskProgressSection({ tasks }: { tasks: FlowWorkbench["tasks"] }) {
           </div>
           <div className="text-sm text-foreground">{task.subject}</div>
           <div className="text-xs font-semibold text-primary">
-            {[task.owner_role, task.owner_name].filter(Boolean).join(" ") || "未分配"}
+            {[task.owner_name, task.owner_role].filter(Boolean).join(" · ") || "未分配"}
           </div>
           <div className="text-xs text-muted-foreground">当前步骤：{task.active_form || "等待执行"}</div>
         </div>

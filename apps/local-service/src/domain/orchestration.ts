@@ -2,10 +2,11 @@ import { z } from "zod";
 
 export const PlanNodeInputSchema = z.object({
   node_id: z.string().min(1).max(80).regex(/^[a-zA-Z0-9_-]+$/u),
+  /** Leader should pass the Flow person_name from get_context.team; template expert_id still accepted for compat. */
   expert_id: z.string().min(1),
   title: z.string().min(1).max(160),
   description: z.string().min(1).max(8_000),
-  depends_on: z.array(z.string().min(1)).default([]).describe("前置计划节点 node_id；Verify 必须位于实现任务之后，CodeReview 必须位于 Verify 之后"),
+  depends_on: z.array(z.string().min(1)).default([]).describe("前置计划节点 node_id；验证节点须依赖实现节点，审查节点须依赖验证节点"),
   acceptance_criteria: z.array(z.string().min(1)).min(1),
   risk_tags: z.array(z.string().min(1)).default([]),
   side_effects: z.array(z.string().min(1)).default([]),
@@ -83,6 +84,15 @@ function detectCycle(nodes: PlanNodeInput[]) {
 export function lintOrchestrationPlan(input: SubmitOrchestrationPlanInput, availableExpertIds: Set<string>): PlanLintIssue[] {
   const issues: PlanLintIssue[] = [];
   const ids = new Set(input.nodes.map((node) => node.node_id));
+  // Orchestration is reserved for multi-role collaboration; expert_id must be resolved to template ids before linting.
+  const distinctExpertIds = new Set(input.nodes.map((node) => node.expert_id));
+  if (distinctExpertIds.size < 2) {
+    issues.push({
+      code: "ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS",
+      severity: "block",
+      message: "编排计划至少需要 2 种不同专家角色；单专家工作请改用 create_task + dispatch_agent，多个步骤合并写进同一个任务说明，不要为通过校验加入无关角色",
+    });
+  }
   for (const node of input.nodes) {
     if (!availableExpertIds.has(node.expert_id)) {
       issues.push({ code: "EXPERT_UNAVAILABLE", severity: "block", message: `Expert 不可用：${node.expert_id}`, node_id: node.node_id });
@@ -130,6 +140,18 @@ export function lintOrchestrationPlan(input: SubmitOrchestrationPlanInput, avail
           severity: "block",
           message: `Verify 任务「${verify.title}」必须依赖对应实现任务`,
           node_id: verify.node_id,
+        });
+      }
+    }
+  }
+  if (implementationNodes.length > 0 && reviewNodes.length > 0) {
+    for (const review of reviewNodes) {
+      if (!implementationNodes.some((implementation) => dependsTransitively(input.nodes, review.node_id, implementation.node_id))) {
+        issues.push({
+          code: "REVIEW_WITHOUT_IMPLEMENTATION_DEPENDENCY",
+          severity: "block",
+          message: `CodeReview 任务「${review.title}」必须传递依赖实现任务，不能与实现并行`,
+          node_id: review.node_id,
         });
       }
     }

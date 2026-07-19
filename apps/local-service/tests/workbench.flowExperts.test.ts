@@ -37,9 +37,14 @@ describe("Flow workbench projection", () => {
 
       store.projectLegacyFlowExperts(flow.id);
       const workbench = buildFlowWorkbench(store, flow.id)!;
+      const coderMembers = workbench.team.filter((member) => member.expert_id === "exp-coder");
 
-      expect(workbench.team.filter((member) => member.display_name === "Coder")).toHaveLength(1);
-      expect(workbench.tasks.map((task) => task.owner_name)).toEqual(["Coder", "Coder"]);
+      expect(coderMembers).toHaveLength(1);
+      expect(coderMembers[0]?.display_name).toMatch(/^.{2,3}$/);
+      expect(coderMembers[0]?.display_name).not.toBe("Coder");
+      expect(coderMembers[0]?.role).toBe("全栈开发专家");
+      const personName = coderMembers[0]!.display_name;
+      expect(workbench.tasks.map((task) => task.owner_name)).toEqual([personName, personName]);
     } finally {
       cleanup();
     }
@@ -104,14 +109,15 @@ describe("Flow workbench projection", () => {
       store.completeTask(task2.id, JSON.stringify({ status: "done", summary: "done" }));
 
       const workbench = buildFlowWorkbench(store, flow.id)!;
+      const personName = flowExpert.displayName;
 
-      expect(workbench.team.map((member) => member.display_name)).toEqual(["Leader", "Coder"]);
-      expect(workbench.team.filter((member) => member.display_name.startsWith("Coder"))).toHaveLength(1);
+      expect(workbench.team.map((member) => member.display_name)).toEqual(["Leader", personName]);
+      expect(workbench.team.filter((member) => member.expert_id === "exp-coder")).toHaveLength(1);
       expect(workbench.tasks.map((task) => task.subject)).toEqual([
         "实现 Hello World",
         "优化 Hello World 页面",
       ]);
-      expect(workbench.tasks.every((task) => task.owner_name === "Coder")).toBe(true);
+      expect(workbench.tasks.every((task) => task.owner_name === personName)).toBe(true);
     } finally {
       cleanup();
     }

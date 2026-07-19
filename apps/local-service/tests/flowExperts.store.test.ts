@@ -44,8 +44,13 @@ describe("flow expert persistence", () => {
       expect(first.id).toBe(second.id);
       expect(first.flowId).toBe(flowA.id);
       expect(first.expertId).toBe("exp-coder");
-      expect(first.displayName).toBe("Coder");
+      // Person name from template candidates (not the role title).
+      expect(first.displayName.length).toBeGreaterThanOrEqual(2);
+      expect(first.displayName.length).toBeLessThanOrEqual(3);
+      expect(first.displayName).not.toBe("全栈开发专家");
+      expect(["阿码","小栈","码仔","修修","北辰","青禾","灵犀","通哥"]).toContain(first.displayName);
       expect(otherFlow.id).not.toBe(first.id);
+      expect(store.getExpert("exp-coder")?.name).toBe("全栈开发专家");
     } finally {
       cleanup();
     }

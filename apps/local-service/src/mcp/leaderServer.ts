@@ -119,7 +119,7 @@ export interface StorePort {
     description: string;
     activeForm?: string;
     currentTurnInput?: CurrentTurnInput;
-  }) => { user_turn_id: string; task: Record<string, unknown> } | null;
+  }) => { user_turn_id: string; task: Record<string, unknown> } | { error: { code: string; message: string } };
   saveExecutionPlan: (args: {
     flowId: string;
     title: string;
@@ -296,14 +296,14 @@ export function createLeaderToolHandlers(
         activeForm: parsed.active_form,
         currentTurnInput: currentTurnInput(),
       });
-      if (result) {
-        await hooks.onTaskCreated?.({
-          flowId: parsed.flow_id,
-          userTurnId: result.user_turn_id,
-          task: result.task,
-        });
-      }
-      return result ? ok(result) : fail("ACTIVE_USER_TURN_REQUIRED", "Task could not be created for the current UserTurn.");
+      if (!result) return fail("ACTIVE_USER_TURN_REQUIRED", "Task could not be created for the current UserTurn.");
+      if ("error" in result) return fail(result.error.code, result.error.message);
+      await hooks.onTaskCreated?.({
+        flowId: parsed.flow_id,
+        userTurnId: result.user_turn_id,
+        task: result.task,
+      });
+      return ok(result);
     },
 
     async saveExecutionPlan(input: SaveExecutionPlanInputValue) {
@@ -472,19 +472,24 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "create_task",
-    { title: "create_task", description: "Create an observable task card for the active UserTurn.", inputSchema: CreateTaskInput },
+    { title: "create_task", description: "Create a task for the active UserTurn (single-expert path). Multi-step same-role work goes into one task description. Do not use after an orchestration plan was submitted this turn.", inputSchema: CreateTaskInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.createTask(input) }] }),
   );
 
   server.registerTool(
     "save_execution_plan",
-    { title: "save_execution_plan", description: "Save the active UserTurn plan as a Flow artifact.", inputSchema: SaveExecutionPlanInput },
+    { title: "save_execution_plan", description: "Save an execution plan artifact for the active UserTurn (e.g. after Spec approval, single-expert path).", inputSchema: SaveExecutionPlanInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.saveExecutionPlan(input) }] }),
   );
 
   server.registerTool(
     "submit_orchestration_plan",
-    { title: "submit_orchestration_plan", description: "Submit a structured, reviewable Expert task DAG for the active UserTurn. Declare every execution dependency: implementation must feed Verify, and Verify must feed CodeReview when those roles are present.", inputSchema: SubmitOrchestrationPlanInput },
+    {
+      title: "submit_orchestration_plan",
+      description:
+        "Submit a multi-expert orchestration plan. Requires 2+ distinct enabled expert roles; single-role work must use create_task + dispatch_agent instead. node expert_id may be person_name, role_title, or template expert_id. After success, stop; platform handles approval and execution.",
+      inputSchema: SubmitOrchestrationPlanInput,
+    },
     async (input) => ({ content: [{ type: "text", text: await handlers.submitOrchestrationPlan(input) }] }),
   );
 
@@ -496,7 +501,7 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "update_task",
-    { title: "update_task", description: "Update task fields, status, owner metadata, or dependencies.", inputSchema: UpdateTaskInput },
+    { title: "update_task", description: "Update task fields, status, or dependencies (single-expert / manual task path).", inputSchema: UpdateTaskInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.updateTask(input) }] }),
   );
 
@@ -514,7 +519,7 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "dispatch_agent",
-    { title: "dispatch_agent", description: "Start a task-bound Expert agent session.", inputSchema: DispatchAgentInput },
+    { title: "dispatch_agent", description: "Start or resume a task-bound Expert (single-expert path). expert_id must be an enabled template id from get_context.experts.", inputSchema: DispatchAgentInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.dispatchAgent(input) }] }),
   );
 

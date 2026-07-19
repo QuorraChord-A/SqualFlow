@@ -254,7 +254,10 @@ export const eventLog = sqliteTable("event_log", {
 export const experts = sqliteTable("experts", {
   id: text("id").primaryKey(),
   role: text("role").notNull(),
+  /** Fixed Chinese role title shown under the person name in UI, e.g. 全栈开发专家. */
   name: text("name").notNull(),
+  /** Candidate person names for FlowExpert display_name; one is chosen per Flow. */
+  personNameCandidates: text("person_name_candidates").notNull().default("[]"),
   systemPrompt: text("system_prompt").notNull(),
   builtinTools: text("builtin_tools").notNull().default("[]"),
   mcpTools: text("mcp_tools").notNull().default("[]"),

@@ -1027,7 +1027,7 @@ describe("leader MCP server", () => {
 
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-      "ask_user",
+        "ask_user",
         "cancel_agent",
         "create_plan",
         "create_task",

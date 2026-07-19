@@ -49,6 +49,54 @@ describe("structured orchestration", () => {
     ]));
   });
 
+  it("requires at least two distinct expert roles for an orchestration plan", () => {
+    const node = {
+      node_id: "a", expert_id: "exp-coder", title: "步骤", description: "步骤",
+      depends_on: [] as string[], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [],
+    };
+    const base = { flow_id: "flow", title: "多步", objective: "多步", work_kind: "change" as const, risk_level: "low" as const };
+
+    const singleNode = lintOrchestrationPlan({ ...base, nodes: [node] }, new Set(["exp-coder"]));
+    expect(singleNode.map((issue) => issue.code)).toContain("ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS");
+
+    const sameRoleTwice = lintOrchestrationPlan(
+      { ...base, nodes: [node, { ...node, node_id: "b", depends_on: ["a"] }] },
+      new Set(["exp-coder"]),
+    );
+    expect(sameRoleTwice.map((issue) => issue.code)).toContain("ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS");
+
+    const twoRoles = lintOrchestrationPlan(
+      {
+        ...base,
+        nodes: [node, { ...node, node_id: "verify", expert_id: "exp-verify", depends_on: ["a"] }],
+      },
+      new Set(["exp-coder", "exp-verify"]),
+    );
+    expect(twoRoles.map((issue) => issue.code)).not.toContain("ORCHESTRATION_REQUIRES_MULTIPLE_EXPERTS");
+  });
+
+  it("requires review nodes to depend on the implementation chain even without verify", () => {
+    const base = { flow_id: "flow", title: "实现加审查", objective: "实现加审查", work_kind: "change" as const, risk_level: "medium" as const };
+    const code = {
+      node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现",
+      depends_on: [] as string[], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [],
+    };
+    const review = {
+      node_id: "review", expert_id: "exp-codereview", title: "审查", description: "审查",
+      depends_on: [] as string[], acceptance_criteria: ["通过"], risk_tags: [], side_effects: [], resource_keys: [],
+    };
+    const available = new Set(["exp-coder", "exp-codereview"]);
+
+    const parallelReview = lintOrchestrationPlan({ ...base, nodes: [code, review] }, available);
+    expect(parallelReview.map((issue) => issue.code)).toContain("REVIEW_WITHOUT_IMPLEMENTATION_DEPENDENCY");
+
+    const orderedReview = lintOrchestrationPlan(
+      { ...base, nodes: [code, { ...review, depends_on: ["code"] }] },
+      available,
+    );
+    expect(orderedReview.filter((issue) => issue.severity === "block")).toEqual([]);
+  });
+
   it("rejects quality tasks that are not connected to the implementation chain", () => {
     const input = {
       flow_id: "flow",

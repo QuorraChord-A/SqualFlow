@@ -104,6 +104,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     leader_runtime_model_id: flow.leaderRuntimeModelId,
     leader_runtime_reasoning_effort: flow.leaderRuntimeReasoningEffort,
     leader_agent_session_id: leader?.id ?? null,
+    // Template catalog (runtime enablement). Prefer `team` for Leader planning by person name.
     experts: store.listExperts().map((expert) => {
       const runtimeRole = expert.role === "leader" ? "leader" : runtimeRoleForExpertRole(expert.role);
       const enabled = isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role);
@@ -111,9 +112,29 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
         expert_id: expert.id,
         role: expert.role,
         name: expert.name,
+        role_title: expert.name,
         runtime_role: runtimeRole,
         enabled,
         disabled_reason: enabled ? null : "runtime_role_disabled",
+      };
+    }),
+    // Only experts already used in this Flow (on-demand). Catalog + enabled flags live in `experts`.
+    team: store.listFlowExperts(flowId).map((flowExpert) => {
+      const expert = store.getExpert(flowExpert.expertId);
+      const runtimeRole = expert
+        ? (expert.role === "leader" ? "leader" : runtimeRoleForExpertRole(expert.role))
+        : "coder";
+      const enabled = expert
+        ? isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role)
+        : false;
+      return {
+        person_name: flowExpert.displayName,
+        role_title: expert?.name ?? flowExpert.expertId,
+        capability: expert?.role ?? "",
+        expert_id: flowExpert.expertId,
+        enabled,
+        disabled_reason: enabled ? null : "runtime_role_disabled",
+        runtime_role: runtimeRole,
       };
     }),
     active_user_turn_id: activeUserTurn?.id ?? null,

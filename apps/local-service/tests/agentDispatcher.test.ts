@@ -253,10 +253,17 @@ describe("agent dispatcher", () => {
         task_id: task.id,
         expert_id: "exp-coder",
         flow_expert_id: result.flow_expert_id,
-        display_name: "Coder",
+        // Person name from template candidates (not role title / "Coder").
+        display_name: expect.stringMatching(/^.{2,3}$/),
         status: "queued",
       }),
     }));
+    const createdSessionEvent = events.find((event) =>
+      event.type === "session:event"
+      && (event as { data?: { event?: string } }).data?.event === "created"
+    ) as { data: { display_name: string } } | undefined;
+    expect(createdSessionEvent?.data.display_name).not.toBe("Coder");
+    expect(createdSessionEvent?.data.display_name).not.toBe("全栈开发专家");
     expect(events.some((event) => event.type === "session:history")).toBe(false);
     const audit = store.listEventLog(flow.id).find((event) =>
       event.agentSessionId === agentSessionId && event.eventType === "agent_session.leader_message"
