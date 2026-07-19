@@ -18,6 +18,10 @@ import { ChatJournal } from "../src/ws/chatJournal.js";
 import { EventBus } from "../src/ws/eventBus.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
 import { DesktopBridge } from "../src/server/desktopBridge.js";
+import {
+  resetQueryLifecycleTimeoutsForTests,
+  setQueryLifecycleTimeoutsForTests,
+} from "../src/runtime/queryLifecyclePolicy.js";
 
 const dirs: string[] = [];
 const stores: Array<ReturnType<typeof createStore>> = [];
@@ -373,6 +377,7 @@ function createRunningTask(store: ReturnType<typeof createStore>, expertId = "ex
 }
 
 afterEach(() => {
+  resetQueryLifecycleTimeoutsForTests();
   config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
   for (const store of stores.splice(0)) store.sqlite.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -758,6 +763,39 @@ describe("ExpertRuntime", () => {
     });
 
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
+  });
+
+  it("fails a stuck Expert task when the SDK produces no progress events", async () => {
+    setQueryLifecycleTimeoutsForTests({ zeroProgressMs: 40 });
+    const store = tempStore();
+    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const close = vi.fn();
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({
+        expertQuery: () => ({
+          async *[Symbol.asyncIterator]() {
+            await new Promise(() => {});
+          },
+          close,
+        }),
+      }),
+    });
+
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: task.id,
+      agentSessionId: session.id,
+    });
+
+    expect(store.getTask(task.id)?.status).toBe("failed");
+    expect(store.getAgentSession(session.id)?.status).toBe("failed");
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
+    // Group is settled by failTurn (resolve), not rejected — runTask completes after release.
+    expect(store.getTask(task.id)?.errorMessage).toContain("no progress");
   });
 
   it("starts the next Expert task even when prior context usage never returns and the iterator stays open", async () => {

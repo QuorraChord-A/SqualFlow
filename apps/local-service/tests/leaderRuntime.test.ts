@@ -16,6 +16,11 @@ import { DesktopBridge } from "../src/server/desktopBridge.js";
 import { ChatJournal } from "../src/ws/chatJournal.js";
 import { EventBus } from "../src/ws/eventBus.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
+import {
+  resetQueryLifecycleTimeoutsForTests,
+  setQueryLifecycleTimeoutsForTests,
+  ZERO_PROGRESS_ERROR_MESSAGE,
+} from "../src/runtime/queryLifecyclePolicy.js";
 
 const dirs: string[] = [];
 const stores: Array<ReturnType<typeof createStore>> = [];
@@ -170,6 +175,7 @@ function createFlowLeader(store: ReturnType<typeof createStore>) {
 }
 
 afterEach(() => {
+  resetQueryLifecycleTimeoutsForTests();
   config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
   for (const store of stores.splice(0)) store.sqlite.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -731,6 +737,42 @@ describe("LeaderRuntime platform event protocol", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
 
+  it("fails a stuck Leader turn when the SDK produces no progress events", async () => {
+    setQueryLifecycleTimeoutsForTests({ zeroProgressMs: 40 });
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const close = vi.fn();
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({
+        leaderQuery: () => ({
+          async *[Symbol.asyncIterator]() {
+            // Never yields — reproduces a dead query after the user message was accepted.
+            await new Promise(() => {});
+          },
+          close,
+        }),
+      }),
+    });
+
+    await expect(runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "这句话会卡住",
+      userTurnId: userTurn.id,
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    })).rejects.toThrow(ZERO_PROGRESS_ERROR_MESSAGE);
+
+    await vi.waitFor(() => expect(close).toHaveBeenCalled());
+    expect(store.getUserTurn(userTurn.id)?.status).toBe("failed");
+    expect(store.getAgentSession(leader.id)?.status).toBe("failed");
+  });
+
   it("starts the next Leader turn even when prior context usage never returns and the iterator stays open", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
@@ -801,7 +843,6 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(queryCount).toBe(2);
     expect(prompts[0]).toBe("测试3");
     expect(prompts[1]).toBe("直接输出1-500");
-    // Context usage timeout is 2s; next turn must not approach multi-minute hangs.
     expect(secondDurationMs).toBeLessThan(5_000);
     expect(closeFns[1]).toHaveBeenCalled();
   });

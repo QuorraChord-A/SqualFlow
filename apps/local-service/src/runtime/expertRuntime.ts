@@ -43,6 +43,10 @@ import { errorDiagnostic, type OperationalLogger } from "../observability/operat
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
 import { BROWSER_MCP_TOOL_PREFIX, createBrowserMcpServer, createBrowserToolHandlers } from "../mcp/browserServer.js";
 import { buildPlatformEvent, computeFlowSig, parseMessageSegments } from "../protocol/platformEvent.js";
+import {
+  queryZeroProgressMs,
+  ZERO_PROGRESS_ERROR_MESSAGE,
+} from "./queryLifecyclePolicy.js";
 
 export type ExpertTaskInput = {
   flowId: string;
@@ -295,6 +299,7 @@ class FlowExpertWorker {
   private inputClosed = false;
   private closed = false;
   private finalized = false;
+  private progressTimer: ReturnType<typeof setTimeout> | null = null;
   private sessionId: string;
   private resolveFinished!: () => void;
   readonly finished = new Promise<void>((resolve) => {
@@ -405,6 +410,7 @@ class FlowExpertWorker {
 
   async close() {
     if (this.closed) return;
+    this.clearProgressWatch();
     await this.failOutstanding(new Error("Expert runtime closed"), "interrupted");
     this.finishInput();
     this.query?.close?.();
@@ -419,6 +425,7 @@ class FlowExpertWorker {
     )) {
       return false;
     }
+    this.clearProgressWatch();
     this.closed = true;
     this.active = null;
     this.queued.length = 0;
@@ -474,6 +481,7 @@ class FlowExpertWorker {
     }
     this.deps.desktopBridge?.releaseLease(active.agentSessionId);
     this.clearBrowserTurnContext(active.agentSessionId);
+    this.clearProgressWatch();
     this.finishInput();
     this.query?.close?.();
     this.releaseBrowserTurnLease();
@@ -575,7 +583,33 @@ class FlowExpertWorker {
     this.input.close();
   }
 
+  private clearProgressWatch() {
+    if (!this.progressTimer) return;
+    clearTimeout(this.progressTimer);
+    this.progressTimer = null;
+  }
+
+  /** Any SDK event (or turn start) proves the connection is still alive. */
+  private noteProgress() {
+    if (!this.active || this.closed) return;
+    this.clearProgressWatch();
+    const timeoutMs = queryZeroProgressMs();
+    this.progressTimer = setTimeout(() => {
+      this.progressTimer = null;
+      if (!this.active || this.closed || this.finalized) return;
+      this.logLifecycle("zero_progress_timeout", { timeoutMs });
+      void this.failAndRelease(new Error(ZERO_PROGRESS_ERROR_MESSAGE));
+    }, timeoutMs);
+  }
+
+  private async failAndRelease(error: Error) {
+    this.clearProgressWatch();
+    await this.failOutstanding(error);
+    this.releaseForReuse("zero_progress_timeout");
+  }
+
   private releaseForReuse(reason: string) {
+    this.clearProgressWatch();
     if (this.finalized) {
       try {
         this.query?.close?.();
@@ -683,7 +717,10 @@ class FlowExpertWorker {
       await next.pusher.publishUserMessage(displayContent, next.userMessageId, next.startedAt);
       await next.pusher.consume(next.adapter.start());
       this.input.push(this.runtimeAdapter.createExpertUserMessage(next.content));
+      // Arm stall detection once the turn is delivered to the SDK.
+      this.noteProgress();
     } catch (error) {
+      this.clearProgressWatch();
       await this.failTurn(next, error instanceof Error ? error : new Error(String(error)));
       this.active = null;
       if (this.queued.length > 0) void this.activateNext();
@@ -697,6 +734,8 @@ class FlowExpertWorker {
     try {
       this.logLifecycle("query_consume_started");
       for await (const event of this.query!) {
+        // Any event from the live query counts as progress (prevents fake endless "thinking").
+        this.noteProgress();
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
         const chunks = active.adapter.adapt(event);
@@ -711,6 +750,7 @@ class FlowExpertWorker {
     } catch (error) {
       await this.failOutstanding(error instanceof Error ? error : new Error(String(error)));
     } finally {
+      this.clearProgressWatch();
       this.closed = true;
       this.inputClosed = true;
       try {
@@ -725,8 +765,13 @@ class FlowExpertWorker {
   private finalizeClosedWorker() {
     if (this.finalized) return;
     this.finalized = true;
+    this.clearProgressWatch();
     this.logLifecycle("query_finished", { reason: "finalize_closed_worker" });
-    this.deps.store.updateFlowExpertStatus(this.flowExpertId, "idle");
+    try {
+      this.deps.store.updateFlowExpertStatus(this.flowExpertId, "idle");
+    } catch {
+      // Store may already be closed during process/test teardown.
+    }
     this.onClosed();
     this.resolveFinished();
   }
@@ -764,38 +809,52 @@ class FlowExpertWorker {
         || `Expert SDK result was not successful: ${active.adapter.resultStatus ?? "unknown"}`;
       await this.failTurn(active, new Error(errorMessage));
       this.dropQueuedTurnsForGroup(active.group);
-      // failTurn already settles the group.
-    } else if (nextIsSameTask) {
+      // failTurn already settles the group. Failed turns do not keep a warm query.
+      this.active = null;
+      this.clearProgressWatch();
+      if (this.queued.length > 0) {
+        void this.activateNext();
+        return;
+      }
+      this.finishInput();
+      this.releaseForReuse("turn_failed");
+      return;
+    }
+    if (nextIsSameTask) {
       // Keep the shared query for ordered same-task queue processing; no telemetry here.
       this.logTurnCompleted(active);
       this.clearBrowserTurnContext(active.agentSessionId);
       this.active = null;
+      this.clearProgressWatch();
       void this.activateNext();
       return;
-    } else {
-      this.logTurnCompleted(active);
-      const changed = await this.filesChangedSince(active);
-      const result = assembleExpertResult({
-        finalAssistantText: active.adapter.finalAssistantText,
-        turnOutcome: "completed",
-        filesChanged: changed.files,
-        metrics: this.turnMetrics(active, changed.filesChangedSkipped),
-      });
-      this.deps.store.completeTask(active.task.id, JSON.stringify(result));
-      this.deps.store.updateAgentSessionStatus(active.agentSessionId, "completed");
-      this.deps.desktopBridge?.releaseLease(active.agentSessionId);
-      this.clearBrowserTurnContext(active.agentSessionId);
-      await publishFinished(this.deps, active.task, active.agentSessionId, this.flowExpertId, "completed", result);
-      pendingSettle = active.group;
     }
+    this.logTurnCompleted(active);
+    const changed = await this.filesChangedSince(active);
+    const result = assembleExpertResult({
+      finalAssistantText: active.adapter.finalAssistantText,
+      turnOutcome: "completed",
+      filesChanged: changed.files,
+      metrics: this.turnMetrics(active, changed.filesChangedSkipped),
+    });
+    this.deps.store.completeTask(active.task.id, JSON.stringify(result));
+    this.deps.store.updateAgentSessionStatus(active.agentSessionId, "completed");
+    this.deps.desktopBridge?.releaseLease(active.agentSessionId);
+    this.clearBrowserTurnContext(active.agentSessionId);
+    await publishFinished(this.deps, active.task, active.agentSessionId, this.flowExpertId, "completed", result);
+    pendingSettle = active.group;
 
     this.active = null;
+    this.clearProgressWatch();
     if (this.queued.length > 0) {
       if (pendingSettle) this.settle(pendingSettle);
       void this.activateNext();
       return;
     }
-    // Idle path: close input then force-close so the next task never waits on a stuck CLI.
+    // Idle path: close immediately and resume on the next task.
+    // Real Claude/Mimo agent CLI does not reliably accept a new task on the same
+    // streaming query after an idle gap (hot-reuse leaves the next task stuck with
+    // no SDK events). Same-query reuse still works for turns already in `queued`.
     this.finishInput();
     this.releaseForReuse("idle_after_turn_complete");
     // Resolve runTask only after the query lease is released.

@@ -47,6 +47,11 @@ import { checkPermission, type CheckPermissionArgs } from "../permissions/permis
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
+import {
+  queryWaitFinishedMs,
+  queryZeroProgressMs,
+  ZERO_PROGRESS_ERROR_MESSAGE,
+} from "./queryLifecyclePolicy.js";
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
 
@@ -229,9 +234,6 @@ function createPendingLeaderStart(): PendingLeaderStart {
   return { cancelled: false, settled, settle };
 }
 
-/** Safety net when a prior stream did not finalize after finishInput/close. */
-const LEADER_WAIT_FINISHED_TIMEOUT_MS = 5_000;
-
 class LeaderFlowStream {
   private readonly input;
   private readonly queued: DeferredTurn[] = [];
@@ -241,6 +243,7 @@ class LeaderFlowStream {
   private closed = false;
   private inputClosed = false;
   private finalized = false;
+  private progressTimer: ReturnType<typeof setTimeout> | null = null;
   private resolveFinished!: () => void;
   readonly finished = new Promise<void>((resolve) => {
     this.resolveFinished = resolve;
@@ -357,9 +360,10 @@ class LeaderFlowStream {
 
   /**
    * Force-close the SDK query and release the runtime lease.
-   * Used after an idle turn completes, and as a timeout safety net for waiters.
+   * Used after an idle turn completes, on cancel/fail, and as a wait-finished safety net.
    */
   releaseForReuse(reason: string) {
+    this.clearProgressWatch();
     if (this.finalized) {
       try {
         this.query?.close?.();
@@ -387,6 +391,7 @@ class LeaderFlowStream {
 
   cancel() {
     if (this.closed && this.finalized) return;
+    this.clearProgressWatch();
     this.closed = true;
     this.inputClosed = true;
     this.releaseBrowserTurnLease();
@@ -503,6 +508,7 @@ class LeaderFlowStream {
   private finalize(reason: string) {
     if (this.finalized) return;
     this.finalized = true;
+    this.clearProgressWatch();
     this.logLifecycle("query_finished", { reason });
     this.onClosed();
     this.resolveFinished();
@@ -513,6 +519,25 @@ class LeaderFlowStream {
     this.inputClosed = true;
     this.logLifecycle("finishInput");
     this.input.close();
+  }
+
+  private clearProgressWatch() {
+    if (!this.progressTimer) return;
+    clearTimeout(this.progressTimer);
+    this.progressTimer = null;
+  }
+
+  /** Any SDK event (or turn start) proves the connection is still alive. */
+  private noteProgress() {
+    if (!this.active || this.closed) return;
+    this.clearProgressWatch();
+    const timeoutMs = queryZeroProgressMs();
+    this.progressTimer = setTimeout(() => {
+      this.progressTimer = null;
+      if (!this.active || this.closed || this.finalized) return;
+      this.logLifecycle("zero_progress_timeout", { timeoutMs });
+      void this.fail(new Error(ZERO_PROGRESS_ERROR_MESSAGE));
+    }, timeoutMs);
   }
 
   private async activateNext() {
@@ -557,8 +582,11 @@ class LeaderFlowStream {
       });
       await next.pusher.consume(next.adapter.start());
       this.input.push(this.runtimeAdapter.createLeaderUserMessage(next.turn));
+      // Arm stall detection once the turn is delivered to the SDK.
+      this.noteProgress();
     } catch (error) {
       this.active = null;
+      this.clearProgressWatch();
       const failure = error instanceof Error ? error : new Error(String(error));
       next.reject(failure);
       await this.fail(failure, next);
@@ -571,6 +599,8 @@ class LeaderFlowStream {
     try {
       this.logLifecycle("query_consume_started");
       for await (const event of this.query!) {
+        // Any event from the live query counts as progress (prevents fake endless "thinking").
+        this.noteProgress();
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
         const chunks = active.adapter.adapt(event);
@@ -593,6 +623,7 @@ class LeaderFlowStream {
     } catch (error) {
       if (!this.closed) await this.fail(error instanceof Error ? error : new Error(String(error)));
     } finally {
+      this.clearProgressWatch();
       this.closed = true;
       this.inputClosed = true;
       try {
@@ -664,6 +695,7 @@ class LeaderFlowStream {
     });
 
     this.active = null;
+    this.clearProgressWatch();
     this.onCurrentTurnInput(undefined);
     if (this.queued.length > 0) {
       // Keep the shared query for ordered queue processing.
@@ -683,7 +715,10 @@ class LeaderFlowStream {
         if (waiting) await publishUserTurnEvent(this.deps.eventBus, waiting, active.turn.logId);
       }
     }
-    // Idle path: close input then force-close so the next message never waits on a stuck CLI.
+    // Idle path: close immediately and resume on the next message.
+    // Real Claude/Mimo agent CLI does not reliably accept a new user message on the
+    // same streaming query after an idle gap (hot-reuse leaves the next turn stuck
+    // with no SDK events). Same-query reuse still works for turns already in `queued`.
     this.finishInput();
     this.releaseForReuse("idle_after_turn_complete");
     active.resolve();
@@ -710,6 +745,7 @@ class LeaderFlowStream {
 
   private async fail(error: Error, active = this.active ?? undefined) {
     if (this.closed && this.finalized) return;
+    this.clearProgressWatch();
     this.closed = true;
     this.inputClosed = true;
     this.releaseBrowserTurnLease();
@@ -1274,7 +1310,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
             setTimeout(() => {
               existing.releaseForReuse("wait_finished_timeout");
               resolve();
-            }, LEADER_WAIT_FINISHED_TIMEOUT_MS);
+            }, queryWaitFinishedMs());
           }),
         ]);
         input.logger?.info({
