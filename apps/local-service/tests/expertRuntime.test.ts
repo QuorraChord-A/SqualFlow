@@ -568,15 +568,14 @@ describe("ExpertRuntime", () => {
             session_id: "sdk-expert-verify",
             duration_ms: 5678,
             is_error: false,
+            // Overall occupancy = input + cache_read + cache_creation (14k total).
+            usage: {
+              input_tokens: 4_000,
+              cache_read_input_tokens: 10_000,
+              cache_creation_input_tokens: 0,
+            },
           },
         ],
-        {
-          totalTokens: 14_000,
-          maxTokens: 200_000,
-          rawMaxTokens: 200_000,
-          percentage: 7,
-          model: "claude-sonnet",
-        },
       ) }),
     });
 
@@ -643,7 +642,8 @@ describe("ExpertRuntime", () => {
         data: expect.objectContaining({ agent_session_id: session.id, status: "completed" }),
       }),
     ]));
-    expect(store.getAgentContextUsageSnapshot(session.id)).toEqual(expect.objectContaining({
+    const usage = store.getAgentContextUsageSnapshot(session.id);
+    expect(usage).toEqual(expect.objectContaining({
       flowId: flow.id,
       agentSessionId: session.id,
       sdkSessionId: "sdk-expert-verify",
@@ -651,9 +651,11 @@ describe("ExpertRuntime", () => {
       expertId: "exp-verify",
       totalTokens: 14_000,
       maxTokens: 200_000,
-      percentage: 7,
-      model: "claude-sonnet",
+      cacheInputTokens: 4_000,
+      cacheReadInputTokens: 10_000,
+      cacheCreationInputTokens: 0,
     }));
+    expect(usage?.percentage).toBeCloseTo(7, 5);
   });
 
   it("notifies the Leader queue before publishing an Expert completion event", async () => {

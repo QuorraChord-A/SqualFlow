@@ -26,9 +26,10 @@ import { beginControlledEditReview, consumeControlledEditToolResults } from "../
 import { planRevisionView } from "../domain/orchestrationView.js";
 import {
   contextUsageSnapshotToPayload,
-  mergeContextCacheUsage,
+  overallContextUsageFromResultCache,
   type ContextUsageSnapshot,
 } from "../domain/contextUsage.js";
+import { runtimeModelContextWindowK } from "../config/runtimeModelContext.js";
 import type { EventBus } from "../ws/eventBus.js";
 import type { ChatJournal } from "../ws/chatJournal.js";
 import { WsPusher } from "../ws/pusher.js";
@@ -228,13 +229,10 @@ function createPendingLeaderStart(): PendingLeaderStart {
   return { cancelled: false, settled, settle };
 }
 
-/** Best-effort telemetry only; must never keep the shared Claude query alive. */
-const LEADER_CONTEXT_USAGE_TIMEOUT_MS = 2_000;
 /** Safety net when a prior stream did not finalize after finishInput/close. */
 const LEADER_WAIT_FINISHED_TIMEOUT_MS = 5_000;
 
 class LeaderFlowStream {
-  private static readonly CONTEXT_USAGE_SAMPLE_INTERVAL_MS = 5_000;
   private readonly input;
   private readonly queued: DeferredTurn[] = [];
   private active: DeferredTurn | null = null;
@@ -244,9 +242,6 @@ class LeaderFlowStream {
   private inputClosed = false;
   private finalized = false;
   private resolveFinished!: () => void;
-  private contextUsageCaptureInFlight = false;
-  private contextUsageCaptureRequested = false;
-  private contextUsageTimer: ReturnType<typeof setTimeout> | null = null;
   readonly finished = new Promise<void>((resolve) => {
     this.resolveFinished = resolve;
   });
@@ -262,6 +257,8 @@ class LeaderFlowStream {
     private readonly onClosed: () => void,
     private readonly desktopBridge: DesktopBridge | undefined,
     private readonly browserTurnContext: { agentSessionId: string | null },
+    private readonly contextWindowTokens: number | null,
+    private readonly modelName: string | null,
   ) {
     this.input = runtimeAdapter.createInputQueue();
     this.sessionId = firstTurn.leaderSessionId;
@@ -374,7 +371,6 @@ class LeaderFlowStream {
     this.logLifecycle("query_close_called", { reason, inputClosed: this.inputClosed, closed: this.closed });
     this.closed = true;
     this.inputClosed = true;
-    this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
     try {
       this.input.close();
@@ -393,7 +389,6 @@ class LeaderFlowStream {
     if (this.closed && this.finalized) return;
     this.closed = true;
     this.inputClosed = true;
-    this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
     const turns = [this.active, ...this.queued].filter((turn): turn is DeferredTurn => Boolean(turn));
     this.active = null;
@@ -420,20 +415,34 @@ class LeaderFlowStream {
     this.browserTurnContext.agentSessionId = null;
   }
 
+  /**
+   * Overall occupancy only. Built from the latest turn result usage — never hits the
+   * live Claude control channel (getContextUsage control requests can stall the shared pipe).
+   */
   async getContextUsage(): Promise<ContextUsageSnapshot | null> {
-    const getContextUsage = this.query?.getContextUsage;
-    if (!getContextUsage) return null;
-    const snapshot = this.runtimeAdapter.contextUsageSnapshot(await getContextUsage.call(this.query));
-    this.persistContextUsage(snapshot);
-    return snapshot;
+    const active = this.active;
+    if (!active?.adapter) return null;
+    const previous = this.deps.store.getAgentContextUsageSnapshot(active.turn.leaderAgentSessionId);
+    return overallContextUsageFromResultCache(active.adapter.resultCacheUsage, {
+      maxTokens: this.contextWindowTokens ?? previous?.maxTokens ?? null,
+      model: this.modelName ?? previous?.model ?? null,
+      previous: previous
+        ? { maxTokens: previous.maxTokens, rawMaxTokens: previous.rawMaxTokens, model: previous.model }
+        : null,
+    });
   }
 
-  private persistContextUsage(snapshot: ContextUsageSnapshot, active = this.active) {
-    if (!active) return;
-    const sdkSessionId = active.adapter?.sdkSessionId ?? this.sessionId;
-    const cacheUsage = active.adapter?.resultCacheUsage ?? null;
+  private persistOverallContextUsageFromResult(active: DeferredTurn) {
     const previous = this.deps.store.getAgentContextUsageSnapshot(active.turn.leaderAgentSessionId);
-    const persistedSnapshot = mergeContextCacheUsage(snapshot, cacheUsage, previous);
+    const snapshot = overallContextUsageFromResultCache(active.adapter?.resultCacheUsage, {
+      maxTokens: this.contextWindowTokens ?? previous?.maxTokens ?? null,
+      model: this.modelName ?? previous?.model ?? null,
+      previous: previous
+        ? { maxTokens: previous.maxTokens, rawMaxTokens: previous.rawMaxTokens, model: previous.model }
+        : null,
+    });
+    if (!snapshot) return;
+    const sdkSessionId = active.adapter?.sdkSessionId ?? this.sessionId;
     this.deps.store.upsertAgentContextUsageSnapshot({
       flowId: active.turn.flowId,
       agentSessionId: active.turn.leaderAgentSessionId,
@@ -441,23 +450,29 @@ class LeaderFlowStream {
       role: "leader",
       expertId: "exp-leader",
       flowExpertId: null,
-      totalTokens: persistedSnapshot.totalTokens,
-      maxTokens: persistedSnapshot.maxTokens,
-      rawMaxTokens: persistedSnapshot.rawMaxTokens,
-      percentage: persistedSnapshot.percentage,
-      model: persistedSnapshot.model,
-      categories: persistedSnapshot.categories,
-      cacheInputTokens: persistedSnapshot.cacheInputTokens,
-      cacheReadInputTokens: persistedSnapshot.cacheReadInputTokens,
-      cacheCreationInputTokens: persistedSnapshot.cacheCreationInputTokens,
-      cacheHitRate: persistedSnapshot.cacheHitRate,
-      compacted: persistedSnapshot.compacted,
-      observedAt: persistedSnapshot.observedAt,
+      totalTokens: snapshot.totalTokens,
+      maxTokens: snapshot.maxTokens,
+      rawMaxTokens: snapshot.rawMaxTokens,
+      percentage: snapshot.percentage,
+      model: snapshot.model,
+      categories: snapshot.categories,
+      cacheInputTokens: snapshot.cacheInputTokens,
+      cacheReadInputTokens: snapshot.cacheReadInputTokens,
+      cacheCreationInputTokens: snapshot.cacheCreationInputTokens,
+      cacheHitRate: snapshot.cacheHitRate,
+      compacted: snapshot.compacted,
+      observedAt: snapshot.observedAt,
+    });
+    this.logLifecycle("context_usage:from_result", {
+      agentSessionId: active.turn.leaderAgentSessionId,
+      totalTokens: snapshot.totalTokens,
+      maxTokens: snapshot.maxTokens,
+      percentage: snapshot.percentage,
     });
     void this.deps.eventBus.publish(active.turn.flowId, {
       type: "context_usage:event",
       flow_id: active.turn.flowId,
-      data: contextUsageSnapshotToPayload(persistedSnapshot, {
+      data: contextUsageSnapshotToPayload(snapshot, {
         agentSessionId: active.turn.leaderAgentSessionId,
         sdkSessionId,
         role: "leader",
@@ -491,84 +506,6 @@ class LeaderFlowStream {
     this.logLifecycle("query_finished", { reason });
     this.onClosed();
     this.resolveFinished();
-  }
-
-  private async captureContextUsage(
-    active = this.active,
-    options?: { timeoutMs?: number; allowAfterInputClosed?: boolean },
-  ) {
-    const getContextUsage = this.query?.getContextUsage;
-    if (!active || !getContextUsage || this.closed) return;
-    if (this.inputClosed && !options?.allowAfterInputClosed) return;
-    if (this.contextUsageCaptureInFlight) {
-      this.contextUsageCaptureRequested = true;
-      return;
-    }
-    this.contextUsageCaptureInFlight = true;
-    const timeoutMs = options?.timeoutMs ?? LEADER_CONTEXT_USAGE_TIMEOUT_MS;
-    const startedAt = Date.now();
-    this.logLifecycle("context_usage:start", {
-      agentSessionId: active.turn.leaderAgentSessionId,
-      timeoutMs,
-    });
-    try {
-      const raw = await Promise.race([
-        getContextUsage.call(this.query),
-        new Promise<"__timeout__">((resolve) => {
-          setTimeout(() => resolve("__timeout__"), timeoutMs);
-        }),
-      ]);
-      if (raw === "__timeout__") {
-        this.logLifecycle("context_usage:timeout", {
-          agentSessionId: active.turn.leaderAgentSessionId,
-          durationMs: Date.now() - startedAt,
-          timeoutMs,
-        });
-        return;
-      }
-      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(raw), active);
-      this.logLifecycle("context_usage:end", {
-        agentSessionId: active.turn.leaderAgentSessionId,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (error) {
-      this.logLifecycle("context_usage:error", {
-        agentSessionId: active.turn.leaderAgentSessionId,
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // Keep the last persisted snapshot.
-    } finally {
-      this.contextUsageCaptureInFlight = false;
-      if (
-        this.contextUsageCaptureRequested
-        && this.active === active
-        && !this.closed
-        && !this.inputClosed
-      ) {
-        this.contextUsageCaptureRequested = false;
-        await this.captureContextUsage(active, options);
-      }
-    }
-  }
-
-  private startPeriodicContextUsageCapture(active: DeferredTurn) {
-    this.stopPeriodicContextUsageCapture();
-    this.contextUsageTimer = setTimeout(() => {
-      this.contextUsageTimer = null;
-      if (this.closed || this.inputClosed || this.active !== active) return;
-      void this.captureContextUsage(active).finally(() => {
-        if (!this.closed && !this.inputClosed && this.active === active) {
-          this.startPeriodicContextUsageCapture(active);
-        }
-      });
-    }, LeaderFlowStream.CONTEXT_USAGE_SAMPLE_INTERVAL_MS);
-  }
-
-  private stopPeriodicContextUsageCapture() {
-    if (this.contextUsageTimer) clearTimeout(this.contextUsageTimer);
-    this.contextUsageTimer = null;
-    this.contextUsageCaptureRequested = false;
   }
 
   private finishInput() {
@@ -620,9 +557,7 @@ class LeaderFlowStream {
       });
       await next.pusher.consume(next.adapter.start());
       this.input.push(this.runtimeAdapter.createLeaderUserMessage(next.turn));
-      this.startPeriodicContextUsageCapture(next);
     } catch (error) {
-      this.stopPeriodicContextUsageCapture();
       this.active = null;
       const failure = error instanceof Error ? error : new Error(String(error));
       next.reject(failure);
@@ -660,7 +595,6 @@ class LeaderFlowStream {
     } finally {
       this.closed = true;
       this.inputClosed = true;
-      this.stopPeriodicContextUsageCapture();
       try {
         this.input.close();
       } catch {
@@ -677,14 +611,12 @@ class LeaderFlowStream {
 
   private async complete(active: DeferredTurn) {
     if (this.active !== active || !active.adapter || !active.pusher) return;
-    this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
-    // Context usage is best-effort telemetry. Never start it fire-and-forget on the
-    // shared query while finishing a turn — a hung control request keeps the Claude
-    // process alive and blocks the next message on existing.finished.
     for (const chunk of active.adapter.finish()) {
       await active.pusher.consume(chunk);
     }
+    // Overall occupancy from result.usage only — never call SDK getContextUsage on the live chat query.
+    this.persistOverallContextUsageFromResult(active);
 
     this.syncSdkSessionId(active);
 
@@ -734,7 +666,7 @@ class LeaderFlowStream {
     this.active = null;
     this.onCurrentTurnInput(undefined);
     if (this.queued.length > 0) {
-      // Keep the shared query for ordered queue processing; do not issue telemetry on it.
+      // Keep the shared query for ordered queue processing.
       active.resolve();
       void this.activateNext();
       return;
@@ -751,19 +683,8 @@ class LeaderFlowStream {
         if (waiting) await publishUserTurnEvent(this.deps.eventBus, waiting, active.turn.logId);
       }
     }
-    // Idle path: close input first so the next message cannot attach to this query,
-    // then best-effort timed sample, then force-close the SDK process.
+    // Idle path: close input then force-close so the next message never waits on a stuck CLI.
     this.finishInput();
-    if (!this.contextUsageCaptureInFlight) {
-      await this.captureContextUsage(active, {
-        timeoutMs: LEADER_CONTEXT_USAGE_TIMEOUT_MS,
-        allowAfterInputClosed: true,
-      });
-    } else {
-      this.logLifecycle("context_usage:skip_inflight", {
-        agentSessionId: active.turn.leaderAgentSessionId,
-      });
-    }
     this.releaseForReuse("idle_after_turn_complete");
     active.resolve();
   }
@@ -791,7 +712,6 @@ class LeaderFlowStream {
     if (this.closed && this.finalized) return;
     this.closed = true;
     this.inputClosed = true;
-    this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
     try {
       this.input.close();
@@ -1035,6 +955,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const leaderCapabilities = normalizeRuntimeCapabilities(parseToolList(leader?.builtinTools));
     const leaderMcpTools = parseToolList(leader?.mcpTools);
     const authorizedTools = new Set([...parseToolList(leader?.builtinTools), ...leaderMcpTools]);
+    const modelName = runtimeConfigModelName(leaderRuntimeConfig.config, leaderRuntimeConfig.modelId) ?? null;
+    const contextWindowTokens = runtimeModelContextWindowK(leaderRuntimeConfig.config, modelName ?? "") * 1000;
     const options = runtimeAdapter.buildLeaderOptions({
       role: "leader",
       systemPrompt: withRuntimeEnvironmentNote(leader?.systemPrompt || "你是 SquadFlow Leader Agent。", cwd, turn.flowId),
@@ -1082,7 +1004,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       resume: turn.resumeSessionId,
       sessionId: turn.resumeSessionId ? undefined : turn.leaderSessionId,
       runtimeConfig: leaderRuntimeConfig.config,
-      modelName: runtimeConfigModelName(leaderRuntimeConfig.config, leaderRuntimeConfig.modelId) ?? undefined,
+      modelName: modelName ?? undefined,
       diagnostics: (event) => reportRuntimeDiagnostic({
         logger: input.logger,
         eventBus: input.eventBus,
@@ -1109,6 +1031,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       },
       input.desktopBridge,
       browserTurnContext,
+      contextWindowTokens,
+      modelName,
     );
     streams.set(turn.flowId, stream);
     return stream;

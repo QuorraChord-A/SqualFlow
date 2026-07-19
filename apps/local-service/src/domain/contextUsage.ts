@@ -111,6 +111,52 @@ export function liveContextUsageToSnapshot(raw: LiveContextUsage): ContextUsageS
   };
 }
 
+/**
+ * Build overall context occupancy from a turn's API result usage.
+ *
+ * Claude result.usage reports input/cache fields separately. Occupied context is:
+ *   input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+ * (verified against SDK getContextUsage.totalTokens on real Mimo sessions).
+ * Do not use input_tokens alone — it undercounts when prompt cache is active.
+ *
+ * maxTokens must come from model/runtime config (or a previous snapshot), not from result.usage.
+ */
+export function overallContextUsageFromResultCache(
+  cache: ContextCacheUsage | null | undefined,
+  options: {
+    maxTokens?: number | null;
+    model?: string | null;
+    previous?: Pick<ContextUsageSnapshot, "maxTokens" | "rawMaxTokens" | "model"> | null;
+  } = {},
+): ContextUsageSnapshot | null {
+  if (!cache) return null;
+  const cacheRead = cache.cacheReadInputTokens ?? 0;
+  const cacheCreation = cache.cacheCreationInputTokens ?? 0;
+  const totalTokens = cache.inputTokens + cacheRead + cacheCreation;
+  if (totalTokens <= 0) return null;
+  const maxTokens = options.maxTokens
+    ?? options.previous?.maxTokens
+    ?? options.previous?.rawMaxTokens
+    ?? null;
+  const percentage = typeof maxTokens === "number" && maxTokens > 0
+    ? (totalTokens / maxTokens) * 100
+    : null;
+  return {
+    totalTokens,
+    maxTokens,
+    rawMaxTokens: maxTokens,
+    percentage,
+    model: options.model ?? options.previous?.model ?? null,
+    categories: [],
+    cacheInputTokens: cache.inputTokens,
+    cacheReadInputTokens: cache.cacheReadInputTokens,
+    cacheCreationInputTokens: cache.cacheCreationInputTokens,
+    cacheHitRate: cache.cacheHitRate,
+    observedAt: new Date().toISOString(),
+    compacted: false,
+  };
+}
+
 export function contextUsageSnapshotToPayload(
   snapshot: ContextUsageSnapshot,
   input: {

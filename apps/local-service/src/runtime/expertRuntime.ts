@@ -28,9 +28,10 @@ import { assembleExpertResult, type ExpertResult, type TurnOutcome } from "../ha
 import { captureUserTurnBaselineAsync, summarizeUserTurnDiffAsync, type UserTurnBaseline } from "./userTurnDiff.js";
 import {
   contextUsageSnapshotToPayload,
-  mergeContextCacheUsage,
+  overallContextUsageFromResultCache,
   type ContextUsageSnapshot,
 } from "../domain/contextUsage.js";
+import { runtimeModelContextWindowK } from "../config/runtimeModelContext.js";
 import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/userTurnReview.js";
 import { checkPermission, type CheckPermissionArgs, type PermissionResult } from "../permissions/permissionPolicy.js";
 import type { ChatJournal } from "../ws/chatJournal.js";
@@ -284,11 +285,7 @@ function expertDisplayContent(content: string, flowId: string): string {
     .join("\n\n");
 }
 
-/** Best-effort telemetry only; must never keep the shared Claude query alive. */
-const EXPERT_CONTEXT_USAGE_TIMEOUT_MS = 2_000;
-
 class FlowExpertWorker {
-  private static readonly CONTEXT_USAGE_SAMPLE_INTERVAL_MS = 5_000;
   private readonly input;
   private readonly queued: FlowExpertTurn[] = [];
   private active: FlowExpertTurn | null = null;
@@ -299,9 +296,6 @@ class FlowExpertWorker {
   private closed = false;
   private finalized = false;
   private sessionId: string;
-  private contextUsageCaptureInFlight = false;
-  private contextUsageCaptureRequested = false;
-  private contextUsageTimer: ReturnType<typeof setTimeout> | null = null;
   private resolveFinished!: () => void;
   readonly finished = new Promise<void>((resolve) => {
     this.resolveFinished = resolve;
@@ -320,6 +314,8 @@ class FlowExpertWorker {
     private readonly permissionScopeContext: ExpertPermissionScopeContext,
     private readonly browserTurnContext?: BrowserTurnContext,
     private readonly mcpBindingClose?: () => Promise<void> | void,
+    private readonly contextWindowTokens: number | null = null,
+    private readonly modelName: string | null = null,
   ) {
     this.input = runtimeAdapter.createInputQueue();
     this.sessionId = initialSessionId;
@@ -409,7 +405,6 @@ class FlowExpertWorker {
 
   async close() {
     if (this.closed) return;
-    this.stopPeriodicContextUsageCapture();
     await this.failOutstanding(new Error("Expert runtime closed"), "interrupted");
     this.finishInput();
     this.query?.close?.();
@@ -425,7 +420,6 @@ class FlowExpertWorker {
       return false;
     }
     this.closed = true;
-    this.stopPeriodicContextUsageCapture();
     this.active = null;
     this.queued.length = 0;
     for (const turn of turns) this.settle(turn.group);
@@ -459,7 +453,6 @@ class FlowExpertWorker {
       return !belongsToCancelledSession;
     });
     this.closed = true;
-    this.stopPeriodicContextUsageCapture();
     this.active = null;
     const session = this.deps.store.getAgentSession(active.agentSessionId);
     if (session && ["queued", "streaming"].includes(session.status)) {
@@ -503,14 +496,19 @@ class FlowExpertWorker {
     this.browserTurnContext.agentSessionId = null;
   }
 
-  private persistContextUsage(snapshot: ContextUsageSnapshot, active = this.active) {
-    if (!active) return;
+  private persistOverallContextUsageFromResult(active: FlowExpertTurn) {
     const expert = active.task.expertId ? this.deps.store.getExpert(active.task.expertId) : null;
     const role = expert?.role ?? active.task.expertId ?? "expert";
-    const sdkSessionId = active.adapter?.sdkSessionId ?? this.sessionId;
-    const cacheUsage = active.adapter?.resultCacheUsage ?? null;
     const previous = this.deps.store.getAgentContextUsageSnapshot(active.agentSessionId);
-    const persistedSnapshot = mergeContextCacheUsage(snapshot, cacheUsage, previous);
+    const snapshot = overallContextUsageFromResultCache(active.adapter?.resultCacheUsage, {
+      maxTokens: this.contextWindowTokens ?? previous?.maxTokens ?? null,
+      model: this.modelName ?? previous?.model ?? null,
+      previous: previous
+        ? { maxTokens: previous.maxTokens, rawMaxTokens: previous.rawMaxTokens, model: previous.model }
+        : null,
+    });
+    if (!snapshot) return;
+    const sdkSessionId = active.adapter?.sdkSessionId ?? this.sessionId;
     this.deps.store.upsertAgentContextUsageSnapshot({
       flowId: active.task.flowId,
       agentSessionId: active.agentSessionId,
@@ -518,23 +516,29 @@ class FlowExpertWorker {
       role,
       expertId: active.task.expertId ?? null,
       flowExpertId: this.flowExpertId,
-      totalTokens: persistedSnapshot.totalTokens,
-      maxTokens: persistedSnapshot.maxTokens,
-      rawMaxTokens: persistedSnapshot.rawMaxTokens,
-      percentage: persistedSnapshot.percentage,
-      model: persistedSnapshot.model,
-      categories: persistedSnapshot.categories,
-      cacheInputTokens: persistedSnapshot.cacheInputTokens,
-      cacheReadInputTokens: persistedSnapshot.cacheReadInputTokens,
-      cacheCreationInputTokens: persistedSnapshot.cacheCreationInputTokens,
-      cacheHitRate: persistedSnapshot.cacheHitRate,
-      compacted: persistedSnapshot.compacted,
-      observedAt: persistedSnapshot.observedAt,
+      totalTokens: snapshot.totalTokens,
+      maxTokens: snapshot.maxTokens,
+      rawMaxTokens: snapshot.rawMaxTokens,
+      percentage: snapshot.percentage,
+      model: snapshot.model,
+      categories: snapshot.categories,
+      cacheInputTokens: snapshot.cacheInputTokens,
+      cacheReadInputTokens: snapshot.cacheReadInputTokens,
+      cacheCreationInputTokens: snapshot.cacheCreationInputTokens,
+      cacheHitRate: snapshot.cacheHitRate,
+      compacted: snapshot.compacted,
+      observedAt: snapshot.observedAt,
+    });
+    this.logLifecycle("context_usage:from_result", {
+      agentSessionId: active.agentSessionId,
+      totalTokens: snapshot.totalTokens,
+      maxTokens: snapshot.maxTokens,
+      percentage: snapshot.percentage,
     });
     void this.deps.eventBus.publish(active.task.flowId, {
       type: "context_usage:event",
       flow_id: active.task.flowId,
-      data: contextUsageSnapshotToPayload(persistedSnapshot, {
+      data: contextUsageSnapshotToPayload(snapshot, {
         agentSessionId: active.agentSessionId,
         sdkSessionId,
         role,
@@ -564,84 +568,6 @@ class FlowExpertWorker {
     }, `runtime ${event}`);
   }
 
-  private async captureContextUsage(
-    active = this.active,
-    options?: { timeoutMs?: number; allowAfterInputClosed?: boolean },
-  ) {
-    const getContextUsage = this.query?.getContextUsage;
-    if (!active || !getContextUsage || this.closed) return;
-    if (this.inputClosed && !options?.allowAfterInputClosed) return;
-    if (this.contextUsageCaptureInFlight) {
-      this.contextUsageCaptureRequested = true;
-      return;
-    }
-    this.contextUsageCaptureInFlight = true;
-    const timeoutMs = options?.timeoutMs ?? EXPERT_CONTEXT_USAGE_TIMEOUT_MS;
-    const startedAt = Date.now();
-    this.logLifecycle("context_usage:start", {
-      agentSessionId: active.agentSessionId,
-      timeoutMs,
-    });
-    try {
-      const raw = await Promise.race([
-        getContextUsage.call(this.query),
-        new Promise<"__timeout__">((resolve) => {
-          setTimeout(() => resolve("__timeout__"), timeoutMs);
-        }),
-      ]);
-      if (raw === "__timeout__") {
-        this.logLifecycle("context_usage:timeout", {
-          agentSessionId: active.agentSessionId,
-          durationMs: Date.now() - startedAt,
-          timeoutMs,
-        });
-        return;
-      }
-      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(raw), active);
-      this.logLifecycle("context_usage:end", {
-        agentSessionId: active.agentSessionId,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (error) {
-      this.logLifecycle("context_usage:error", {
-        agentSessionId: active.agentSessionId,
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      // Keep the last persisted snapshot.
-    } finally {
-      this.contextUsageCaptureInFlight = false;
-      if (
-        this.contextUsageCaptureRequested
-        && this.active === active
-        && !this.closed
-        && !this.inputClosed
-      ) {
-        this.contextUsageCaptureRequested = false;
-        await this.captureContextUsage(active, options);
-      }
-    }
-  }
-
-  private startPeriodicContextUsageCapture(active: FlowExpertTurn) {
-    this.stopPeriodicContextUsageCapture();
-    this.contextUsageTimer = setTimeout(() => {
-      this.contextUsageTimer = null;
-      if (this.closed || this.inputClosed || this.active !== active) return;
-      void this.captureContextUsage(active).finally(() => {
-        if (!this.closed && !this.inputClosed && this.active === active) {
-          this.startPeriodicContextUsageCapture(active);
-        }
-      });
-    }, FlowExpertWorker.CONTEXT_USAGE_SAMPLE_INTERVAL_MS);
-  }
-
-  private stopPeriodicContextUsageCapture() {
-    if (this.contextUsageTimer) clearTimeout(this.contextUsageTimer);
-    this.contextUsageTimer = null;
-    this.contextUsageCaptureRequested = false;
-  }
-
   private finishInput() {
     if (this.inputClosed) return;
     this.inputClosed = true;
@@ -661,7 +587,6 @@ class FlowExpertWorker {
     this.logLifecycle("query_close_called", { reason, inputClosed: this.inputClosed, closed: this.closed });
     this.closed = true;
     this.inputClosed = true;
-    this.stopPeriodicContextUsageCapture();
     try {
       this.input.close();
     } catch {
@@ -758,9 +683,7 @@ class FlowExpertWorker {
       await next.pusher.publishUserMessage(displayContent, next.userMessageId, next.startedAt);
       await next.pusher.consume(next.adapter.start());
       this.input.push(this.runtimeAdapter.createExpertUserMessage(next.content));
-      this.startPeriodicContextUsageCapture(next);
     } catch (error) {
-      this.stopPeriodicContextUsageCapture();
       await this.failTurn(next, error instanceof Error ? error : new Error(String(error)));
       this.active = null;
       if (this.queued.length > 0) void this.activateNext();
@@ -790,7 +713,6 @@ class FlowExpertWorker {
     } finally {
       this.closed = true;
       this.inputClosed = true;
-      this.stopPeriodicContextUsageCapture();
       try {
         this.query?.close?.();
       } catch {
@@ -811,11 +733,9 @@ class FlowExpertWorker {
 
   private async completeTurn(active: FlowExpertTurn) {
     if (this.active !== active || !active.adapter || !active.pusher || this.closed) return;
-    this.stopPeriodicContextUsageCapture();
-    // Context usage is best-effort telemetry. Never start it fire-and-forget on the
-    // shared query while finishing a turn — a hung control request keeps the Claude
-    // process alive and blocks subsequent work on existing.finished.
     for (const chunk of active.adapter.finish()) await active.pusher.consume(chunk);
+    // Overall occupancy from result.usage only — never call SDK getContextUsage on the live chat query.
+    this.persistOverallContextUsageFromResult(active);
 
     this.syncSdkSessionId(active);
 
@@ -875,22 +795,10 @@ class FlowExpertWorker {
       void this.activateNext();
       return;
     }
-    // Idle path: close input first so the next task cannot attach to this query,
-    // then best-effort timed sample, then force-close the SDK process.
+    // Idle path: close input then force-close so the next task never waits on a stuck CLI.
     this.finishInput();
-    if (!this.contextUsageCaptureInFlight) {
-      await this.captureContextUsage(active, {
-        timeoutMs: EXPERT_CONTEXT_USAGE_TIMEOUT_MS,
-        allowAfterInputClosed: true,
-      });
-    } else {
-      this.logLifecycle("context_usage:skip_inflight", {
-        agentSessionId: active.agentSessionId,
-      });
-    }
     this.releaseForReuse("idle_after_turn_complete");
-    // Resolve runTask only after the query lease is released, so the next task never
-    // waits on a stuck getContextUsage / async iterator.
+    // Resolve runTask only after the query lease is released.
     if (pendingSettle) this.settle(pendingSettle);
   }
 
@@ -1019,7 +927,6 @@ class FlowExpertWorker {
   }
 
   private async failOutstanding(error: Error, turnOutcome: TurnOutcome = "errored") {
-    this.stopPeriodicContextUsageCapture();
     const turns = [this.active, ...this.queued].filter((turn): turn is FlowExpertTurn => Boolean(turn));
     this.active = null;
     this.queued.length = 0;
@@ -1261,6 +1168,8 @@ class FlowExpertWorkerRegistry {
     if (!input.agentSession.sessionId) {
       this.deps.store.updateAgentSessionSession(input.agentSession.id, initialSessionId);
     }
+    const modelName = runtimeConfigModelName(expertRuntimeConfig.config, expertRuntimeConfig.runtimeModelId) ?? null;
+    const contextWindowTokens = runtimeModelContextWindowK(expertRuntimeConfig.config, modelName ?? "") * 1000;
 
     worker = new FlowExpertWorker(
       input.flowExpert.id,
@@ -1281,6 +1190,8 @@ class FlowExpertWorkerRegistry {
       permissionScopeContext,
       browserTurnContext,
       browserMcpBinding?.close,
+      contextWindowTokens,
+      modelName,
     );
     this.workers.set(input.flowExpert.id, worker);
     return worker;

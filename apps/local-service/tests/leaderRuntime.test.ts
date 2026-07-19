@@ -398,16 +398,16 @@ describe("LeaderRuntime platform event protocol", () => {
       leaderSessionId: leader.sessionId ?? leader.id,
     });
 
+    // Overall occupancy = input + cache_read + cache_creation (not getContextUsage control channel).
     expect(store.getAgentContextUsageSnapshot(leader.id)).toEqual(expect.objectContaining({
       flowId: flow.id,
       agentSessionId: leader.id,
       sdkSessionId: "sdk-leader-context",
       role: "leader",
       expertId: "exp-leader",
-      totalTokens: 10_100,
+      totalTokens: 100,
       maxTokens: 200_000,
-      percentage: 5.05,
-      model: "claude-sonnet",
+      percentage: 0.05,
       cacheInputTokens: 20,
       cacheReadInputTokens: 80,
       cacheCreationInputTokens: 0,
