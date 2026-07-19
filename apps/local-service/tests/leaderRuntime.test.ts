@@ -1526,6 +1526,64 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(store.getAgentSession(leader.id)?.status).toBe("completed");
   });
 
+  it("persists the provider error text when a Leader turn fails", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    const userTurn = beginUserTurn(store, { flowId: flow.id });
+    const chatJournal = new ChatJournal(store);
+    const eventBus = new EventBus();
+    const published: unknown[] = [];
+    eventBus.subscribe(flow.id, "test", (event) => { published.push(event); });
+    const providerError = "Failed to authenticate. API Error: 403 AccessDenied: Free quota exhausted.";
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus,
+      chatJournal,
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: () => createQuery([
+        {
+          type: "assistant",
+          error: "authentication_failed",
+          message: { content: [{ type: "text", text: providerError }] },
+        },
+        {
+          type: "result",
+          subtype: "error_during_execution",
+          session_id: "sdk-leader-auth-failure",
+          is_error: true,
+          result: providerError,
+        },
+      ]) }),
+    });
+
+    await expect(runtime.runLeaderTurn({
+      flowId: flow.id,
+      userTurnId: userTurn!.id,
+      kind: "user",
+      userMessage: "你好",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    })).rejects.toThrow(providerError);
+
+    expect(store.getAgentSession(leader.id)?.status).toBe("failed");
+    expect(store.getUserTurn(userTurn!.id)?.status).toBe("failed");
+    expect(chatJournal.getTranscriptMessages(flow.id, leader.id)).toEqual([
+      expect.objectContaining({
+        role: "assistant",
+        content: providerError,
+        parts: [expect.objectContaining({ type: "text", text: providerError })],
+      }),
+    ]);
+    expect(published).toContainEqual(expect.objectContaining({
+      type: "session:event",
+      data: expect.objectContaining({
+        agent_session_id: leader.id,
+        status: "failed",
+        error_message: providerError,
+      }),
+    }));
+  });
+
   it("marks the Leader session failed when SDK query creation throws", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);

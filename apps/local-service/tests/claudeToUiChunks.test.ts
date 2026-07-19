@@ -192,6 +192,28 @@ describe("adaptClaudeMessageToUiChunks", () => {
     expect(chunks).toEqual([]);
   });
 
+  it("preserves user-visible text from synthetic SDK error messages", () => {
+    const adapter = createClaudeToUiChunkAdapter("msg-1");
+    const chunks = adapter.adapt({
+      type: "assistant",
+      error: "authentication_failed",
+      message: {
+        content: [{
+          type: "text",
+          text: "Failed to authenticate. API Error: 403 AccessDenied: Free quota exhausted.",
+        }],
+      },
+    });
+
+    expect(chunks.map((chunk) => chunk.type)).toEqual(["text-start", "text-delta", "text-end"]);
+    expect(chunks[1]).toMatchObject({
+      delta: "Failed to authenticate. API Error: 403 AccessDenied: Free quota exhausted.",
+    });
+    expect(adapter.finalAssistantText).toBe(
+      "Failed to authenticate. API Error: 403 AccessDenied: Free quota exhausted.",
+    );
+  });
+
   it("ignores unknown non-error events conservatively", () => {
     const chunks = adaptClaudeMessageToUiChunks(
       { type: "system", subtype: "permission_denied", tool_name: "Write", tool_use_id: "tool-1" },

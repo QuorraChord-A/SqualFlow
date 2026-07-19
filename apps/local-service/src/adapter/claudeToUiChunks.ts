@@ -140,11 +140,6 @@ export class ClaudeToUiChunkAdapter {
   }
 
   private adaptAssistantMessage(msg: UnknownRecord): UiMessageChunk[] {
-    const error = stringValue(msg.error);
-    if (error) {
-      return [];
-    }
-
     const chunks: UiMessageChunk[] = [];
     let messageText = "";
     for (const block of contentBlocks(msg)) {

@@ -652,7 +652,9 @@ class LeaderFlowStream {
     this.syncSdkSessionId(active);
 
     if (active.adapter.resultStatus !== "success" || active.adapter.resultIsError) {
-      await this.fail(new Error(`Leader SDK result was not successful: ${active.adapter.resultStatus ?? "unknown"}`), active);
+      const errorMessage = active.adapter.resultError?.trim()
+        || `Leader SDK result was not successful: ${active.adapter.resultStatus ?? "unknown"}`;
+      await this.fail(new Error(errorMessage), active);
       return;
     }
 
