@@ -758,6 +758,89 @@ describe("ExpertRuntime", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
 
+  it("starts the next Expert task even when prior context usage never returns and the iterator stays open", async () => {
+    const store = tempStore();
+    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+
+    let queryCount = 0;
+    const closeFns: Array<ReturnType<typeof vi.fn>> = [];
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({
+        expertQuery: () => {
+          queryCount += 1;
+          const sessionId = `sdk-hung-expert-${queryCount}`;
+          let releaseIterator!: () => void;
+          const iteratorHeld = new Promise<void>((resolve) => {
+            releaseIterator = resolve;
+          });
+          const close = vi.fn(() => {
+            releaseIterator();
+          });
+          closeFns.push(close);
+          return {
+            async *[Symbol.asyncIterator]() {
+              yield {
+                type: "result",
+                subtype: "success",
+                session_id: sessionId,
+                is_error: false,
+                result: "ok",
+              };
+              await iteratorHeld;
+            },
+            close,
+            async getContextUsage() {
+              return new Promise(() => {});
+            },
+          };
+        },
+      }),
+    });
+
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: task.id,
+      agentSessionId: session.id,
+    });
+    expect(store.getTask(task.id)?.status).toBe("completed");
+    expect(closeFns[0]).toHaveBeenCalled();
+
+    const secondTask = store.createTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      title: "Second verify",
+      description: "Second verify",
+      expertId: "exp-verify",
+    })!;
+    const secondSession = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: secondTask.id,
+      expertId: "exp-verify",
+      displayName: "exp-verify",
+      status: "streaming",
+    });
+    store.startTask(secondTask.id, secondSession.id);
+
+    const secondStartedAt = Date.now();
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: secondTask.id,
+      agentSessionId: secondSession.id,
+    });
+    const secondDurationMs = Date.now() - secondStartedAt;
+
+    expect(queryCount).toBe(2);
+    expect(secondDurationMs).toBeLessThan(5_000);
+    expect(store.getTask(secondTask.id)?.status).toBe("completed");
+    expect(closeFns[1]).toHaveBeenCalled();
+  });
+
   it("releases the browser lease held by an AgentSession when its turn fails", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");

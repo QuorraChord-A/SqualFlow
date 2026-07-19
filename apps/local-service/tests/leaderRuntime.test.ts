@@ -731,6 +731,81 @@ describe("LeaderRuntime platform event protocol", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
 
+  it("starts the next Leader turn even when prior context usage never returns and the iterator stays open", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    let queryCount = 0;
+    const prompts: string[] = [];
+    const closeFns: Array<ReturnType<typeof vi.fn>> = [];
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({
+        leaderQuery: (input) => {
+          queryCount += 1;
+          const sessionId = `sdk-hung-context-${queryCount}`;
+          let releaseIterator!: () => void;
+          const iteratorHeld = new Promise<void>((resolve) => {
+            releaseIterator = resolve;
+          });
+          const close = vi.fn(() => {
+            releaseIterator();
+          });
+          closeFns.push(close);
+          return {
+            async *[Symbol.asyncIterator]() {
+              if (typeof input.prompt === "string") throw new Error("expected streaming input");
+              const messages = input.prompt[Symbol.asyncIterator]();
+              const next = await messages.next();
+              const content = Array.isArray(next.value?.message.content) ? next.value.message.content[0] : undefined;
+              prompts.push(content?.type === "text" ? content.text : "");
+              yield { type: "result", subtype: "success", session_id: sessionId, is_error: false };
+              // Reproduce real Claude SDK: turn completed, but async iterator stays alive
+              // until query.close() (e.g. hung get_context_usage / count_tokens).
+              await iteratorHeld;
+            },
+            close,
+            async getContextUsage() {
+              // Never resolves — mirrors a stuck SDK control request.
+              return new Promise(() => {});
+            },
+          };
+        },
+      }),
+    });
+
+    const firstTurn = runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "测试3",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+
+    // First turn must finish without waiting forever on hung context usage.
+    await firstTurn;
+    expect(closeFns[0]).toHaveBeenCalled();
+
+    const secondStartedAt = Date.now();
+    await runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "直接输出1-500",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+    const secondDurationMs = Date.now() - secondStartedAt;
+
+    expect(queryCount).toBe(2);
+    expect(prompts[0]).toBe("测试3");
+    expect(prompts[1]).toBe("直接输出1-500");
+    // Context usage timeout is 2s; next turn must not approach multi-minute hangs.
+    expect(secondDurationMs).toBeLessThan(5_000);
+    expect(closeFns[1]).toHaveBeenCalled();
+  });
+
   it("keeps the UserTurn open while a failed Expert result and its recovery are queued", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);

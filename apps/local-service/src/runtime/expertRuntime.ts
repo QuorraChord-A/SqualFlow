@@ -284,6 +284,9 @@ function expertDisplayContent(content: string, flowId: string): string {
     .join("\n\n");
 }
 
+/** Best-effort telemetry only; must never keep the shared Claude query alive. */
+const EXPERT_CONTEXT_USAGE_TIMEOUT_MS = 2_000;
+
 class FlowExpertWorker {
   private static readonly CONTEXT_USAGE_SAMPLE_INTERVAL_MS = 5_000;
   private readonly input;
@@ -544,23 +547,78 @@ class FlowExpertWorker {
     });
   }
 
-  private async captureContextUsage(active = this.active) {
+  private logLifecycle(event: string, fields: Record<string, unknown> = {}) {
+    this.deps.logger?.info({
+      runtimeRole: "expert",
+      event,
+      flowId: this.active?.task.flowId,
+      taskId: this.active?.task.id,
+      flowExpertId: this.flowExpertId,
+      agentSessionId: this.active?.agentSessionId,
+      sdkSessionId: this.sessionId,
+      inputClosed: this.inputClosed,
+      closed: this.closed,
+      finalized: this.finalized,
+      queuedCount: this.queued.length,
+      ...fields,
+    }, `runtime ${event}`);
+  }
+
+  private async captureContextUsage(
+    active = this.active,
+    options?: { timeoutMs?: number; allowAfterInputClosed?: boolean },
+  ) {
     const getContextUsage = this.query?.getContextUsage;
-    if (!active || !getContextUsage) return;
+    if (!active || !getContextUsage || this.closed) return;
+    if (this.inputClosed && !options?.allowAfterInputClosed) return;
     if (this.contextUsageCaptureInFlight) {
       this.contextUsageCaptureRequested = true;
       return;
     }
     this.contextUsageCaptureInFlight = true;
+    const timeoutMs = options?.timeoutMs ?? EXPERT_CONTEXT_USAGE_TIMEOUT_MS;
+    const startedAt = Date.now();
+    this.logLifecycle("context_usage:start", {
+      agentSessionId: active.agentSessionId,
+      timeoutMs,
+    });
     try {
-      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(await getContextUsage.call(this.query)), active);
-    } catch {
+      const raw = await Promise.race([
+        getContextUsage.call(this.query),
+        new Promise<"__timeout__">((resolve) => {
+          setTimeout(() => resolve("__timeout__"), timeoutMs);
+        }),
+      ]);
+      if (raw === "__timeout__") {
+        this.logLifecycle("context_usage:timeout", {
+          agentSessionId: active.agentSessionId,
+          durationMs: Date.now() - startedAt,
+          timeoutMs,
+        });
+        return;
+      }
+      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(raw), active);
+      this.logLifecycle("context_usage:end", {
+        agentSessionId: active.agentSessionId,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      this.logLifecycle("context_usage:error", {
+        agentSessionId: active.agentSessionId,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // Keep the last persisted snapshot.
     } finally {
       this.contextUsageCaptureInFlight = false;
-      if (this.contextUsageCaptureRequested && this.active === active && !this.closed) {
+      if (
+        this.contextUsageCaptureRequested
+        && this.active === active
+        && !this.closed
+        && !this.inputClosed
+      ) {
         this.contextUsageCaptureRequested = false;
-        await this.captureContextUsage(active);
+        await this.captureContextUsage(active, options);
       }
     }
   }
@@ -569,9 +627,11 @@ class FlowExpertWorker {
     this.stopPeriodicContextUsageCapture();
     this.contextUsageTimer = setTimeout(() => {
       this.contextUsageTimer = null;
-      if (this.closed || this.active !== active) return;
+      if (this.closed || this.inputClosed || this.active !== active) return;
       void this.captureContextUsage(active).finally(() => {
-        if (!this.closed && this.active === active) this.startPeriodicContextUsageCapture(active);
+        if (!this.closed && !this.inputClosed && this.active === active) {
+          this.startPeriodicContextUsageCapture(active);
+        }
       });
     }, FlowExpertWorker.CONTEXT_USAGE_SAMPLE_INTERVAL_MS);
   }
@@ -585,7 +645,34 @@ class FlowExpertWorker {
   private finishInput() {
     if (this.inputClosed) return;
     this.inputClosed = true;
+    this.logLifecycle("finishInput");
     this.input.close();
+  }
+
+  private releaseForReuse(reason: string) {
+    if (this.finalized) {
+      try {
+        this.query?.close?.();
+      } catch {
+        // Best-effort.
+      }
+      return;
+    }
+    this.logLifecycle("query_close_called", { reason, inputClosed: this.inputClosed, closed: this.closed });
+    this.closed = true;
+    this.inputClosed = true;
+    this.stopPeriodicContextUsageCapture();
+    try {
+      this.input.close();
+    } catch {
+      // Input may already be closed.
+    }
+    try {
+      this.query?.close?.();
+    } catch {
+      // Best-effort: SDK close must not block chat lifecycle.
+    }
+    this.finalizeClosedWorker();
   }
 
   private async activateNext() {
@@ -685,6 +772,7 @@ class FlowExpertWorker {
 
   private async consume() {
     try {
+      this.logLifecycle("query_consume_started");
       for await (const event of this.query!) {
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
@@ -701,8 +789,13 @@ class FlowExpertWorker {
       await this.failOutstanding(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.closed = true;
+      this.inputClosed = true;
       this.stopPeriodicContextUsageCapture();
-      this.query?.close?.();
+      try {
+        this.query?.close?.();
+      } catch {
+        // Best-effort.
+      }
       this.finalizeClosedWorker();
     }
   }
@@ -710,6 +803,7 @@ class FlowExpertWorker {
   private finalizeClosedWorker() {
     if (this.finalized) return;
     this.finalized = true;
+    this.logLifecycle("query_finished", { reason: "finalize_closed_worker" });
     this.deps.store.updateFlowExpertStatus(this.flowExpertId, "idle");
     this.onClosed();
     this.resolveFinished();
@@ -718,7 +812,9 @@ class FlowExpertWorker {
   private async completeTurn(active: FlowExpertTurn) {
     if (this.active !== active || !active.adapter || !active.pusher || this.closed) return;
     this.stopPeriodicContextUsageCapture();
-    void this.captureContextUsage(active);
+    // Context usage is best-effort telemetry. Never start it fire-and-forget on the
+    // shared query while finishing a turn — a hung control request keeps the Claude
+    // process alive and blocks subsequent work on existing.finished.
     for (const chunk of active.adapter.finish()) await active.pusher.consume(chunk);
 
     this.syncSdkSessionId(active);
@@ -742,12 +838,15 @@ class FlowExpertWorker {
 
     const nextIsSameTask = this.queued[0]?.task.id === active.task.id;
     const turnSucceeded = active.adapter.resultStatus === "success" && !active.adapter.resultIsError;
+    let pendingSettle: CompletionGroup | null = null;
     if (!turnSucceeded) {
       const errorMessage = active.adapter.resultError
         || `Expert SDK result was not successful: ${active.adapter.resultStatus ?? "unknown"}`;
       await this.failTurn(active, new Error(errorMessage));
       this.dropQueuedTurnsForGroup(active.group);
+      // failTurn already settles the group.
     } else if (nextIsSameTask) {
+      // Keep the shared query for ordered same-task queue processing; no telemetry here.
       this.logTurnCompleted(active);
       this.clearBrowserTurnContext(active.agentSessionId);
       this.active = null;
@@ -767,15 +866,32 @@ class FlowExpertWorker {
       this.deps.desktopBridge?.releaseLease(active.agentSessionId);
       this.clearBrowserTurnContext(active.agentSessionId);
       await publishFinished(this.deps, active.task, active.agentSessionId, this.flowExpertId, "completed", result);
-      this.settle(active.group);
+      pendingSettle = active.group;
     }
 
     this.active = null;
     if (this.queued.length > 0) {
+      if (pendingSettle) this.settle(pendingSettle);
       void this.activateNext();
       return;
     }
+    // Idle path: close input first so the next task cannot attach to this query,
+    // then best-effort timed sample, then force-close the SDK process.
     this.finishInput();
+    if (!this.contextUsageCaptureInFlight) {
+      await this.captureContextUsage(active, {
+        timeoutMs: EXPERT_CONTEXT_USAGE_TIMEOUT_MS,
+        allowAfterInputClosed: true,
+      });
+    } else {
+      this.logLifecycle("context_usage:skip_inflight", {
+        agentSessionId: active.agentSessionId,
+      });
+    }
+    this.releaseForReuse("idle_after_turn_complete");
+    // Resolve runTask only after the query lease is released, so the next task never
+    // waits on a stuck getContextUsage / async iterator.
+    if (pendingSettle) this.settle(pendingSettle);
   }
 
   private async publishCancelled(active: FlowExpertTurn, result: ExpertResult) {

@@ -228,6 +228,11 @@ function createPendingLeaderStart(): PendingLeaderStart {
   return { cancelled: false, settled, settle };
 }
 
+/** Best-effort telemetry only; must never keep the shared Claude query alive. */
+const LEADER_CONTEXT_USAGE_TIMEOUT_MS = 2_000;
+/** Safety net when a prior stream did not finalize after finishInput/close. */
+const LEADER_WAIT_FINISHED_TIMEOUT_MS = 5_000;
+
 class LeaderFlowStream {
   private static readonly CONTEXT_USAGE_SAMPLE_INTERVAL_MS = 5_000;
   private readonly input;
@@ -237,6 +242,7 @@ class LeaderFlowStream {
   private query: RuntimeQueryLike | null = null;
   private closed = false;
   private inputClosed = false;
+  private finalized = false;
   private resolveFinished!: () => void;
   private contextUsageCaptureInFlight = false;
   private contextUsageCaptureRequested = false;
@@ -349,16 +355,44 @@ class LeaderFlowStream {
   }
 
   close() {
+    this.releaseForReuse("stream_close");
+  }
+
+  /**
+   * Force-close the SDK query and release the runtime lease.
+   * Used after an idle turn completes, and as a timeout safety net for waiters.
+   */
+  releaseForReuse(reason: string) {
+    if (this.finalized) {
+      try {
+        this.query?.close?.();
+      } catch {
+        // Best-effort: query may already be torn down.
+      }
+      return;
+    }
+    this.logLifecycle("query_close_called", { reason, inputClosed: this.inputClosed, closed: this.closed });
     this.closed = true;
+    this.inputClosed = true;
     this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
-    this.input.close();
-    this.query?.close?.();
+    try {
+      this.input.close();
+    } catch {
+      // Input may already be closed.
+    }
+    try {
+      this.query?.close?.();
+    } catch {
+      // Best-effort: SDK close must not block chat lifecycle.
+    }
+    this.finalize(reason);
   }
 
   cancel() {
-    if (this.closed) return;
+    if (this.closed && this.finalized) return;
     this.closed = true;
+    this.inputClosed = true;
     this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
     const turns = [this.active, ...this.queued].filter((turn): turn is DeferredTurn => Boolean(turn));
@@ -366,10 +400,18 @@ class LeaderFlowStream {
     this.queued.length = 0;
     this.onCurrentTurnInput(undefined);
     for (const turn of turns) turn.resolve();
-    this.input.close();
-    this.query?.close?.();
-    this.onClosed();
-    this.resolveFinished();
+    try {
+      this.input.close();
+    } catch {
+      // Input may already be closed.
+    }
+    try {
+      this.query?.close?.();
+    } catch {
+      // Best-effort.
+    }
+    this.logLifecycle("query_close_called", { reason: "cancel" });
+    this.finalize("cancel");
   }
 
   private releaseBrowserTurnLease() {
@@ -428,23 +470,84 @@ class LeaderFlowStream {
     });
   }
 
-  private async captureContextUsage(active = this.active) {
+  private logLifecycle(event: string, fields: Record<string, unknown> = {}) {
+    this.deps.logger?.info({
+      runtimeRole: "leader",
+      event,
+      flowId: this.active?.turn.flowId ?? this.firstTurn.flowId,
+      agentSessionId: this.active?.turn.leaderAgentSessionId ?? this.firstTurn.leaderAgentSessionId,
+      sdkSessionId: this.sessionId,
+      inputClosed: this.inputClosed,
+      closed: this.closed,
+      finalized: this.finalized,
+      queuedCount: this.queued.length,
+      ...fields,
+    }, `runtime ${event}`);
+  }
+
+  private finalize(reason: string) {
+    if (this.finalized) return;
+    this.finalized = true;
+    this.logLifecycle("query_finished", { reason });
+    this.onClosed();
+    this.resolveFinished();
+  }
+
+  private async captureContextUsage(
+    active = this.active,
+    options?: { timeoutMs?: number; allowAfterInputClosed?: boolean },
+  ) {
     const getContextUsage = this.query?.getContextUsage;
-    if (!active || !getContextUsage) return;
+    if (!active || !getContextUsage || this.closed) return;
+    if (this.inputClosed && !options?.allowAfterInputClosed) return;
     if (this.contextUsageCaptureInFlight) {
       this.contextUsageCaptureRequested = true;
       return;
     }
     this.contextUsageCaptureInFlight = true;
+    const timeoutMs = options?.timeoutMs ?? LEADER_CONTEXT_USAGE_TIMEOUT_MS;
+    const startedAt = Date.now();
+    this.logLifecycle("context_usage:start", {
+      agentSessionId: active.turn.leaderAgentSessionId,
+      timeoutMs,
+    });
     try {
-      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(await getContextUsage.call(this.query)), active);
-    } catch {
+      const raw = await Promise.race([
+        getContextUsage.call(this.query),
+        new Promise<"__timeout__">((resolve) => {
+          setTimeout(() => resolve("__timeout__"), timeoutMs);
+        }),
+      ]);
+      if (raw === "__timeout__") {
+        this.logLifecycle("context_usage:timeout", {
+          agentSessionId: active.turn.leaderAgentSessionId,
+          durationMs: Date.now() - startedAt,
+          timeoutMs,
+        });
+        return;
+      }
+      this.persistContextUsage(this.runtimeAdapter.contextUsageSnapshot(raw), active);
+      this.logLifecycle("context_usage:end", {
+        agentSessionId: active.turn.leaderAgentSessionId,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      this.logLifecycle("context_usage:error", {
+        agentSessionId: active.turn.leaderAgentSessionId,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
       // Keep the last persisted snapshot.
     } finally {
       this.contextUsageCaptureInFlight = false;
-      if (this.contextUsageCaptureRequested && this.active === active && !this.closed) {
+      if (
+        this.contextUsageCaptureRequested
+        && this.active === active
+        && !this.closed
+        && !this.inputClosed
+      ) {
         this.contextUsageCaptureRequested = false;
-        await this.captureContextUsage(active);
+        await this.captureContextUsage(active, options);
       }
     }
   }
@@ -453,9 +556,11 @@ class LeaderFlowStream {
     this.stopPeriodicContextUsageCapture();
     this.contextUsageTimer = setTimeout(() => {
       this.contextUsageTimer = null;
-      if (this.closed || this.active !== active) return;
+      if (this.closed || this.inputClosed || this.active !== active) return;
       void this.captureContextUsage(active).finally(() => {
-        if (!this.closed && this.active === active) this.startPeriodicContextUsageCapture(active);
+        if (!this.closed && !this.inputClosed && this.active === active) {
+          this.startPeriodicContextUsageCapture(active);
+        }
       });
     }, LeaderFlowStream.CONTEXT_USAGE_SAMPLE_INTERVAL_MS);
   }
@@ -469,6 +574,7 @@ class LeaderFlowStream {
   private finishInput() {
     if (this.inputClosed) return;
     this.inputClosed = true;
+    this.logLifecycle("finishInput");
     this.input.close();
   }
 
@@ -528,6 +634,7 @@ class LeaderFlowStream {
 
   private async consume() {
     try {
+      this.logLifecycle("query_consume_started");
       for await (const event of this.query!) {
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
@@ -552,11 +659,19 @@ class LeaderFlowStream {
       if (!this.closed) await this.fail(error instanceof Error ? error : new Error(String(error)));
     } finally {
       this.closed = true;
+      this.inputClosed = true;
       this.stopPeriodicContextUsageCapture();
-      this.input.close();
-      this.query?.close?.();
-      this.onClosed();
-      this.resolveFinished();
+      try {
+        this.input.close();
+      } catch {
+        // Input may already be closed.
+      }
+      try {
+        this.query?.close?.();
+      } catch {
+        // Best-effort.
+      }
+      this.finalize("consume_finally");
     }
   }
 
@@ -564,7 +679,9 @@ class LeaderFlowStream {
     if (this.active !== active || !active.adapter || !active.pusher) return;
     this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
-    void this.captureContextUsage(active);
+    // Context usage is best-effort telemetry. Never start it fire-and-forget on the
+    // shared query while finishing a turn — a hung control request keeps the Claude
+    // process alive and blocks the next message on existing.finished.
     for (const chunk of active.adapter.finish()) {
       await active.pusher.consume(chunk);
     }
@@ -617,6 +734,7 @@ class LeaderFlowStream {
     this.active = null;
     this.onCurrentTurnInput(undefined);
     if (this.queued.length > 0) {
+      // Keep the shared query for ordered queue processing; do not issue telemetry on it.
       active.resolve();
       void this.activateNext();
       return;
@@ -633,7 +751,20 @@ class LeaderFlowStream {
         if (waiting) await publishUserTurnEvent(this.deps.eventBus, waiting, active.turn.logId);
       }
     }
+    // Idle path: close input first so the next message cannot attach to this query,
+    // then best-effort timed sample, then force-close the SDK process.
     this.finishInput();
+    if (!this.contextUsageCaptureInFlight) {
+      await this.captureContextUsage(active, {
+        timeoutMs: LEADER_CONTEXT_USAGE_TIMEOUT_MS,
+        allowAfterInputClosed: true,
+      });
+    } else {
+      this.logLifecycle("context_usage:skip_inflight", {
+        agentSessionId: active.turn.leaderAgentSessionId,
+      });
+    }
+    this.releaseForReuse("idle_after_turn_complete");
     active.resolve();
   }
 
@@ -657,12 +788,22 @@ class LeaderFlowStream {
   }
 
   private async fail(error: Error, active = this.active ?? undefined) {
-    if (this.closed) return;
+    if (this.closed && this.finalized) return;
     this.closed = true;
+    this.inputClosed = true;
     this.stopPeriodicContextUsageCapture();
     this.releaseBrowserTurnLease();
-    this.input.close();
-    this.query?.close?.();
+    try {
+      this.input.close();
+    } catch {
+      // Input may already be closed.
+    }
+    try {
+      this.query?.close?.();
+    } catch {
+      // Best-effort.
+    }
+    this.logLifecycle("query_close_called", { reason: "fail" });
     const rejected = new Set<DeferredTurn>();
     for (const item of [active, ...this.queued]) {
       if (!item || rejected.has(item)) continue;
@@ -1194,7 +1335,30 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       }
       const existing = streams.get(enrichedTurn.flowId);
       if (existing && !existing.acceptsInput) {
-        await existing.finished;
+        const waitStartedAt = Date.now();
+        input.logger?.info({
+          runtimeRole: "leader",
+          event: "waiting_existing_finished",
+          flowId: enrichedTurn.flowId,
+          agentSessionId: enrichedTurn.leaderAgentSessionId,
+          sdkSessionId: enrichedTurn.leaderSessionId,
+          userTurnId: enrichedTurn.userTurnId ?? null,
+        }, "runtime waiting_existing_finished");
+        await Promise.race([
+          existing.finished,
+          new Promise<void>((resolve) => {
+            setTimeout(() => {
+              existing.releaseForReuse("wait_finished_timeout");
+              resolve();
+            }, LEADER_WAIT_FINISHED_TIMEOUT_MS);
+          }),
+        ]);
+        input.logger?.info({
+          runtimeRole: "leader",
+          event: "existing_finished",
+          flowId: enrichedTurn.flowId,
+          durationMs: Date.now() - waitStartedAt,
+        }, "runtime existing_finished");
         return this.runLeaderTurn(enrichedTurn);
       }
       if (existing) return existing.enqueue(enrichedTurn);
