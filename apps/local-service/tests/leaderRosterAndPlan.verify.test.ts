@@ -177,9 +177,9 @@ describe("verify: on-demand team + dual expert path", () => {
     }
   });
 
-  it("Leader prompt v11 dual path and enabled switches", () => {
+  it("Leader prompt v12 dual path, enabled switches and leader-driven dispatch", () => {
     const p = DEFAULT_LEADER_SYSTEM_PROMPT;
-    expect(p).toContain("系统提示词 v11");
+    expect(p).toContain("系统提示词 v12");
     expect(p).toContain("至少 2 种不同专家角色");
     expect(p).toContain("当前未启用");
     expect(p).toContain("create_task");
@@ -188,5 +188,10 @@ describe("verify: on-demand team + dual expert path", () => {
     expect(p).toContain("enabled=true");
     expect(p).toContain("2 种及以上");
     expect(p).not.toContain("Scheduler");
+    // L2：派发权归 Leader，服务端不再自动推进
+    expect(p).toContain("计划的执行由你派发");
+    expect(p).toContain("plan_approved");
+    expect(p).toContain("auto_approved");
+    expect(p).not.toContain("由系统执行");
   });
 });

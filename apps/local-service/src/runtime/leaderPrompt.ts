@@ -12,7 +12,13 @@ export type LeaderTurnInput = {
   flowId: string;
   userMessage?: string;
   specRequested?: boolean;
-  kind?: "user" | "expert_result" | "decision" | "decision_cancelled" | "spec_run" | "user_turn_recovery";
+  kind?: "user" | "expert_result" | "decision" | "decision_cancelled" | "spec_run" | "user_turn_recovery" | "plan_approved";
+  planApprovedTasks?: Array<{
+    taskId: string;
+    title: string;
+    expertId: string;
+    dependsOnTaskIds: string[];
+  }>;
   expertResult?: {
     taskId: string;
     agentSessionId: string;
@@ -171,7 +177,26 @@ export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInpu
       created_at: createdAt,
     };
   }
+  if (turn.kind === "plan_approved") {
+    return {
+      trigger_kind: "plan_approved",
+      user_turn_id: turn.userTurnId,
+      created_at: createdAt,
+    };
+  }
   return undefined;
+}
+
+export function planApprovedBody(tasks: NonNullable<LeaderTurnInput["planApprovedTasks"]>): string {
+  const lines = tasks.map((task) => {
+    const deps = task.dependsOnTaskIds.length > 0 ? `依赖 ${task.dependsOnTaskIds.join("、")}` : "无依赖";
+    return `- ${task.taskId} ${task.title}（${task.expertId}，${deps}）`;
+  });
+  return [
+    "编排计划已批准并物化为以下任务：",
+    ...lines,
+    "由你负责派发：依赖已完成的节点用 dispatch_agent 派出，互不依赖的节点可同轮并行派；每个专家结果回来后再决定下一步。",
+  ].join("\n");
 }
 
 export function buildLeaderPrompt(input: LeaderTurnInput): string {
@@ -198,6 +223,13 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
       flowId: input.flowId,
       type: "spec_run",
       body: "Spec 已获批准。读取当前 SpecRevision 和 Flow snapshot,创建可执行的 Task DAG。",
+    });
+  }
+  if (input.kind === "plan_approved") {
+    return buildPlatformEvent({
+      flowId: input.flowId,
+      type: "plan_approved",
+      body: planApprovedBody(input.planApprovedTasks ?? []),
     });
   }
   if (input.kind === "user_turn_recovery") {

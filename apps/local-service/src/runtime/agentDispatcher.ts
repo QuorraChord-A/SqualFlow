@@ -56,6 +56,19 @@ export type AgentDispatcher = {
   }>;
 };
 
+function parseTaskMetadata(metadataJson: string | null): { planRevisionId: string | null; resourceKeys: string[] } {
+  try {
+    const parsed = JSON.parse(metadataJson ?? "{}") as Record<string, unknown>;
+    const planRevisionId = typeof parsed.plan_revision_id === "string" ? parsed.plan_revision_id : null;
+    const resourceKeys = Array.isArray(parsed.resource_keys)
+      ? parsed.resource_keys.filter((key): key is string => typeof key === "string")
+      : [];
+    return { planRevisionId, resourceKeys };
+  } catch {
+    return { planRevisionId: null, resourceKeys: [] };
+  }
+}
+
 async function recordLeaderInputAudit(
   store: Store,
   session: NonNullable<ReturnType<Store["getAgentSession"]>>,
@@ -110,6 +123,24 @@ export function createAgentDispatcher(input: {
         input.store.getTask(dependencyId)?.status === "completed"
       )) {
         return { agent_session_id: "", status: "failed", error: "task is blocked by incomplete dependencies" };
+      }
+      const taskMetadata = parseTaskMetadata(task.metadataJson);
+      if (taskMetadata.planRevisionId) {
+        const run = input.store.getPlanRunForRevision(taskMetadata.planRevisionId);
+        if (run?.status === "paused_for_feedback") {
+          return { agent_session_id: "", status: "failed", error: "plan is paused for feedback" };
+        }
+      }
+      if (taskMetadata.resourceKeys.length > 0) {
+        const activeStatuses = new Set(["in_progress", "queued_for_expert", "recovery_pending"]);
+        const conflicting = input.store.listUserTurnTasks(task.userTurnId).some((candidate) =>
+          candidate.id !== task.id
+          && activeStatuses.has(candidate.status)
+          && parseTaskMetadata(candidate.metadataJson).resourceKeys.some((key) => taskMetadata.resourceKeys.includes(key))
+        );
+        if (conflicting) {
+          return { agent_session_id: "", status: "failed", error: "resource conflict with a running task" };
+        }
       }
       const runtimeConfigSnapshot = await readAgentRuntimeConfigSnapshot();
       if (!isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role)) {

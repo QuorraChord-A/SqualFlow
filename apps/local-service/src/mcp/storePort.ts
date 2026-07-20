@@ -188,7 +188,7 @@ export function createStorePort(
       }
       // Multi-expert orchestration owns task creation for this turn.
       if (store.listOrchestrationPlans(input.flowId).some((plan) => plan.userTurnId === turn.id)) {
-        return createTaskError("ORCHESTRATION_PLAN_ACTIVE", "本轮已有编排计划，任务由计划系统创建；不要再 create_task 或手工 dispatch 计划内节点。");
+        return createTaskError("ORCHESTRATION_PLAN_ACTIVE", "本轮已有编排计划，计划节点已物化为任务；用 dispatch_agent 派发它们，不要再 create_task。");
       }
 
       const current = input.currentTurnInput;
@@ -480,6 +480,10 @@ export function createStorePort(
                         ? "USER_TURN_NOT_ACTIVE"
                         : result.error === "task is blocked by incomplete dependencies"
                           ? "TASK_BLOCKED"
+                          : result.error === "plan is paused for feedback"
+                            ? "PLAN_PAUSED"
+                            : result.error === "resource conflict with a running task"
+                              ? "RESOURCE_CONFLICT"
                           : result.error === "running sessions must use send_message"
                             ? "SESSION_RUNNING"
                             : result.error === "resume_agent_session_id is required for an ended task"

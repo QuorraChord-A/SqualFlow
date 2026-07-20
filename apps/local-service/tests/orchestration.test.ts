@@ -252,11 +252,7 @@ describe("structured orchestration", () => {
     const eventBus = new EventBus();
     const events: Array<{ type: string; data?: any }> = [];
     eventBus.subscribe(flow.id, "plan-view-test", (event) => events.push(event));
-    const scheduler = createOrchestrationScheduler({
-      store,
-      eventBus,
-      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-new", status: "queued", error: "not-dispatched" }) } as any,
-    });
+    const scheduler = createOrchestrationScheduler({ store, eventBus });
 
     await scheduler.startRevision(second.revision.id);
 
@@ -332,21 +328,95 @@ describe("structured orchestration", () => {
       diff: { added: [], removed: [], modified: [{ node_id: "code", fields: ["description"] }] },
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "新实现", description: "新实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] }],
     })!;
-    const dispatched: string[] = [];
-    const scheduler = createOrchestrationScheduler({
-      store,
-      eventBus: new EventBus(),
-      agentDispatcher: {
-        dispatchAgent: async (input) => {
-          dispatched.push(input.taskId);
-          return { agent_session_id: "ags-new", status: "queued" };
-        },
-      } as any,
-    });
+    const scheduler = createOrchestrationScheduler({ store, eventBus: new EventBus() });
     await scheduler.startRevision(second.revision.id);
 
+    // L2：物化不派发——旧任务照常在跑，新任务保持 pending 等 Leader 派发。
     expect(store.getTask(firstTask.id)?.status).toBe("in_progress");
-    expect(dispatched).toEqual([]);
+    const secondRun = store.getPlanRunForRevision(second.revision.id)!;
+    const secondTask = store.getTask(store.listPlanNodeTasks(secondRun.id)[0]!.taskId)!;
+    expect(secondTask.status).toBe("pending");
+  });
+
+  it("returns materialized tasks on auto-approved submit so the Leader dispatches in the same turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-orchestration-"));
+    dirs.push(dir);
+    const store = createStore(path.join(dir, "db.sqlite"));
+    stores.push(store);
+    store.migrate();
+    store.seedExperts();
+    const project = store.createProject({ id: "project-auto", name: "Auto", localPath: dir, description: "" });
+    const flow = store.createFlow({ id: "flow-auto", name: "Auto", description: "", projectId: project.id, planApproval: "off" });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const scheduler = createOrchestrationScheduler({ store, eventBus: new EventBus() });
+    const handlers = createLeaderToolHandlers(
+      createStorePort(store),
+      {
+        onPlanCreated: async ({ revision }) => {
+          const revisionId = String((revision as { id?: unknown }).id ?? "");
+          if (String((revision as { status?: unknown }).status ?? "") === "approved" && revisionId) {
+            await scheduler.startRevision(revisionId);
+          }
+        },
+      },
+      { currentTurnInput: { trigger_kind: "user_message", user_turn_id: turn.id, created_at: new Date().toISOString() } },
+    );
+
+    const response = JSON.parse(await handlers.submitOrchestrationPlan({
+      flow_id: flow.id,
+      title: "自动批准",
+      objective: "自动批准后同轮派发",
+      work_kind: "change",
+      risk_level: "low",
+      nodes: [
+        { node_id: "code", expert_id: "exp-coder", title: "实现", description: "实现", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
+        { node_id: "verify", expert_id: "exp-verify", title: "验证", description: "验证", depends_on: ["code"], acceptance_criteria: ["通过"], risk_tags: [], side_effects: [], resource_keys: [] },
+      ],
+    })) as Record<string, any>;
+
+    expect(response.ok).toBe(true);
+    expect(response.auto_approved).toBe(true);
+    expect(response.next).toContain("dispatch_agent");
+    expect(response.tasks).toHaveLength(2);
+    expect(response.tasks.every((task: any) => task.status === "pending")).toBe(true);
+  });
+
+  it("materializes an approved revision without auto-dispatch and reconciles run status from tasks", async () => {
+    const { store, flow, turn } = setup();
+    const created = store.createOrchestrationPlanRevision({
+      flowId: flow.id, userTurnId: turn.id, title: "账本", objective: "账本对账", workKind: "change", riskLevel: "low",
+      status: "approved", lint: [], diff: {},
+      nodes: [
+        { nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] },
+        { nodeId: "verify", expertId: "exp-verify", title: "验证", description: "验证", dependsOn: ["code"], acceptanceCriteria: ["验证"], riskTags: [], sideEffects: [], resourceKeys: [] },
+      ],
+    })!;
+    const scheduler = createOrchestrationScheduler({ store, eventBus: new EventBus() });
+    const run = (await scheduler.startRevision(created.revision.id))!;
+    const mappings = store.listPlanNodeTasks(run.id);
+    const tasks = mappings.map((mapping) => store.getTask(mapping.taskId)!);
+
+    // 物化后所有任务 pending，无自动派发
+    expect(tasks.every((task) => task.status === "pending")).toBe(true);
+    expect(run.status).toBe("running");
+
+    // 任务失败且无在跑任务 → blocked
+    store.setTaskRuntimeStatus(tasks[0]!.id, "in_progress");
+    store.failTask(tasks[0]!.id, "boom");
+    await scheduler.advanceForTask(tasks[0]!.id);
+    expect(store.getPlanRun(run.id)?.status).toBe("blocked");
+
+    // 任务重新在跑 → running
+    store.setTaskRuntimeStatus(tasks[0]!.id, "in_progress");
+    await scheduler.advanceForTask(tasks[0]!.id);
+    expect(store.getPlanRun(run.id)?.status).toBe("running");
+
+    // 全部完成 → completed
+    store.completeTask(tasks[0]!.id);
+    store.setTaskRuntimeStatus(tasks[1]!.id, "in_progress");
+    store.completeTask(tasks[1]!.id);
+    await scheduler.advanceForTask(tasks[1]!.id);
+    expect(store.getPlanRun(run.id)?.status).toBe("completed");
   });
 
   it("restores a paused run and its revision mappings after reopening the database", () => {

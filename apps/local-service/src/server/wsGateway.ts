@@ -844,7 +844,37 @@ async function handlePlanApprove(message: ClientWsMessage & { type: "flow:plan_a
   if (revision) await connection.eventBus.publish(message.flow_id, { type: "plan:event", flow_id: message.flow_id, data: planRevisionView(connection.store, revision.id) ?? { revision } });
   const turn = connection.store.getUserTurn(resolved.userTurnId);
   if (turn) await publishUserTurnEvent(connection.eventBus, turn, message.log_id);
-  await connection.orchestrationScheduler.startRevision(resolved.planRevisionId);
+  const run = await connection.orchestrationScheduler.startRevision(resolved.planRevisionId);
+  // L2: 派发权归 Leader — 物化后唤醒 Leader 按依赖逐节点派发，服务端不再自动派发。
+  const leader = connection.store
+    .listAgentSessions(message.flow_id)
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
+  const flow = connection.store.getFlow(message.flow_id);
+  if (!run || !leader || !flow) return;
+  void connection.leaderRuntime.runLeaderTurn({
+    flowId: message.flow_id,
+    kind: "plan_approved",
+    userTurnId: resolved.userTurnId,
+    planApprovedTasks: planApprovedTaskList(connection.store, run.id),
+    leaderAgentSessionId: leader.id,
+    leaderSessionId: leader.sessionId ?? leader.id,
+    resumeSessionId: flow.leaderSessionId || undefined,
+  }).catch((error: unknown) => {
+    connection.logger?.error({ flowId: message.flow_id, planRevisionId: resolved.planRevisionId, error: error instanceof Error ? error.message : String(error) }, "plan_approved leader turn failed");
+  });
+}
+
+function planApprovedTaskList(store: Store, planRunId: string) {
+  return store.listPlanNodeTasks(planRunId).flatMap((mapping) => {
+    const task = store.getTask(mapping.taskId);
+    if (!task || task.status === "completed") return [];
+    return [{
+      taskId: task.id,
+      title: task.title,
+      expertId: task.expertId ?? "",
+      dependsOnTaskIds: store.listTaskDependencies(task.id),
+    }];
+  });
 }
 
 async function handleFlowGuide(

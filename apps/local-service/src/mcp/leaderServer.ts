@@ -31,7 +31,7 @@ import {
 } from "./platformModels.js";
 
 export interface CurrentTurnInput {
-  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "user_turn_recovery";
+  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "user_turn_recovery" | "plan_approved";
   user_turn_id?: string;
   message_id?: string;
   card_id?: string;
@@ -345,6 +345,14 @@ export function createLeaderToolHandlers(
         revision: result.revision as Record<string, unknown>,
         approval: result.approval as Record<string, unknown>,
       });
+      if (result.auto_approved) {
+        // 自动批准：计划已物化，返回任务清单让 Leader 在本轮继续按依赖派发。
+        return ok({
+          ...result,
+          tasks: store.listTasks({ flowId: parsed.flow_id, currentTurnInput: currentTurnInput() }),
+          next: "计划已自动批准并物化为任务；由你按依赖用 dispatch_agent 派发，互不依赖的节点可并行派。",
+        });
+      }
       return ok(result);
     },
 

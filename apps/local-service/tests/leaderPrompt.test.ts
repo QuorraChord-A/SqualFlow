@@ -138,4 +138,24 @@ describe("buildLeaderPrompt", () => {
     ]);
     expect(prompt).not.toContain("取消附言");
   });
+
+  it("emits a plan_approved event listing materialized tasks and dispatch duty", () => {
+    const prompt = buildLeaderPrompt({
+      flowId: "flow-1",
+      kind: "plan_approved",
+      planApprovedTasks: [
+        { taskId: "task-code", title: "实现", expertId: "exp-coder", dependsOnTaskIds: [] },
+        { taskId: "task-verify", title: "验证", expertId: "exp-verify", dependsOnTaskIds: ["task-code"] },
+      ],
+      leaderAgentSessionId: "leader-ags",
+      leaderSessionId: "leader-session",
+    });
+
+    const segments = parseMessageSegments(prompt, "flow-1");
+    expect(segments).toEqual([expect.objectContaining({ kind: "event", type: "plan_approved" })]);
+    const body = (segments[0] as { body: string }).body;
+    expect(body).toContain("task-code 实现（exp-coder，无依赖）");
+    expect(body).toContain("task-verify 验证（exp-verify，依赖 task-code）");
+    expect(body).toContain("由你负责派发");
+  });
 });

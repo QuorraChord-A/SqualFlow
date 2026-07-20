@@ -186,7 +186,7 @@ export function createApp(options: CreateAppOptions = {}) {
     onTaskFinished: deliverExpertResultToLeader,
   });
   const agentDispatcher = createAgentDispatcher({ store, eventBus, expertRuntime, onTaskFinished: deliverExpertResultToLeader });
-  orchestrationScheduler = createOrchestrationScheduler({ store, eventBus, agentDispatcher });
+  orchestrationScheduler = createOrchestrationScheduler({ store, eventBus });
   leaderRuntime = createLeaderRuntime({
     store,
     eventBus,
