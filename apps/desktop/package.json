@@ -9,7 +9,7 @@
   "main": "main.js",
   "scripts": {
     "dev": "electron .",
-    "test:scripts": "node --test scripts/app-updater.test.cjs scripts/desktop-paths.test.cjs scripts/packaged-services.test.cjs scripts/service-ports.test.cjs",
+    "test:scripts": "node --test scripts/app-updater.test.cjs scripts/desktop-paths.test.cjs scripts/loading-page.test.cjs scripts/packaged-services.test.cjs scripts/service-ports.test.cjs",
     "pack:dir": "electron-builder --dir",
     "dist:mac": "electron-builder --mac",
     "dist:mac:release": "bash scripts/desktop-macos.sh release",

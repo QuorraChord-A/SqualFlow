@@ -2,16 +2,16 @@ import type { RuntimeSdk } from "./api";
 
 export const AGENT_ORDER: RuntimeSdk[] = ["claudecode", "codex"];
 
-export const AGENT_META: Record<RuntimeSdk, { label: string; dotColor: string; format: string; hint: string }> = {
+export const AGENT_META: Record<RuntimeSdk, { label: string; iconPath: string; format: string; hint: string }> = {
   claudecode: {
-    label: "claudecode",
-    dotColor: "#7F77DD",
+    label: "ClaudeCode",
+    iconPath: "/icons/claudecode.svg",
     format: "Anthropic Messages 格式",
     hint: "Base URL 与 API key 按 Anthropic 协议配置。",
   },
   codex: {
-    label: "codex",
-    dotColor: "#1D9E75",
+    label: "Codex",
+    iconPath: "/icons/codex.svg",
     format: "OpenAI Responses 格式",
     hint: "Base URL 填 provider 根路径，例如 https://host/v1。",
   },
@@ -21,12 +21,13 @@ export function runtimeSdkLabel(sdk: RuntimeSdk) {
   return AGENT_META[sdk]?.label ?? sdk;
 }
 
-export function AgentDot({ sdk }: { sdk: RuntimeSdk }) {
+export function AgentIcon({ sdk }: { sdk: RuntimeSdk }) {
   return (
-    <span
+    <img
+      src={AGENT_META[sdk].iconPath}
+      alt=""
       aria-hidden="true"
-      className="inline-block size-[7px] shrink-0 rounded-full"
-      style={{ backgroundColor: AGENT_META[sdk]?.dotColor ?? "#888888" }}
+      className={`size-3.5 shrink-0 object-contain ${sdk === "codex" ? "dark:invert" : ""}`}
     />
   );
 }

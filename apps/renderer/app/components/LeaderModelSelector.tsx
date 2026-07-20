@@ -15,7 +15,7 @@ import {
   type AgentRuntimeConfigDto,
   type RuntimeModelDto,
 } from '../lib/api';
-import { AGENT_META, AGENT_ORDER, AgentDot } from '../lib/agentMeta';
+import { AGENT_META, AGENT_ORDER, AgentIcon, runtimeSdkLabel } from '../lib/agentMeta';
 import { useFlowStore } from '../stores/useFlowStore';
 
 interface LeaderModelSelectorProps {
@@ -336,7 +336,7 @@ export default function LeaderModelSelector({
   const runtimeConfigDisabledReason = (runtimeConfig: AgentRuntimeConfigDto | null | undefined) => {
     if (!flowId || !runtimeConfig) return null;
     if (lockedRuntimeSdk && runtimeConfig.sdk !== lockedRuntimeSdk) {
-      return `当前 Flow 已锁定 ${lockedRuntimeSdk}，不能切换到 ${runtimeConfig.sdk}。`;
+      return `当前 Flow 已锁定 ${runtimeSdkLabel(lockedRuntimeSdk)}，不能切换到 ${runtimeSdkLabel(runtimeConfig.sdk)}。`;
     }
     if (
       leaderRuntimeConfig?.sdk === 'codex'
@@ -578,7 +578,7 @@ export default function LeaderModelSelector({
                 return (
                   <div key={sdk}>
                     <div className="flex items-center gap-1.5 px-2.5 pb-1 pt-2 text-[11px] font-medium text-muted-foreground">
-                      <AgentDot sdk={sdk} />
+                      <AgentIcon sdk={sdk} />
                       {AGENT_META[sdk].label}
                     </div>
                     {group.map((config) => {

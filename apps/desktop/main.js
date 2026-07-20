@@ -41,6 +41,7 @@ const browserHomeUrl = configuredBrowserHomeUrl || defaultBrowserHomeUrl;
 const readinessIntervalMs = 1000;
 const readinessTimeoutMs = 1200;
 const minimumLoadingMs = 3500;
+const loadingPageBackground = "#f9f5ec";
 let serviceStartAttempted = false;
 const packagedServiceProcesses = [];
 let mainWindow = null;
@@ -205,21 +206,12 @@ function loadingPagePath() {
   return path.join(__dirname, "assets", "loading.html");
 }
 
-function updateLoadingStatus(win, status) {
-  if (win.isDestroyed()) return;
-  win.webContents.executeJavaScript(
-    `window.__setLaunchStatus && window.__setLaunchStatus(${JSON.stringify(status)})`,
-  ).catch(() => {});
-}
-
 async function waitForServicesAndLoad(win) {
   const loadingStartedAt = Date.now();
-  let attempt = 0;
   // Packaged services always own their runtime-allocated ports, so start them
   // before probing readiness; probing first could hit a foreign process.
   let launchState = app.isPackaged ? await startLocalServices() : null;
   while (!win.isDestroyed()) {
-    attempt += 1;
     const [backendReady, frontendReady] = await Promise.all([
       requestReady(backendHealthUrl()),
       requestReady(frontendReadyUrl()),
@@ -227,23 +219,6 @@ async function waitForServicesAndLoad(win) {
     if ((!backendReady || !frontendReady) && !launchState) {
       launchState = await startLocalServices();
     }
-    updateLoadingStatus(win, {
-      attempt,
-      backendReady,
-      frontendReady,
-      message: backendReady && frontendReady
-        ? "准备完成，正在进入新建流程。"
-        : launchState?.started
-          ? "正在准备本地工作台，请稍候。"
-          : launchState?.reason === "development_services_missing"
-            ? "开发服务未运行，请从仓库根目录执行 npm run dev。"
-            : launchState?.reason === "packaged_services_failed"
-              ? "应用服务文件不完整，请重新安装。"
-            : "正在准备本地工作台，请稍候。",
-      hint: launchState?.reason === "repo_not_found"
-        ? "请从项目目录重新打开 SquadFlow。"
-        : undefined,
-    });
     if (backendReady && frontendReady) {
       const remainingLoadingMs = Math.max(0, minimumLoadingMs - (Date.now() - loadingStartedAt));
       await sleep(remainingLoadingMs + 220);
@@ -1441,7 +1416,6 @@ ipcMain.handle("desktop-shell:show-item-in-folder", async (event, targetPath, is
 
 function createWindow() {
   nativeTheme.themeSource = desktopThemeSource("system");
-  const initialTheme = nativeTheme.shouldUseDarkColors ? "dark" : "light";
   const savedWindowSize = readWindowSize();
   const win = new BrowserWindow({
     width: savedWindowSize?.width ?? defaultWindowSize.width,
@@ -1451,7 +1425,7 @@ function createWindow() {
     title: "SquadFlow",
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 14 },
-    backgroundColor: desktopThemeBackground(initialTheme),
+    backgroundColor: loadingPageBackground,
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

@@ -202,7 +202,7 @@ describe("LeaderModelSelector", () => {
 
     expect(codexConfig).toHaveAttribute("aria-disabled", "true");
     expect(codexConfig).toHaveClass("cursor-not-allowed");
-    expect(await screen.findByText("当前 Flow 已锁定 claudecode，不能切换到 codex。")).toBeInTheDocument();
+    expect(await screen.findByText("当前 Flow 已锁定 ClaudeCode，不能切换到 Codex。")).toBeInTheDocument();
     const model = screen.getByRole("button", { name: "gpt-5.5" });
     expect(model).toBeDisabled();
     await user.click(model);

@@ -5,47 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>SquadFlow</title>
   <style>
-    :root {
-      color-scheme: light;
-      --ink: #243139;
-      --muted: #718079;
-      --paper: #f7f2e9;
-    }
+    :root { color-scheme: light; }
     * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      background: #f9f5ec;
+    }
     body {
       margin: 0;
       min-height: 100vh;
       display: grid;
       place-items: center;
       overflow: hidden;
-      background: var(--paper);
-      color: var(--ink);
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      width: 62vw;
-      height: 62vw;
-      max-width: 720px;
-      max-height: 720px;
-      border-radius: 50%;
-      background: rgba(142, 177, 174, 0.1);
-      filter: blur(70px);
-      transform: translate(-30%, -30%);
     }
     main {
-      position: relative;
-      display: grid;
-      justify-items: center;
-      width: min(420px, calc(100vw - 48px));
-      padding: 32px 28px;
-      text-align: center;
-      animation: rise 700ms cubic-bezier(.22,.8,.26,1) both;
+      width: min(240px, calc(100vw - 48px));
+      aspect-ratio: 1;
     }
     .icon-shell {
-      width: 240px;
-      height: 240px;
+      width: 100%;
+      height: 100%;
       animation: breathe 2.8s ease-in-out infinite;
     }
     .app-icon {
@@ -53,143 +33,61 @@
       width: 100%;
       height: 100%;
     }
-    .reveal {
+    .stroke {
       fill: none;
-      stroke: #fff;
       stroke-linecap: round;
       stroke-linejoin: round;
       stroke-dasharray: 1;
       stroke-dashoffset: 1;
     }
-    .inner-reveal {
-      stroke-width: 108;
-      animation: draw-stroke 1300ms cubic-bezier(.22,.8,.26,1) forwards;
+    .inner-stroke {
+      stroke: url(#inner-texture);
+      stroke-width: 64;
+      animation: draw-stroke 1100ms ease-in-out forwards;
     }
-    .outer-reveal {
-      stroke-width: 116;
-      animation: draw-stroke 1600ms 1150ms cubic-bezier(.22,.8,.26,1) forwards;
+    .outer-stroke {
+      stroke: url(#outer-texture);
+      stroke-width: 76;
+      animation: draw-stroke 1500ms 1100ms ease-in-out forwards;
     }
-    .accent-reveal {
-      stroke-width: 86;
-      animation: draw-stroke 520ms 2680ms cubic-bezier(.22,.8,.26,1) forwards;
-    }
-    .final-icon {
-      opacity: 0;
-      animation: show-final 130ms 3170ms linear forwards;
+    .accent-stroke {
+      stroke: url(#accent-texture);
+      stroke-width: 54;
+      animation: draw-stroke 500ms 2600ms ease-in-out forwards;
     }
     @keyframes draw-stroke { to { stroke-dashoffset: 0; } }
-    @keyframes show-final { to { opacity: 1; } }
     @keyframes breathe {
       0%, 100% { transform: translateY(0) scale(1); }
       50% { transform: translateY(-3px) scale(1.015); }
     }
-    @keyframes rise {
-      from { opacity: 0; transform: translateY(14px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-    .eyebrow {
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: .18em;
-      text-transform: uppercase;
-    }
-    h1 {
-      margin: 10px 0 0;
-      font-size: 21px;
-      font-weight: 650;
-      letter-spacing: -.02em;
-    }
-    .status {
-      min-height: 22px;
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: 13px;
-      line-height: 1.55;
-    }
-    .progress {
-      display: flex;
-      gap: 6px;
-      width: 112px;
-      margin-top: 24px;
-    }
-    .progress span {
-      height: 3px;
-      flex: 1;
-      overflow: hidden;
-      border-radius: 99px;
-      background: rgba(36, 49, 57, 0.12);
-    }
-    .progress span::after {
-      content: "";
-      display: block;
-      width: 100%;
-      height: 100%;
-      border-radius: inherit;
-      background: #739aaa;
-      transform: scaleX(0);
-      transform-origin: left;
-      transition: transform 320ms ease;
-    }
-    .progress span:nth-child(2)::after { background: #8eb1ae; }
-    .progress span:nth-child(3)::after { background: #f0b18d; }
-    .progress[data-step="1"] span:nth-child(1)::after,
-    .progress[data-step="2"] span:nth-child(-n+2)::after,
-    .progress[data-step="3"] span::after { transform: scaleX(1); }
-    .hint {
-      min-height: 18px;
-      margin-top: 18px;
-      color: rgba(36, 49, 57, 0.5);
-      font-size: 11px;
-    }
     @media (prefers-reduced-motion: reduce) {
-      .icon-shell, main { animation: none; }
-      .reveal { stroke-dashoffset: 0; animation: none; }
-      .final-icon { opacity: 1; animation: none; }
+      .icon-shell { animation: none; }
+      .stroke { stroke-dashoffset: 0; animation: none; }
     }
   </style>
 </head>
 <body>
-  <main>
+  <main aria-label="正在启动 SquadFlow">
     <div class="icon-shell" aria-hidden="true">
       <svg class="app-icon" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
         <defs>
-          <mask id="outer-reveal" maskUnits="userSpaceOnUse">
-            <path class="reveal outer-reveal" pathLength="1" transform="translate(256 256) scale(1.35) translate(-256 -256)" d="M365 285C378 229 376 169 337 136C300 104 211 104 167 123C111 147 90 213 96 278C103 357 162 405 239 407H348"/>
-          </mask>
-          <mask id="inner-reveal" maskUnits="userSpaceOnUse">
-            <path class="reveal inner-reveal" pathLength="1" transform="translate(256 256) scale(1.35) translate(-256 -256)" d="M270 294C306 288 324 257 324 219C324 176 291 156 241 156H207C160 156 141 195 141 244C141 295 173 334 226 334H340"/>
-          </mask>
-          <mask id="accent-reveal" maskUnits="userSpaceOnUse">
-            <path class="reveal accent-reveal" pathLength="1" transform="translate(256 256) scale(1.35) translate(-256 -256)" d="M390 302C389 345 360 386 304 409"/>
-          </mask>
+          <pattern id="outer-texture" patternUnits="userSpaceOnUse" width="512" height="512">
+            <image width="512" height="512" href="icon-loading-outer.png"/>
+          </pattern>
+          <pattern id="inner-texture" patternUnits="userSpaceOnUse" width="512" height="512">
+            <image width="512" height="512" href="icon-loading-inner.png"/>
+          </pattern>
+          <pattern id="accent-texture" patternUnits="userSpaceOnUse" width="512" height="512">
+            <image width="512" height="512" href="icon-loading-accent.png"/>
+          </pattern>
         </defs>
-        <image width="512" height="512" href="icon-loading-background.png"/>
-        <image width="512" height="512" href="icon-loading-outer.png" mask="url(#outer-reveal)"/>
-        <image width="512" height="512" href="icon-loading-inner.png" mask="url(#inner-reveal)"/>
-        <image width="512" height="512" href="icon-loading-accent.png" mask="url(#accent-reveal)"/>
-        <image class="final-icon" width="512" height="512" href="icon-loading.png"/>
+        <g class="drawn-strokes">
+          <path class="stroke outer-stroke" pathLength="1" d="M407 286C417 240 416 183 383 142C350 101 304 90 251 90H187C131 90 96 126 96 184V315C96 383 139 427 207 427H310"/>
+          <path class="stroke inner-stroke" pathLength="1" d="M270 295C301 288 318 263 318 226C318 198 296 190 261 190H236C197 190 182 214 182 251V285C182 334 205 378 246 378H342"/>
+          <path class="stroke accent-stroke" pathLength="1" d="M417 344C411 391 377 424 327 439"/>
+        </g>
       </svg>
     </div>
-    <div class="eyebrow">SquadFlow</div>
-    <h1>正在准备本地工作台</h1>
-    <div class="status" id="status" aria-live="polite">正在启动协作引擎。</div>
-    <div class="progress" id="progress" data-step="0" aria-hidden="true"><span></span><span></span><span></span></div>
-    <div class="hint" id="hint"></div>
   </main>
-  <script>
-    window.__setLaunchStatus = function(payload) {
-      var status = document.getElementById("status");
-      var hint = document.getElementById("hint");
-      var progress = document.getElementById("progress");
-      if (status && payload && payload.message) status.textContent = payload.message;
-      if (hint) hint.textContent = payload && payload.hint ? payload.hint : "";
-      if (progress) {
-        var step = payload && payload.backendReady && payload.frontendReady ? 3 : payload && payload.backendReady ? 2 : 1;
-        progress.dataset.step = String(step);
-      }
-    };
-  </script>
 </body>
 </html>

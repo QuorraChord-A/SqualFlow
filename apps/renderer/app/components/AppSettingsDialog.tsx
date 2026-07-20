@@ -37,7 +37,7 @@ import { MessageResponse } from "@/components/ai-elements-official/message";
 import { useThemeStore, type ThemeName } from "../stores/useThemeStore";
 import { useAppPreferencesStore } from "../stores/useAppPreferencesStore";
 import { useModalStore } from "../stores/useModalStore";
-import { AGENT_META, AGENT_ORDER, AgentDot, runtimeSdkLabel } from "../lib/agentMeta";
+import { AGENT_META, AGENT_ORDER, AgentIcon, runtimeSdkLabel } from "../lib/agentMeta";
 import {
   createAgentRuntimeConfig,
   deleteAgentRuntimeConfig,
@@ -467,7 +467,7 @@ function RoleModelPicker({
             return (
               <div key={sdk}>
                 <div className="flex items-center gap-1.5 px-2 py-1.5 text-[11px] font-medium text-muted-foreground">
-                  <AgentDot sdk={sdk} />
+                  <AgentIcon sdk={sdk} />
                   {AGENT_META[sdk].label}
                 </div>
                 {group.map((config) => (
@@ -1043,7 +1043,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       className="flex h-9 w-full items-center justify-between gap-2 rounded-lg border border-border bg-background px-2.5 text-xs text-foreground transition-colors hover:border-primary/40 hover:bg-muted/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50 data-[open=true]:border-primary/60 data-[open=true]:bg-primary/10"
                     >
                       <span className="flex min-w-0 items-center gap-1.5">
-                        {boundConfig ? <AgentDot sdk={boundConfig.sdk} /> : null}
+                        {boundConfig ? <AgentIcon sdk={boundConfig.sdk} /> : null}
                         <span className="truncate">
                           {configDisplayName(boundConfig)}
                           {" / "}
@@ -1124,7 +1124,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               <div className="grid grid-cols-[88px_minmax(0,1fr)] gap-3 border-t border-border pt-4">
                 <span className="text-xs text-muted-foreground">Agent</span>
                 <span className="flex items-center gap-1.5 text-xs text-foreground">
-                  {selectedRoleConfig ? <AgentDot sdk={selectedRoleConfig.sdk} /> : null}
+                  {selectedRoleConfig ? <AgentIcon sdk={selectedRoleConfig.sdk} /> : null}
                   {selectedRoleConfig ? runtimeSdkLabel(selectedRoleConfig.sdk) : "未配置"}
                 </span>
                 <span className="text-xs text-muted-foreground">供应商</span>
@@ -1175,7 +1175,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               return (
                 <div key={sdk}>
                   <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-4 py-2 text-[11px] font-medium text-muted-foreground">
-                    <AgentDot sdk={sdk} />
+                    <AgentIcon sdk={sdk} />
                     {AGENT_META[sdk].label}
                     <span className="text-muted-foreground/70">· {AGENT_META[sdk].format}</span>
                   </div>
@@ -1242,7 +1242,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       className="rounded-lg border border-border bg-background p-4 text-left transition-colors hover:border-primary/50 hover:bg-muted/30"
                     >
                       <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                        <AgentDot sdk={sdk} />
+                        <AgentIcon sdk={sdk} />
                         {AGENT_META[sdk].label}
                       </span>
                       <span className="mt-2 block text-xs text-muted-foreground">{AGENT_META[sdk].format}</span>
@@ -1253,7 +1253,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               ) : (
                 <div className="mt-4 space-y-3">
                   <div className="flex h-9 items-center gap-2 rounded-lg border border-border bg-background/60 px-3 text-xs text-foreground">
-                    <AgentDot sdk={draftAgentSdk} />
+                    <AgentIcon sdk={draftAgentSdk} />
                     {runtimeSdkLabel(draftAgentSdk)}
                     <span className="text-muted-foreground">· {AGENT_META[draftAgentSdk].format}</span>
                   </div>
@@ -1300,7 +1300,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2.5 text-xs text-foreground">
-                    <AgentDot sdk={selectedRuntimeConfig.sdk} />
+                    <AgentIcon sdk={selectedRuntimeConfig.sdk} />
                     {runtimeSdkLabel(selectedRuntimeConfig.sdk)}
                   </span>
                   <span className="inline-flex h-7 items-center rounded-md border border-border bg-muted/30 px-2.5 text-xs text-muted-foreground">
