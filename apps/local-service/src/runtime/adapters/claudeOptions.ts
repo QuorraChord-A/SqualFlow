@@ -107,6 +107,21 @@ function buildRuntimeEnv(
   return Object.keys(env).length > 0 ? env : undefined;
 }
 
+export function inheritedProcessEnv(): NodeJS.ProcessEnv {
+  // Anthropic auth and routing must come from app configuration only. The launching
+  // environment may carry these vars (e.g. a terminal session), and Claude Code
+  // prefers ANTHROPIC_AUTH_TOKEN over ANTHROPIC_API_KEY, so a leaked token would
+  // silently override the configured key.
+  const {
+    ANTHROPIC_API_KEY: _apiKey,
+    ANTHROPIC_AUTH_TOKEN: _authToken,
+    ANTHROPIC_BASE_URL: _baseUrl,
+    ANTHROPIC_MODEL: _model,
+    ...rest
+  } = process.env;
+  return rest;
+}
+
 function buildInlineSettings(
   settingsPath: string,
   runtimeConfig?: RuntimeConfig,
@@ -128,8 +143,8 @@ function buildInlineSettings(
     ? claudeRuntimeModelName(configuredModelName, contextWindowK)
     : configuredModelName;
   const runtimeEnv = buildRuntimeEnv(runtimeConfig, modelName, contextWindowK);
-  const env: Options["env"] | undefined = settingsEnv || runtimeEnv || scratchDir ? {
-    ...process.env,
+  const env: Options["env"] = {
+    ...inheritedProcessEnv(),
     ...settingsEnv,
     ...runtimeEnv,
     ...(scratchDir ? {
@@ -138,8 +153,8 @@ function buildInlineSettings(
       TMP: path.resolve(scratchDir),
       TEMP: path.resolve(scratchDir),
     } : {}),
-  } : undefined;
-  if (env && contextWindowK === 1_000) delete env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+  };
+  if (contextWindowK === 1_000) delete env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
   return {
     settings: {
       ...settingsWithoutEnv,

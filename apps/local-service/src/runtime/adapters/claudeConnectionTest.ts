@@ -9,6 +9,7 @@ import {
   runtimeModelContextWindowK,
 } from "../../config/runtimeModelContext.js";
 import type { AgentRuntimeConnectionTestInput, AgentRuntimeConnectionTestResult } from "./runtimeConnectionTest.js";
+import { inheritedProcessEnv } from "./claudeOptions.js";
 
 function testModel(runtimeConfig: RuntimeConfig, input: AgentRuntimeConnectionTestInput) {
   const bodyModel = input.model?.trim();
@@ -23,7 +24,7 @@ function testEnv(
   claudeConfigDir: string,
 ) {
   const env: Record<string, string> = {
-    ...process.env,
+    ...inheritedProcessEnv(),
     CLAUDE_CONFIG_DIR: claudeConfigDir,
     ANTHROPIC_MODEL: model,
   };
