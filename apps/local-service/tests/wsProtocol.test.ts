@@ -651,7 +651,7 @@ describe("Fastify app and websocket gateway", () => {
         data: expect.objectContaining({
           id: flow.id,
           name: "Snapshot Flow",
-          description: "snapshot contract",
+          name_generation_status: "generated",
           status: "ready",
           active_user_turn_id: null,
           project_id: project.id,
@@ -1367,7 +1367,7 @@ describe("Fastify app and websocket gateway", () => {
     }));
   });
 
-  it("starts a fresh Leader runtime session when retrying a failed flow", async () => {
+  it("keeps the original Leader runtime session when retrying a failed flow", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -1417,12 +1417,12 @@ describe("Fastify app and websocket gateway", () => {
     }), connection);
 
     const restartedLeader = store.getAgentSession(failedLeader.id)!;
-    expect(restartedLeader.sessionId).not.toBe("sdk-session-that-never-started");
-    expect(restartedLeader.status).toBe("idle");
+    expect(restartedLeader.sessionId).toBe("sdk-session-that-never-started");
+    expect(restartedLeader.status).toBe("failed");
     expect(store.getFlow(flow.id)?.leaderSessionId).toBe(restartedLeader.sessionId);
     expect(capturedTurns).toEqual([{
       leaderSessionId: restartedLeader.sessionId,
-      resumeSessionId: undefined,
+      resumeSessionId: "sdk-session-that-never-started",
     }]);
   });
 

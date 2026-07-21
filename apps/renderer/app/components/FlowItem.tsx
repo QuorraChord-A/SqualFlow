@@ -15,6 +15,7 @@ import {
   HoverCardTrigger,
 } from '@/components/ui/hover-card';
 import type { SquadFlow } from '../types';
+import { useFlowNameReveal } from '../hooks/useFlowNameReveal';
 
 interface FlowItemProps {
   flow: SquadFlow;
@@ -53,6 +54,7 @@ export default function FlowItem({
   onTogglePinned,
   displayTimestamp = flow.updated_at,
 }: FlowItemProps) {
+  const displayName = useFlowNameReveal(flow.name);
   const isStreaming = Boolean(flow.is_streaming);
   const isRunning = flow.status === 'active';
   const hasUnreadOutput = Boolean(flow.has_unread_messages);
@@ -107,7 +109,7 @@ export default function FlowItem({
                 onClick();
               }
             }}
-            className={`group relative mb-0.5 flex h-10 cursor-pointer items-center gap-2 rounded-md px-2.5 transition-colors ${
+            className={`group relative mb-0.5 flex h-10 cursor-pointer items-center gap-2 rounded-md px-3 transition-colors ${
               selected
                 ? 'bg-primary/10 text-foreground'
                 : 'text-muted-foreground hover:bg-muted'
@@ -157,7 +159,7 @@ export default function FlowItem({
           )}
         </div>
 
-        <span className="min-w-0 flex-1 truncate text-sm">{flow.name}</span>
+        <span data-testid="flow-name" aria-hidden="true" className="min-w-0 flex-1 truncate text-sm">{displayName}</span>
 
         {flow.legacy_spec_flow && (
           <span className="shrink-0 rounded border border-border px-1 text-[10px] font-medium text-muted-foreground" title="历史 Spec 流程，只读兼容">
@@ -196,6 +198,7 @@ export default function FlowItem({
             )}
             {onEditFlow && (
               <DropdownMenuItem
+                disabled={flow.name_generation_status === 'pending'}
                 onClick={(e) => { e.stopPropagation(); handleMenuAction('edit'); }}
               >
                 <Pencil className="w-3.5 h-3.5 mr-2 text-muted-foreground" />
@@ -242,10 +245,7 @@ export default function FlowItem({
       </HoverCardTrigger>
 
       <HoverCardContent side="right" align="start" sideOffset={8} className="w-60 p-3">
-        <p className="truncate text-sm font-semibold text-foreground">{flow.name}</p>
-        {flow.description && (
-          <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{flow.description}</p>
-        )}
+        <p className="truncate text-sm font-semibold text-foreground">{displayName}</p>
         <div className="mt-2.5 space-y-1.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
           <div className="flex items-center justify-between gap-3">
             <span>阶段</span>

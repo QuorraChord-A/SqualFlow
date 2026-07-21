@@ -20,7 +20,7 @@ function testModel(runtimeConfig: RuntimeConfig, input: AgentRuntimeConnectionTe
 function testEnv(
   runtimeConfig: RuntimeConfig,
   model: string,
-  contextWindowK: number,
+  contextWindowK: number | null,
   claudeConfigDir: string,
 ) {
   const env: Record<string, string> = {
@@ -30,7 +30,7 @@ function testEnv(
   };
   if (contextWindowK === 1_000) {
     delete env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
-  } else {
+  } else if (contextWindowK !== null) {
     env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
   }
   if (runtimeConfig.authMode === "apiKey") {

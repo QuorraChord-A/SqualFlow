@@ -1,22 +1,30 @@
-const baseEfforts = ["low", "medium", "high", "xhigh"] as const;
+import type { RuntimeSdk } from "../config/agentRuntimeConfig.js";
 
-export function codexReasoningEffortsForModel(model: string): string[] {
-  const normalized = model.trim().toLowerCase();
-  if (/^gpt-5\.6-luna(?:$|-)/u.test(normalized)) return [...baseEfforts, "max"];
-  if (/^gpt-5\.6(?:$|-)/u.test(normalized)) return [...baseEfforts, "max", "ultra"];
-  return [...baseEfforts];
+const RUNTIME_REASONING_EFFORTS: Record<RuntimeSdk, readonly string[]> = {
+  claudecode: ["low", "medium", "high", "xhigh", "max"],
+  codex: ["low", "medium", "high", "xhigh", "max", "ultra"],
+};
+
+const DEFAULT_RUNTIME_REASONING_EFFORT: Record<RuntimeSdk, string> = {
+  claudecode: "high",
+  codex: "medium",
+};
+
+/** Effort is a SquadFlow SDK capability, not provider catalog metadata. */
+export function runtimeReasoningEffortsForSdk(sdk: RuntimeSdk): string[] {
+  return [...RUNTIME_REASONING_EFFORTS[sdk]];
 }
 
-export function defaultCodexReasoningEffortForModel(model: string): string {
-  return /^gpt-5\.6-sol(?:$|-)/u.test(model.trim().toLowerCase()) ? "low" : "medium";
+export function defaultRuntimeReasoningEffortForSdk(sdk: RuntimeSdk): string {
+  return DEFAULT_RUNTIME_REASONING_EFFORT[sdk];
 }
 
-export function parseCodexReasoningEffort(model: string, value: unknown): string | null {
+export function parseRuntimeReasoningEffort(sdk: RuntimeSdk, value: unknown): string | null {
   if (typeof value !== "string") return null;
   const effort = value.trim().toLowerCase();
-  return codexReasoningEffortsForModel(model).includes(effort) ? effort : null;
+  return RUNTIME_REASONING_EFFORTS[sdk].includes(effort) ? effort : null;
 }
 
-export function normalizeCodexReasoningEffort(model: string, value: unknown): string {
-  return parseCodexReasoningEffort(model, value) ?? defaultCodexReasoningEffortForModel(model);
+export function normalizeRuntimeReasoningEffort(sdk: RuntimeSdk, value: unknown): string {
+  return parseRuntimeReasoningEffort(sdk, value) ?? defaultRuntimeReasoningEffortForSdk(sdk);
 }

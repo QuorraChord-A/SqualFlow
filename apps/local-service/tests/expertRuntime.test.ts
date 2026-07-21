@@ -64,7 +64,7 @@ function writeRuntimeConfigFile(root: string, configId: string, sdk: RuntimeSdk)
     authMode: "apiKey",
     baseUrl: "",
     apiKey: "",
-    models: [{ id: "model-1", name: "model-1" }],
+    models: [{ id: "model-1", name: "model-1", contextWindowK: 200 }],
   }, null, 2)}\n`);
 }
 
@@ -134,6 +134,7 @@ function createFakeNonClaudeAdapter(
     createInputQueue: () => new AsyncMessageQueue<unknown>(),
     createLeaderUserMessage: () => ({}),
     createLeaderGuideMessage: () => ({}),
+    createLeaderFlowNameMessage: () => ({}),
     createSingleTextInput: async function* () {},
     createExpertUserMessage: (content) => ({ role: "user", content }),
     createOutputAdapter: (messageId) => fakeOutputAdapter(messageId),

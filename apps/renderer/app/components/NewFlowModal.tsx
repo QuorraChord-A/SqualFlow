@@ -15,24 +15,22 @@ import type { FlowType } from '../types';
 interface NewFlowModalProps {
   open: boolean;
   onClose: () => void;
-  onSubmit: (data: { name: string; description: string; type: FlowType; mode: 'create' | 'edit' }) => void;
+  onSubmit: (data: { name: string; type: FlowType; mode: 'create' | 'edit' }) => void;
   mode?: 'create' | 'edit';
-  initialData?: { name: string; description: string; type: FlowType };
+  initialData?: { name: string; type: FlowType };
+  nameLocked?: boolean;
 }
 
-export default function NewFlowModal({ open, onClose, onSubmit, mode = 'create', initialData }: NewFlowModalProps) {
+export default function NewFlowModal({ open, onClose, onSubmit, mode = 'create', initialData, nameLocked = false }: NewFlowModalProps) {
   const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
   const [type, setType] = useState<FlowType>('full');
 
   useEffect(() => {
     if (initialData) {
       setName(initialData.name);
-      setDescription(initialData.description);
       setType(initialData.type);
     } else {
       setName('');
-      setDescription('');
       setType('full');
     }
   }, [initialData]);
@@ -40,9 +38,8 @@ export default function NewFlowModal({ open, onClose, onSubmit, mode = 'create',
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim()) return;
-    onSubmit({ name: name.trim(), description: (description ?? '').trim(), type, mode });
+    onSubmit({ name: name.trim(), type, mode });
     setName('');
-    setDescription('');
     setType('full');
     onClose();
   };
@@ -64,20 +61,10 @@ export default function NewFlowModal({ open, onClose, onSubmit, mode = 'create',
               type="text"
               value={name}
               onChange={(e) => setName(e.target.value)}
+              disabled={nameLocked}
               placeholder="输入流程名称"
               className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent text-sm bg-background text-foreground"
               autoFocus
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium text-muted-foreground mb-1">描述</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="简要描述这个流程的目标"
-              rows={3}
-              className="w-full px-3 py-2 border border-border rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent text-sm resize-none bg-background text-foreground"
             />
           </div>
 
@@ -88,7 +75,7 @@ export default function NewFlowModal({ open, onClose, onSubmit, mode = 'create',
             取消
           </Button>
           <Button
-            disabled={!name.trim()}
+            disabled={!name.trim() || nameLocked}
             onClick={handleSubmit}
           >
             {mode === 'create' ? '创建' : '保存'}

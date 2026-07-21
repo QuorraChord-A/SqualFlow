@@ -69,7 +69,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
   return {
     id: flow.id,
     name: flow.name,
-    description: flow.description ?? "",
+    name_generation_status: flow.nameGenerationStatus,
     status: flow.status,
     legacy_spec_flow: flow.legacySpecFlow === 1,
     risk_mode: store.getRiskMode(flow.id),

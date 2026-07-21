@@ -164,6 +164,7 @@ const ActiveTurnSchema = z.object({
 export const ServerWsMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("flow:state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:status"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
+  z.object({ type: z.literal("flow:name_updated"), flow_id: z.string(), log_id: z.string().optional(), data: z.object({ name: z.string(), name_generation_status: z.enum(["pending", "generated", "fallback", "manual"]) }).strict() }).strict(),
   z.object({ type: z.literal("flow:message_ack"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:guide_ack"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:queue_state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),

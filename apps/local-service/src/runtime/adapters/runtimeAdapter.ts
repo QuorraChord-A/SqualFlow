@@ -141,6 +141,8 @@ export type BuildLeaderRuntimeOptionsInput = {
   mcpServerConfigs?: Record<string, unknown>;
   canUseTool?: RuntimeToolPermission;
   maxTurns?: number;
+  /** Run a one-shot provider request without persisting a resumable session. */
+  ephemeral?: boolean;
   resume?: string;
   sessionId?: string;
   runtimeConfig?: RuntimeConfig;
@@ -210,6 +212,7 @@ export type AgentRuntimeAdapter = {
     attachments?: MessageImageAttachment[],
     planFeedback?: LeaderPlanFeedback[],
   ) => unknown;
+  createLeaderFlowNameMessage: (flowId: string) => unknown;
   createSingleTextInput: (text: string) => AsyncIterable<unknown>;
   createExpertUserMessage: (content: string) => unknown;
   createOutputAdapter: (messageId: string, metadata?: { startedAt?: string } | unknown) => RuntimeOutputAdapter;

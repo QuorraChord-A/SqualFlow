@@ -125,7 +125,10 @@ function writeNewTaskLeaderRuntimeSelection(selection: NewTaskLeaderRuntimeSelec
 
 function taskNameFromPrompt(prompt: string) {
   const firstLine = prompt.split(/\r?\n/).find((line) => line.trim())?.trim() || '新任务';
-  return firstLine.length > 42 ? `${firstLine.slice(0, 42)}…` : firstLine;
+  const segments = typeof Intl.Segmenter === 'function'
+    ? Array.from(new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(firstLine), (part) => part.segment)
+    : Array.from(firstLine);
+  return segments.slice(0, 10).join('');
 }
 
 function projectLabel(project: Project) {
@@ -304,7 +307,6 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
     try {
       const flow = await handleCreateFlow({
         name: taskNameFromPrompt(userPrompt),
-        description: userPrompt,
         type: 'full',
         mode: 'create',
         leader_runtime_config_id: leaderRuntimeSelection?.configId ?? null,

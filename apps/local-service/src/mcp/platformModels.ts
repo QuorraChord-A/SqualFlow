@@ -18,6 +18,11 @@ export const GetContextInput = z.object({
   flow_id: z.string().min(1),
 }).strict();
 
+export const UpdateFlowNameInput = z.object({
+  flow_id: z.string().min(1),
+  name: z.string().min(1),
+}).strict();
+
 export const AskUserInput = z.object({
   flow_id: z.string().min(1),
   questions: z.array(QuestionInput).min(1).max(4),
@@ -95,6 +100,7 @@ export const SendMessageInput = z.object({
 export type QuestionOptionInputValue = z.input<typeof QuestionOptionInput>;
 export type QuestionInputValue = z.input<typeof QuestionInput>;
 export type GetContextInputValue = z.input<typeof GetContextInput>;
+export type UpdateFlowNameInputValue = z.input<typeof UpdateFlowNameInput>;
 export type AskUserInputValue = z.input<typeof AskUserInput>;
 export type CreatePlanInputValue = z.input<typeof CreatePlanInput>;
 export type CreateTaskInputValue = z.input<typeof CreateTaskInput>;

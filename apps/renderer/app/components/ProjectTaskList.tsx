@@ -409,7 +409,7 @@ export default function ProjectTaskList({
                             collapsed ? '-translate-y-1' : 'translate-y-0'
                           }`}
                         >
-                          <div className="ml-3 border-l border-sidebar-border pl-1.5">
+                          <div>
                           {projectFlows.length === 0 ? (
                             <div className="px-3 py-2 text-xs text-muted-foreground">
                               {allProjectFlows.length > 0 ? '流程已置顶' : '暂无流程'}

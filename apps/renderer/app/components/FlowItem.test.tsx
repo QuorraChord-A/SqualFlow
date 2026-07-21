@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SquadFlow } from "../types";
@@ -20,7 +20,22 @@ const flow: SquadFlow = {
 
 describe("FlowItem", () => {
   afterEach(() => {
+    vi.useRealTimers();
     delete window.squadflowDesktopShell;
+  });
+
+  it("reveals a server-updated Flow name from left to right", () => {
+    vi.useFakeTimers();
+    const { rerender } = render(<FlowItem flow={flow} selected={false} onClick={vi.fn()} />);
+
+    rerender(<FlowItem flow={{ ...flow, name: "登录页已完成" }} selected={false} onClick={vi.fn()} />);
+    expect(screen.getByTestId("flow-name")).toHaveTextContent("登");
+
+    act(() => vi.advanceTimersByTime(72));
+    expect(screen.getByTestId("flow-name")).toHaveTextContent("登录");
+
+    act(() => vi.advanceTimersByTime(72 * 4));
+    expect(screen.getByTestId("flow-name")).toHaveTextContent("登录页已完成");
   });
 
   it("replaces the blue status dot with a pending spinner when user action is required", () => {
@@ -141,7 +156,6 @@ describe("FlowItem", () => {
     fireEvent.mouseEnter(screen.getByRole("button", { name: "打开流程：等待确认的 Flow" }));
 
     await waitFor(() => {
-      expect(screen.getByText("修复登录页")).toBeInTheDocument();
       expect(screen.getByText("clarify")).toBeInTheDocument();
       expect(screen.getByText("ccdev")).toBeInTheDocument();
     });

@@ -13,6 +13,7 @@ import {
   buildAttachmentEvent,
   buildLeaderGuidePrompt,
   buildLeaderPrompt,
+  buildFlowNameRequestPrompt,
   type LeaderPlanFeedback,
   type LeaderTurnInput,
 } from "../leaderPrompt.js";
@@ -96,6 +97,14 @@ function leaderGuideMessage(
     flowId,
     attachments,
     attachmentPlacement: "trailing",
+  };
+}
+
+function leaderFlowNameMessage(flowId: string): CodexRuntimeInput {
+  return {
+    type: "text",
+    text: buildFlowNameRequestPrompt(flowId),
+    flowId,
   };
 }
 
@@ -597,7 +606,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       config: this.options.config,
       baseInstructions: this.options.systemPrompt,
       developerInstructions: this.options.systemPrompt,
-      ephemeral: false,
+      ephemeral: this.options.ephemeral === true,
     };
     const threadStartedAt = performance.now();
     if (this.options.resume) {
@@ -638,6 +647,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       input: userInput(input),
       cwd: this.options.cwd,
       model: this.options.model || null,
+      ...(this.options.ephemeral === true ? { effort: "none" } : {}),
     });
     const turnId = turnIdFromResult(started);
     this.currentTurnId = turnId;
@@ -1000,6 +1010,7 @@ export function createCodexAgentRuntimeAdapter(input: {
     createInputQueue: () => new AsyncMessageQueue<unknown>(),
     createLeaderUserMessage: leaderUserMessage as AgentRuntimeAdapter["createLeaderUserMessage"],
     createLeaderGuideMessage: leaderGuideMessage as AgentRuntimeAdapter["createLeaderGuideMessage"],
+    createLeaderFlowNameMessage: leaderFlowNameMessage as AgentRuntimeAdapter["createLeaderFlowNameMessage"],
     createSingleTextInput: singleTextInput as AgentRuntimeAdapter["createSingleTextInput"],
     createExpertUserMessage: expertUserMessage as AgentRuntimeAdapter["createExpertUserMessage"],
     createOutputAdapter,

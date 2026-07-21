@@ -188,7 +188,6 @@ describe('NewTaskView', () => {
       expect(handleCreateFlow).toHaveBeenCalledWith(
         expect.objectContaining({
           name: '实现左侧面板',
-          description: '实现左侧面板',
           type: 'full',
           leader_runtime_config_id: 'default-agent-sdk',
           leader_runtime_model_id: 'mimo-v25',
@@ -230,7 +229,6 @@ describe('NewTaskView', () => {
       expect(handleCreateFlow).toHaveBeenCalledWith(
         expect.objectContaining({
           name: '先写规格',
-          description: '先写规格',
         }),
         project.id,
       );
@@ -431,7 +429,7 @@ describe('NewTaskView', () => {
     });
   });
 
-  it('does not show or submit effort for API-key Codex when creating a Flow', async () => {
+  it('does not show or submit Effort for API-key Codex when creating a Flow', async () => {
     const user = userEvent.setup();
     window.localStorage.setItem(NEW_TASK_LEADER_RUNTIME_SELECTION_STORAGE_KEY, JSON.stringify({
       configId: 'codex-api',

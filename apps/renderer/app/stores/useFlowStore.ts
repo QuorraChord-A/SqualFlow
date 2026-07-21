@@ -48,7 +48,6 @@ interface FlowState {
   handleAbort: (flowId: string) => Promise<void>;
   handleCreateFlow: (data: {
     name: string;
-    description: string;
     type: FlowType;
     mode: 'create' | 'edit';
     leader_runtime_config_id?: string | null;
@@ -57,7 +56,7 @@ interface FlowState {
     risk_mode?: 'auto_edit' | 'full_access';
     plan_approval?: 'on' | 'off';
   }, projectId: string) => Promise<SquadFlow | null>;
-  handleSaveEdit: (data: { name: string; description: string; type: FlowType; mode: 'create' | 'edit' }, editingFlowId?: string) => Promise<void>;
+  handleSaveEdit: (data: { name: string; type: FlowType; mode: 'create' | 'edit' }, editingFlowId?: string) => Promise<void>;
   handleConfirmDelete: (flowId: string) => Promise<void>;
   confirmClearAllFlows: () => Promise<void>;
   refreshFlows: (projectId?: string) => Promise<void>;
@@ -125,7 +124,6 @@ export const useFlowStore = create<FlowState>((set, get) => ({
 
   handleCreateFlow: async (data: {
     name: string;
-    description: string;
     type: FlowType;
     mode: 'create' | 'edit';
     leader_runtime_config_id?: string | null;
@@ -140,7 +138,6 @@ export const useFlowStore = create<FlowState>((set, get) => ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: data.name,
-          description: data.description,
           flow_type: data.type,
           project_id: projectId,
           leader_runtime_config_id: data.leader_runtime_config_id,
@@ -161,13 +158,13 @@ export const useFlowStore = create<FlowState>((set, get) => ({
     }
   },
 
-  handleSaveEdit: async (data: { name: string; description: string; type: FlowType; mode: 'create' | 'edit' }, editingFlowId?: string) => {
+  handleSaveEdit: async (data: { name: string; type: FlowType; mode: 'create' | 'edit' }, editingFlowId?: string) => {
     if (!editingFlowId) return;
     try {
       const res = await fetch(`${API_BASE}/api/flows/${editingFlowId}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: data.name, description: data.description }),
+        body: JSON.stringify({ name: data.name }),
       });
       if (res.ok) {
         get().refreshFlows();
@@ -272,7 +269,7 @@ function mapFlowDetailResponse(data: FlowDetailResponse): FlowDetail {
   return {
     id: data.id,
     name: data.name,
-    description: data.description || '',
+    name_generation_status: data.name_generation_status ?? 'generated',
     type: data.type,
     status: data.status,
     current_stage: mapLegacyStage(data.current_stage),
@@ -487,7 +484,7 @@ wsClient.onEvent("flow:state", (msg) => {
     selectedFlow: {
       id: msg.flow_id,
       name: data.name || '',
-      description: data.description || '',
+      name_generation_status: data.name_generation_status ?? 'generated',
       type: data.type || 'full',
       status: data.status,
       current_stage: mapLegacyStage(data.current_stage || null),
@@ -529,6 +526,18 @@ function updateFlowRuntimeStatus(flowId: string, status: string, currentStage?: 
 
 wsClient.onEvent("flow:status", (msg) => {
   updateFlowRuntimeStatus(msg.flow_id, msg.data?.status || "ready");
+});
+
+wsClient.onEvent("flow:name_updated", (msg) => {
+  const status = msg.data.name_generation_status as SquadFlow["name_generation_status"];
+  useFlowStore.setState((state) => ({
+    flows: state.flows.map((flow) => flow.id === msg.flow_id
+      ? { ...flow, name: msg.data.name as string, name_generation_status: status }
+      : flow),
+    selectedFlow: state.selectedFlow?.id === msg.flow_id
+      ? { ...state.selectedFlow, name: msg.data.name as string, name_generation_status: status } as FlowDetail
+      : state.selectedFlow,
+  }));
 });
 
 wsClient.onEvent("user_turn:event", (msg) => {

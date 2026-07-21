@@ -52,6 +52,50 @@ function writeCodexRollout(root: string, sessionId: string, entries: unknown[]) 
 }
 
 describe("Codex runtime adapter", () => {
+  it("sets no reasoning effort on the ephemeral Flow Namer turn", async () => {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const clientFactory: CodexClientFactory = () => ({
+      start: async () => {},
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "thread/start") return { thread: { id: "thread-namer" } };
+        if (method === "turn/start") return { turn: { id: "turn-namer" } };
+        throw new Error(`unexpected request: ${method}`);
+      },
+      notify: () => {},
+      respond: () => {},
+      close: () => {},
+      notifications: async function* () {
+        yield {
+          method: "turn/completed",
+          params: { threadId: "thread-namer", turn: { id: "turn-namer", status: "completed" } },
+        };
+      },
+    });
+    const adapter = createCodexAgentRuntimeAdapter({ clientFactory });
+    const options = adapter.buildLeaderOptions({
+      role: "leader",
+      systemPrompt: "namer",
+      cwd: "/tmp/project",
+      capabilities: ["read"],
+      mcpTools: [],
+      ephemeral: true,
+      runtimeConfig: runtimeConfig(),
+    });
+
+    for await (const event of adapter.runQuery({
+      prompt: adapter.createSingleTextInput("生成名称"),
+      options,
+    })) {
+      if (event.type === "turn_completed") break;
+    }
+
+    const threadStart = requests.find((request) => request.method === "thread/start")?.params as Record<string, unknown>;
+    const turnStart = requests.find((request) => request.method === "turn/start")?.params as Record<string, unknown>;
+    expect(threadStart.ephemeral).toBe(true);
+    expect(turnStart.effort).toBe("none");
+  });
+
   it("runs an Expert turn through app-server and captures the final assistant text", async () => {
     const requests: Array<{ method: string; params: unknown }> = [];
     const events = [
@@ -323,6 +367,7 @@ describe("Codex runtime adapter", () => {
   it("normalizes Responses endpoint URLs to provider base URLs", () => {
     expect(normalizeCodexBaseUrl("https://example.test/v1/responses")).toBe("https://example.test/v1");
     expect(normalizeCodexBaseUrl("https://example.test/v1/")).toBe("https://example.test/v1");
+    expect(normalizeCodexBaseUrl("")).toBe("https://api.openai.com/v1");
   });
 
   it("uses the latest turn usage for current context instead of cumulative thread usage", () => {

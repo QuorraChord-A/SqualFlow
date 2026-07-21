@@ -56,7 +56,11 @@ export async function routeExpertResultToLeader(input: {
   const leaderAgentSession = input.store
     .listAgentSessions(event.flowId)
     .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-  const leaderSessionId = input.store.getFlow(event.flowId)?.leaderSessionId ?? leaderAgentSession?.sessionId ?? "";
+  const flowLeaderSessionId = input.store.getFlow(event.flowId)?.leaderSessionId ?? null;
+  const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
+    ? flowLeaderSessionId
+    : leaderAgentSession?.sessionId ?? null;
+  const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
   const userTurn = input.store.getUserTurn(event.userTurnId);
   if (
     !leaderAgentSession
@@ -82,7 +86,7 @@ export async function routeExpertResultToLeader(input: {
     },
     leaderAgentSessionId: leaderAgentSession.id,
     leaderSessionId,
-    resumeSessionId: leaderSessionId,
+    resumeSessionId: providerLeaderSessionId ?? undefined,
   });
   return true;
 }
@@ -271,7 +275,11 @@ export function createApp(options: CreateAppOptions = {}) {
   for (const turn of recoverableUserTurns) {
     const leaderAgentSession = store.listAgentSessions(turn.flowId)
       .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-    const leaderSessionId = store.getFlow(turn.flowId)?.leaderSessionId ?? leaderAgentSession?.sessionId ?? "";
+    const flowLeaderSessionId = store.getFlow(turn.flowId)?.leaderSessionId ?? null;
+    const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
+      ? flowLeaderSessionId
+      : leaderAgentSession?.sessionId ?? null;
+    const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
     if (!leaderAgentSession || !leaderSessionId) continue;
     void leaderRuntime.runLeaderTurn({
       flowId: turn.flowId,
@@ -279,7 +287,7 @@ export function createApp(options: CreateAppOptions = {}) {
       userTurnId: turn.id,
       leaderAgentSessionId: leaderAgentSession.id,
       leaderSessionId,
-      resumeSessionId: leaderSessionId,
+      resumeSessionId: providerLeaderSessionId ?? undefined,
     }).catch((error) => {
       app.log.error({ flowId: turn.flowId, userTurnId: turn.id, ...errorDiagnostic(error) }, "failed to recover UserTurn Leader work");
     });

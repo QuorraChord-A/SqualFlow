@@ -47,7 +47,12 @@ const runtimeSnapshot = {
       baseUrl: "",
       apiKey: "",
       models: [
-        { id: "gpt-55", name: "gpt-5.5" },
+        {
+          id: "gpt-55",
+          name: "gpt-5.5",
+          reasoningEfforts: ["low", "medium", "high", "xhigh"],
+          defaultReasoningEffort: "medium",
+        },
         {
           id: "gpt-56-terra",
           name: "gpt-5.6-terra",
@@ -270,6 +275,34 @@ describe("LeaderModelSelector", () => {
     }));
   });
 
+  it("shows the fixed Codex effort scale when model metadata omits it", async () => {
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
+      ...runtimeSnapshot,
+      configs: runtimeSnapshot.configs.map((config) => config.id === "codex-local"
+        ? { ...config, models: [{ id: "gpt-55", name: "gpt-5.5" }] }
+        : config),
+    });
+    useFlowStore.setState({
+      flows: [{
+        id: "flow-1",
+        name: "Flow 1",
+        description: "",
+        type: "full",
+        status: "ready",
+        current_stage: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        leader_runtime_config_id: "codex-local",
+        leader_runtime_model_id: "gpt-55",
+        leader_runtime_reasoning_effort: null,
+      }],
+    });
+
+    render(<LeaderModelSelector flowId="flow-1" />);
+
+    expect(await screen.findByRole("button", { name: "调整 Codex 推理强度" })).toBeInTheDocument();
+  });
+
   it("previews Codex reasoning effort while dragging and commits on release", async () => {
     const user = userEvent.setup();
     useFlowStore.setState({
@@ -311,18 +344,18 @@ describe("LeaderModelSelector", () => {
     fireEvent.pointerMove(slider, { buttons: 1, clientX: 61, pointerId: 1 });
 
     expect(apiMocks.updateFlowLeaderRuntimeSelection).not.toHaveBeenCalled();
-    expect(effortTrigger).toHaveTextContent("高级");
-    expect(screen.getByTestId("codex-effort-current-label")).toHaveTextContent("高级");
-    expect(slider).toHaveAttribute("aria-valuetext", "High");
+    expect(effortTrigger).toHaveTextContent("超高");
+    expect(screen.getByTestId("codex-effort-current-label")).toHaveTextContent("超高");
+    expect(slider).toHaveAttribute("aria-valuetext", "超高");
 
     fireEvent.pointerUp(slider, { clientX: 61, pointerId: 1 });
 
     await waitFor(() => expect(apiMocks.updateFlowLeaderRuntimeSelection).toHaveBeenCalledWith("flow-1", {
-      reasoningEffort: "high",
+      reasoningEffort: "xhigh",
     }));
   });
 
-  it("shows effort only for inherited Codex auth", async () => {
+  it("uses the official visual treatment only for inherited Codex auth", async () => {
     const user = userEvent.setup();
     useFlowStore.setState({
       flows: [{

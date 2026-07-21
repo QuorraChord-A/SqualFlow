@@ -8,13 +8,15 @@ export type RuntimeModelDto = {
   id: string;
   name: string;
   contextWindowK?: number | null;
-  reasoningEfforts?: string[];
-  defaultReasoningEffort?: string;
+  metadataStatus?: {
+    contextWindow: "available" | "unavailable";
+  };
 };
 
 export type AgentRuntimeConfigDto = {
   id: string;
   fileName: string;
+  filePath?: string;
   name: string;
   sdk: RuntimeSdk;
   authMode: RuntimeAuthMode;
@@ -71,6 +73,8 @@ export type RuntimeLocalAuthResultDto = {
 export type RuntimeAvailableModelsResultDto = {
   sdk: RuntimeSdk;
   models: RuntimeModelDto[];
+  warnings?: string[];
+  endpoint?: string;
 };
 
 export type AgentContextUsageDto = {

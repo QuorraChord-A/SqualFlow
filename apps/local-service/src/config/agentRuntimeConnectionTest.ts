@@ -1,6 +1,10 @@
 import type { RuntimeConfig } from "./agentRuntimeConfig.js";
 import { readRuntimeConfig } from "./agentRuntimeConfig.js";
-import { normalizeRuntimeModelContext } from "./runtimeModelContext.js";
+import {
+  normalizeRuntimeModelContext,
+  refreshedRuntimeModelContextWindowK,
+  stripClaudeExtendedContextSuffix,
+} from "./runtimeModelContext.js";
 import {
   detectRuntimeLocalAuth,
   type RuntimeLocalAuthResult,
@@ -11,17 +15,49 @@ import {
   type AgentRuntimeConnectionTestResult,
 } from "../runtime/adapters/runtimeConnectionTest.js";
 import { listCodexRuntimeModels } from "../runtime/adapters/codexModelList.js";
+import {
+  discoverRuntimeModels,
+  runtimeModelMetadataWarnings,
+  type RuntimeModelDiscoveryResult,
+} from "../runtime/modelDiscovery.js";
 
 export type { AgentRuntimeConnectionTestResult };
 export type { RuntimeLocalAuthResult };
 
 type TestConnectionInput = AgentRuntimeConnectionTestInput;
 
+export function mergeRefreshedRuntimeModels(
+  runtimeConfig: Pick<RuntimeConfig, "sdk" | "models">,
+  models: RuntimeConfig["models"],
+): RuntimeConfig["models"] {
+  return models.map((model) => {
+    const normalizedName = runtimeConfig.sdk === "claudecode"
+      ? stripClaudeExtendedContextSuffix(model.name)
+      : model.name.trim();
+    const previous = runtimeConfig.models.find((item) => {
+      const previousName = runtimeConfig.sdk === "claudecode"
+        ? stripClaudeExtendedContextSuffix(item.name)
+        : item.name.trim();
+      return previousName === normalizedName;
+    });
+    return {
+      id: model.id,
+      name: normalizedName,
+      contextWindowK: refreshedRuntimeModelContextWindowK(
+        runtimeConfig.sdk,
+        model.contextWindowK,
+        previous?.contextWindowK,
+      ),
+    };
+  });
+}
+
 function normalizedTestModels(
   runtimeConfig: Pick<RuntimeConfig, "sdk" | "authMode">,
   models: RuntimeConfig["models"],
 ): RuntimeConfig["models"] {
   return models.map((model, index) => {
+    const { contextWindowK: _contextWindowK, ...modelWithoutContext } = model;
     const normalizedContext = normalizeRuntimeModelContext(
       runtimeConfig.sdk,
       runtimeConfig.authMode,
@@ -29,6 +65,7 @@ function normalizedTestModels(
       model.contextWindowK,
     );
     return {
+      ...modelWithoutContext,
       id: model.id || `model-${index + 1}`,
       name: normalizedContext.name,
       ...(normalizedContext.contextWindowK === undefined
@@ -51,6 +88,9 @@ function draftRuntimeConfig(configId: string, input: TestConnectionInput): Runti
     apiKey: patch.apiKey ?? "",
     models: [],
   };
+  if (runtimeConfig.sdk === "claudecode" && runtimeConfig.authMode !== "apiKey") {
+    throw new Error("Claude Code 仅支持 API Key，不支持官方登录态或 Access Token");
+  }
   return {
     ...runtimeConfig,
     models: normalizedTestModels(runtimeConfig, Array.isArray(patch.models) ? patch.models : []),
@@ -66,6 +106,9 @@ function mergeTestConfig(storedConfig: RuntimeConfig, input: TestConnectionInput
     fileName: storedConfig.fileName,
     models: [],
   };
+  if (runtimeConfig.sdk === "claudecode" && runtimeConfig.authMode !== "apiKey") {
+    throw new Error("Claude Code 仅支持 API Key，不支持官方登录态或 Access Token");
+  }
   return {
     ...runtimeConfig,
     models: normalizedTestModels(
@@ -102,15 +145,25 @@ export async function checkRuntimeConfigLocalAuth(
 export async function refreshRuntimeConfigModels(
   configId: string,
   input: TestConnectionInput = {},
-): Promise<{ sdk: RuntimeConfig["sdk"]; models: RuntimeConfig["models"] }> {
+): Promise<RuntimeModelDiscoveryResult> {
   const storedConfig = await readRuntimeConfig(configId);
   const runtimeConfig = storedConfig
     ? mergeTestConfig(storedConfig, input)
     : draftRuntimeConfig(configId, input);
   if (!runtimeConfig) throw new Error("Runtime config not found");
-  if (runtimeConfig.sdk !== "codex") throw new Error("Only Codex runtime supports available model refresh");
-  return {
-    sdk: runtimeConfig.sdk,
-    models: await listCodexRuntimeModels(runtimeConfig),
-  };
+  const mergeDiscoveredModels = (result: RuntimeModelDiscoveryResult): RuntimeModelDiscoveryResult => ({
+    ...result,
+    models: mergeRefreshedRuntimeModels(runtimeConfig, result.models),
+  });
+  if (runtimeConfig.sdk === "codex" && runtimeConfig.authMode === "inherited") {
+    const models = await listCodexRuntimeModels(runtimeConfig);
+    const warnings = runtimeModelMetadataWarnings(models, "Codex model/list");
+    return mergeDiscoveredModels({
+      sdk: runtimeConfig.sdk,
+      models,
+      warnings,
+      endpoint: "codex-app-server:model/list",
+    });
+  }
+  return mergeDiscoveredModels(await discoverRuntimeModels(runtimeConfig));
 }

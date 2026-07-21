@@ -70,7 +70,12 @@ function tempRuntimeConfigRoot() {
     authMode: "inherited",
     baseUrl: "",
     apiKey: "",
-    models: [{ id: "gpt-55", name: "gpt-5.5" }],
+    models: [{
+      id: "gpt-55",
+      name: "gpt-5.5",
+      reasoningEfforts: ["low", "medium", "high", "xhigh"],
+      defaultReasoningEffort: "medium",
+    }],
   }, null, 2)}\n`);
   fs.writeFileSync(path.join(root, "configs", "codex-api.json"), `${JSON.stringify({
     id: "codex-api",
@@ -313,7 +318,7 @@ describe("REST API", () => {
       expect(flow).toEqual(expect.objectContaining({
         id: expect.stringMatching(/^flow-/),
         name: "hello-flow",
-        description: "写个 helloworld",
+        name_generation_status: "pending",
         type: "full",
         status: "ready",
         active_user_turn_id: null,
@@ -328,6 +333,14 @@ describe("REST API", () => {
         risk_mode: "auto_edit",
         plan_approval: "on",
       }));
+
+      const pendingNameUpdateResponse = await app.inject({
+        method: "PUT",
+        url: `/api/flows/${flow.id}`,
+        payload: { name: "用户尝试修改" },
+      });
+      expect(pendingNameUpdateResponse.statusCode).toBe(409);
+      expect(pendingNameUpdateResponse.json()).toEqual({ detail: "FLOW_NAME_GENERATING" });
 
       const selectedRuntimeFlowResponse = await app.inject({
         method: "POST",
@@ -377,10 +390,10 @@ describe("REST API", () => {
           leader_runtime_reasoning_effort: "high",
         },
       });
-      expect(apiKeyCodexEffortResponse.statusCode).toBe(400);
-      expect(apiKeyCodexEffortResponse.json()).toEqual({
-        detail: "Leader reasoning effort requires official Codex login",
-      });
+      expect(apiKeyCodexEffortResponse.statusCode).toBe(201);
+      expect(apiKeyCodexEffortResponse.json()).toEqual(expect.objectContaining({
+        leader_runtime_reasoning_effort: "high",
+      }));
 
       store.markFlowOutputCompleted(flow.id, "2026-06-12T01:00:00.000Z");
       const unreadFlowResponse = await app.inject({ method: "GET", url: `/api/flows/${flow.id}` });
@@ -649,7 +662,7 @@ describe("REST API", () => {
     }
   });
 
-  it("returns normalized model context metadata and rejects invalid custom Codex context", async () => {
+  it("keeps unavailable model metadata explicit and rejects invalid custom Codex context", async () => {
     config.agentRuntimeConfigRoot = tempRuntimeConfigRoot();
     const store = createStore(tempDb());
     const app = createApp({ logger: false, store } as any);
@@ -659,11 +672,24 @@ describe("REST API", () => {
       expect(snapshotResponse.statusCode).toBe(200);
       const configs = snapshotResponse.json().configs as Array<{
         id: string;
-        models: Array<{ contextWindowK: number }>;
+        filePath: string;
+        models: Array<{
+          contextWindowK: number | null;
+          metadataStatus: { contextWindow: string };
+        }>;
       }>;
-      expect(configs.find((item) => item.id === "default-agent-sdk")?.models[0]?.contextWindowK).toBe(200);
-      expect(configs.find((item) => item.id === "codex-api")?.models[0]?.contextWindowK).toBe(128);
-      expect(configs.find((item) => item.id === "codex-local")?.models[0]?.contextWindowK).toBe(258);
+      expect(configs.find((item) => item.id === "default-agent-sdk")?.models[0]).toEqual(expect.objectContaining({
+        contextWindowK: 1_000,
+        metadataStatus: { contextWindow: "available" },
+      }));
+      expect(configs.find((item) => item.id === "default-agent-sdk")?.filePath).toBe(
+        path.join(config.agentRuntimeConfigRoot, "configs", "default-agent-sdk.json"),
+      );
+      expect(configs.find((item) => item.id === "codex-api")?.models[0]?.contextWindowK).toBe(256);
+      expect(configs.find((item) => item.id === "codex-local")?.models[0]).toEqual(expect.objectContaining({
+        contextWindowK: 256,
+        metadataStatus: { contextWindow: "available" },
+      }));
 
       const invalidResponse = await app.inject({
         method: "POST",
@@ -676,7 +702,20 @@ describe("REST API", () => {
         },
       });
       expect(invalidResponse.statusCode).toBe(400);
-      expect(invalidResponse.json().detail).toContain("大于等于 128K 的整数");
+      expect(invalidResponse.json().detail).toContain("大于等于 128K 的数字");
+
+      const claudeLocalAuthResponse = await app.inject({
+        method: "POST",
+        url: "/api/agent-runtime-config/configs",
+        payload: {
+          name: "ClaudeLocalAuth",
+          sdk: "claudecode",
+          authMode: "inherited",
+          models: [{ id: "claude", name: "claude-test", contextWindowK: 200 }],
+        },
+      });
+      expect(claudeLocalAuthResponse.statusCode).toBe(400);
+      expect(claudeLocalAuthResponse.json().detail).toContain("Claude Code 仅支持 API Key");
     } finally {
       await app.close();
       store.sqlite.close();

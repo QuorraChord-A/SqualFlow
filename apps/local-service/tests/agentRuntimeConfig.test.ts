@@ -102,10 +102,63 @@ describe("agent runtime config storage", () => {
     expect(config.id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(config.fileName).toBe(`${config.id}.json`);
     expect(config.name).toBe("未命名配置1");
-    expect(config.models[0]).toMatchObject({ contextWindowK: 200 });
+    expect(config.models[0].contextWindowK).toBe(1_000);
   });
 
-  it("normalizes and validates Claude Code model context choices", async () => {
+  it("lists providers by creation time ascending even when their filenames sort differently", async () => {
+    const { createRuntimeConfig, readAgentRuntimeConfigSnapshot } = await loadRuntimeConfigModule();
+    const first = await createRuntimeConfig({
+      name: "最早添加",
+      sdk: "codex",
+      authMode: "apiKey",
+      models: [{ id: "first", name: "first", contextWindowK: 256 }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = await createRuntimeConfig({
+      name: "稍后添加",
+      sdk: "codex",
+      authMode: "apiKey",
+      models: [{ id: "second", name: "second", contextWindowK: 256 }],
+    });
+
+    const snapshot = await readAgentRuntimeConfigSnapshot();
+
+    expect(snapshot.configs.map((config) => config.id)).toEqual([first.id, second.id]);
+  });
+
+  it("allows only API key authentication for Claude Code", async () => {
+    const { createRuntimeConfig } = await loadRuntimeConfigModule();
+
+    await expect(createRuntimeConfig({
+      name: "ClaudeLocal",
+      sdk: "claudecode",
+      authMode: "inherited",
+      models: [{ id: "opus", name: "opus", contextWindowK: 200 }],
+    })).rejects.toThrow("Claude Code 仅支持 API Key");
+  });
+
+  it("reads legacy Claude local-auth configs as API-key configs", async () => {
+    const { readRuntimeConfig } = await loadRuntimeConfigModule((root) => {
+      fs.mkdirSync(path.join(root, "configs"), { recursive: true });
+      fs.writeFileSync(path.join(root, "configs", "legacy-claude.json"), `${JSON.stringify({
+        id: "legacy-claude",
+        fileName: "legacy-claude.json",
+        name: "LegacyClaude",
+        sdk: "claudecode",
+        authMode: "inherited",
+        baseUrl: "",
+        apiKey: "",
+        models: [{ id: "opus", name: "opus" }],
+      }, null, 2)}\n`);
+    });
+
+    await expect(readRuntimeConfig("legacy-claude")).resolves.toEqual(expect.objectContaining({
+      sdk: "claudecode",
+      authMode: "apiKey",
+    }));
+  });
+
+  it("normalizes Claude Code context metadata to the supported runtime sizes", async () => {
     const { createRuntimeConfig } = await loadRuntimeConfigModule();
 
     const extended = await createRuntimeConfig({
@@ -116,15 +169,23 @@ describe("agent runtime config storage", () => {
     });
     expect(extended.models).toEqual([{ id: "opus", name: "opus", contextWindowK: 1_000 }]);
 
+    const providerSized = await createRuntimeConfig({
+      name: "Claude200K",
+      sdk: "claudecode",
+      authMode: "apiKey",
+      models: [{ id: "opus", name: "opus", contextWindowK: 200 }],
+    });
+    expect(providerSized.models[0]).toEqual({ id: "opus", name: "opus", contextWindowK: 200 });
+
     await expect(createRuntimeConfig({
       name: "ClaudeInvalid",
       sdk: "claudecode",
       authMode: "apiKey",
-      models: [{ id: "opus", name: "opus", contextWindowK: 500 }],
-    })).rejects.toThrow("Claude Code 上下文只能选择 200K 或 1M");
+      models: [{ id: "opus", name: "opus", contextWindowK: 0 }],
+    })).rejects.toThrow("只能是 200K 或 1000K");
   });
 
-  it("defaults and validates custom Codex context while ignoring edits for official Codex", async () => {
+  it("defaults Codex context for both official and custom configs", async () => {
     const { createRuntimeConfig } = await loadRuntimeConfigModule();
 
     const custom = await createRuntimeConfig({
@@ -133,7 +194,7 @@ describe("agent runtime config storage", () => {
       authMode: "apiKey",
       models: [{ id: "mimo", name: "mimo-v2.5" }],
     });
-    expect(custom.models[0]).toMatchObject({ contextWindowK: 128 });
+    expect(custom.models[0].contextWindowK).toBe(256);
 
     const official = await createRuntimeConfig({
       name: "CodexOfficial",
@@ -141,20 +202,21 @@ describe("agent runtime config storage", () => {
       authMode: "inherited",
       models: [{ id: "gpt-56", name: "gpt-5.6-terra", contextWindowK: 128 }],
     });
-    expect(official.models[0]).toEqual({ id: "gpt-56", name: "gpt-5.6-terra" });
+    expect(official.models[0]).toEqual({ id: "gpt-56", name: "gpt-5.6-terra", contextWindowK: 128 });
 
     await expect(createRuntimeConfig({
       name: "CodexTooSmall",
       sdk: "codex",
       authMode: "apiKey",
       models: [{ id: "mimo", name: "mimo-v2.5", contextWindowK: 127 }],
-    })).rejects.toThrow("大于等于 128K 的整数");
-    await expect(createRuntimeConfig({
-      name: "CodexFraction",
+    })).rejects.toThrow("大于等于 128K 的数字");
+    const exactTokenWindow = await createRuntimeConfig({
+      name: "Codex131072",
       sdk: "codex",
       authMode: "apiKey",
-      models: [{ id: "mimo", name: "mimo-v2.5", contextWindowK: 128.5 }],
-    })).rejects.toThrow("大于等于 128K 的整数");
+      models: [{ id: "mimo", name: "mimo-v2.5", contextWindowK: 131.072 }],
+    });
+    expect(exactTokenWindow.models[0]?.contextWindowK).toBe(131.072);
   });
 
   it("resolves flow leader runtime selection by config and model ids", async () => {

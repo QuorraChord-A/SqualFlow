@@ -304,6 +304,7 @@ function rebuildFlowsWithoutWorkspace(sqlite: ReturnType<typeof openDatabase>["s
       project_id TEXT,
       name TEXT NOT NULL,
       description TEXT,
+      name_generation_status TEXT NOT NULL DEFAULT 'generated',
       status TEXT NOT NULL DEFAULT 'ready',
       legacy_spec_flow INTEGER NOT NULL DEFAULT 0,
       risk_mode TEXT NOT NULL DEFAULT 'auto_edit',
@@ -319,13 +320,13 @@ function rebuildFlowsWithoutWorkspace(sqlite: ReturnType<typeof openDatabase>["s
       updated_at TEXT NOT NULL
     );
     INSERT INTO flows_tmp (
-      id, project_id, name, description, status, legacy_spec_flow, risk_mode, plan_approval, is_pinned,
+      id, project_id, name, description, name_generation_status, status, legacy_spec_flow, risk_mode, plan_approval, is_pinned,
       last_output_completed_at, leader_session_id, leader_runtime_sdk,
       leader_runtime_config_id, leader_runtime_model_id, leader_runtime_reasoning_effort,
       created_at, updated_at
     )
     SELECT
-      id, project_id, name, description, status, ${legacySpecExpression}, risk_mode, plan_approval, is_pinned,
+      id, project_id, name, description, 'generated', status, ${legacySpecExpression}, risk_mode, plan_approval, is_pinned,
       last_output_completed_at, leader_session_id, NULL, leader_runtime_config_id,
       leader_runtime_model_id, leader_runtime_reasoning_effort, created_at, updated_at
     FROM flows;
@@ -381,7 +382,7 @@ export function createStore(databasePath: string) {
       }
       sqlite.exec(`
         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, local_path TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');
-        CREATE TABLE IF NOT EXISTS flows (id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL, description TEXT, status TEXT NOT NULL DEFAULT 'ready', legacy_spec_flow INTEGER NOT NULL DEFAULT 0, risk_mode TEXT NOT NULL DEFAULT 'auto_edit', plan_approval TEXT NOT NULL DEFAULT 'on', is_pinned INTEGER NOT NULL DEFAULT 0, last_output_completed_at TEXT, leader_session_id TEXT, leader_runtime_sdk TEXT, leader_runtime_config_id TEXT, leader_runtime_model_id TEXT, leader_runtime_reasoning_effort TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS flows (id TEXT PRIMARY KEY, project_id TEXT, name TEXT NOT NULL, description TEXT, name_generation_status TEXT NOT NULL DEFAULT 'generated', status TEXT NOT NULL DEFAULT 'ready', legacy_spec_flow INTEGER NOT NULL DEFAULT 0, risk_mode TEXT NOT NULL DEFAULT 'auto_edit', plan_approval TEXT NOT NULL DEFAULT 'on', is_pinned INTEGER NOT NULL DEFAULT 0, last_output_completed_at TEXT, leader_session_id TEXT, leader_runtime_sdk TEXT, leader_runtime_config_id TEXT, leader_runtime_model_id TEXT, leader_runtime_reasoning_effort TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         DROP TABLE IF EXISTS flow_runs;
         DROP TABLE IF EXISTS flow_phases;
         DROP TABLE IF EXISTS flow_tasks;
@@ -605,6 +606,7 @@ export function createStore(databasePath: string) {
       dropColumnIfExists(sqlite, "projects", "agent_type");
       addColumnIfMissing(sqlite, "flows", "is_pinned", "INTEGER NOT NULL DEFAULT 0");
       addColumnIfMissing(sqlite, "flows", "last_output_completed_at", "TEXT");
+      addColumnIfMissing(sqlite, "flows", "name_generation_status", "TEXT NOT NULL DEFAULT 'generated'");
       addColumnIfMissing(sqlite, "tasks", "active_form", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "tasks", "flow_expert_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "user_turn_id", "TEXT");
@@ -768,6 +770,7 @@ export function createStore(databasePath: string) {
       id?: string;
       name: string;
       description: string;
+      nameGenerationStatus?: "pending" | "generated" | "fallback" | "manual";
       projectId: string | null;
       riskMode?: "auto_edit" | "full_access";
       planApproval?: "on" | "off";
@@ -782,6 +785,7 @@ export function createStore(databasePath: string) {
         projectId: input.projectId,
         name: input.name,
         description: input.description,
+        nameGenerationStatus: input.nameGenerationStatus ?? "generated",
         status: "ready",
         legacySpecFlow: 0,
         riskMode: input.riskMode ?? "auto_edit",
@@ -814,6 +818,7 @@ export function createStore(databasePath: string) {
     updateFlow(flowId: string, input: {
       name?: string;
       description?: string | null;
+      nameGenerationStatus?: "pending" | "generated" | "fallback" | "manual";
       projectId?: string | null;
       status?: string;
       riskMode?: "auto_edit" | "full_access";
@@ -831,6 +836,7 @@ export function createStore(databasePath: string) {
         .set({
           name: input.name ?? existing.name,
           description: input.description ?? existing.description ?? "",
+          nameGenerationStatus: input.nameGenerationStatus ?? existing.nameGenerationStatus,
           projectId: Object.prototype.hasOwnProperty.call(input, "projectId") ? input.projectId ?? null : existing.projectId,
           status: input.status ?? existing.status,
           riskMode: input.riskMode ?? existing.riskMode,

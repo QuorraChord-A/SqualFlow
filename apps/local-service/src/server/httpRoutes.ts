@@ -5,18 +5,19 @@ import { promisify } from "node:util";
 import type { FastifyInstance } from "fastify";
 import { config, DEFAULT_PROJECT_ID } from "../config.js";
 import {
+  agentRuntimeConfigFilePath,
   createRuntimeConfig,
   deleteRuntimeConfig,
   readAgentRuntimeConfigSnapshot,
   readFlowLeaderRuntimeConfig,
   readRuntimeConfig,
+  runtimeConfigModel,
   runtimeConfigModelName,
   runtimeSdkFromValue,
   updateRoleRuntimeBinding,
   updateRuntimeConfig,
   type AgentRuntimeRole,
 } from "../config/agentRuntimeConfig.js";
-import { runtimeModelContextWindowK } from "../config/runtimeModelContext.js";
 import {
   checkRuntimeConfigLocalAuth,
   refreshRuntimeConfigModels,
@@ -24,6 +25,7 @@ import {
 } from "../config/agentRuntimeConnectionTest.js";
 import type { Store } from "../db/store.js";
 import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
+import { normalizeFlowName } from "../domain/flowName.js";
 import { buildFlowWorkbench } from "../domain/workbench.js";
 import { planHistoryView, planRevisionView } from "../domain/orchestrationView.js";
 import { RiskModeSchema, PlanApprovalSchema } from "../domain/flowSettings.js";
@@ -34,9 +36,9 @@ import { createAgentRuntimeAdapter } from "../runtime/adapters/factory.js";
 import { runtimeSdkForPersistedAgentSession } from "./sessionRuntimeResolver.js";
 import { legacyAgentType } from "./legacyCompat.js";
 import {
-  codexReasoningEffortsForModel,
-  defaultCodexReasoningEffortForModel,
-  parseCodexReasoningEffort,
+  defaultRuntimeReasoningEffortForSdk,
+  normalizeRuntimeReasoningEffort,
+  parseRuntimeReasoningEffort,
 } from "../runtime/codexReasoningEffort.js";
 
 type RegisterHttpRoutesDeps = {
@@ -189,23 +191,22 @@ function expertToApi(row: ReturnType<Store["listExperts"]>[number]) {
   };
 }
 
-function agentRuntimeConfigSnapshotToApi(snapshot: Awaited<ReturnType<typeof readAgentRuntimeConfigSnapshot>>) {
+function agentRuntimeConfigToApi(runtimeConfig: Awaited<ReturnType<typeof createRuntimeConfig>>) {
   return {
-    ...snapshot,
-    configs: snapshot.configs.map((runtimeConfig) => ({
-      ...runtimeConfig,
-      models: runtimeConfig.models.map((model) => ({
-        ...model,
-        contextWindowK: runtimeModelContextWindowK(runtimeConfig, model.name),
-        ...(runtimeConfig.sdk === "codex" && runtimeConfig.authMode === "inherited"
-          ? {
-              reasoningEfforts: codexReasoningEffortsForModel(model.name),
-              defaultReasoningEffort: defaultCodexReasoningEffortForModel(model.name),
-            }
-          : {}),
-      })),
+    ...runtimeConfig,
+    filePath: agentRuntimeConfigFilePath(runtimeConfig.id),
+    models: runtimeConfig.models.map((model) => ({
+      ...model,
+      contextWindowK: model.contextWindowK ?? null,
+      metadataStatus: {
+        contextWindow: typeof model.contextWindowK === "number" ? "available" : "unavailable",
+      },
     })),
   };
+}
+
+function agentRuntimeConfigSnapshotToApi(snapshot: Awaited<ReturnType<typeof readAgentRuntimeConfigSnapshot>>) {
+  return { ...snapshot, configs: snapshot.configs.map(agentRuntimeConfigToApi) };
 }
 
 function flowToApi(store: Store, row: NonNullable<ReturnType<Store["getFlow"]>>) {
@@ -540,7 +541,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
       const runtimeConfig = await createRuntimeConfig(bodyRecord(request));
       deps.onRuntimeConfigChanged?.();
       reply.code(201);
-      return runtimeConfig;
+      return agentRuntimeConfigToApi(runtimeConfig);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to create runtime config";
       return reply.code(400).send({ detail: message });
@@ -552,7 +553,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
       const runtimeConfig = await updateRuntimeConfig(paramsId(request, "configId"), bodyRecord(request));
       if (!runtimeConfig) return reply.code(404).send({ detail: "Runtime config not found" });
       deps.onRuntimeConfigChanged?.();
-      return runtimeConfig;
+      return agentRuntimeConfigToApi(runtimeConfig);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to update runtime config";
       return reply.code(400).send({ detail: message });
@@ -564,7 +565,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
       const snapshot = await deleteRuntimeConfig(paramsId(request, "configId"));
       if (!snapshot) return reply.code(404).send({ detail: "Runtime config not found" });
       deps.onRuntimeConfigChanged?.();
-      return snapshot;
+      return agentRuntimeConfigSnapshotToApi(snapshot);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to delete runtime config";
       return reply.code(409).send({ detail: message });
@@ -655,33 +656,29 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
         leaderRuntimeModelId,
       };
     }
-    let leaderRuntimeReasoningEffort: string | null = null;
+    let leaderRuntimeReasoningEffort: string | null = runtimeSelection.leaderRuntimeSdk
+      ? defaultRuntimeReasoningEffortForSdk(runtimeSelection.leaderRuntimeSdk)
+      : null;
     if (
       Object.prototype.hasOwnProperty.call(body, "leader_runtime_reasoning_effort")
       && body.leader_runtime_reasoning_effort !== null
       && body.leader_runtime_reasoning_effort !== ""
     ) {
-      if (runtimeSelection.leaderRuntimeSdk !== "codex") {
-        return reply.code(400).send({ detail: "Leader reasoning effort is only supported for Codex" });
-      }
       const resolved = await readFlowLeaderRuntimeConfig({
         sdk: runtimeSelection.leaderRuntimeSdk,
         configId: runtimeSelection.leaderRuntimeConfigId,
         modelId: runtimeSelection.leaderRuntimeModelId,
       });
       if (!resolved) return reply.code(400).send({ detail: "Leader model is not configured" });
-      if (resolved.config.authMode !== "inherited") {
-        return reply.code(400).send({ detail: "Leader reasoning effort requires official Codex login" });
-      }
-      const modelName = runtimeConfigModelName(resolved.config, resolved.modelId) ?? resolved.modelId;
-      leaderRuntimeReasoningEffort = parseCodexReasoningEffort(modelName, body.leader_runtime_reasoning_effort);
+      leaderRuntimeReasoningEffort = parseRuntimeReasoningEffort(resolved.config.sdk, body.leader_runtime_reasoning_effort);
       if (!leaderRuntimeReasoningEffort) {
-        return reply.code(400).send({ detail: "Unsupported Codex reasoning effort" });
+        return reply.code(400).send({ detail: "Unsupported reasoning effort" });
       }
     }
     const flow = store.createFlow({
-      name: stringValue(body.name, "Task"),
-      description: stringValue(body.description),
+      name: normalizeFlowName(stringValue(body.name, "新任务")),
+      description: "",
+      nameGenerationStatus: "pending",
       projectId,
       ...(riskMode?.success ? { riskMode: riskMode.data } : {}),
       ...(planApproval?.success ? { planApproval: planApproval.data } : {}),
@@ -733,7 +730,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
     const body = bodyRecord(request);
     const input: {
       name?: string;
-      description?: string | null;
+      nameGenerationStatus?: "manual";
       projectId?: string | null;
       isPinned?: boolean;
       riskMode?: "auto_edit" | "full_access";
@@ -743,8 +740,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
       leaderRuntimeSdk?: string | null;
       leaderRuntimeReasoningEffort?: string | null;
     } = {};
-    if (typeof body.name === "string") input.name = body.name;
-    if (typeof body.description === "string") input.description = body.description;
+    if (typeof body.name === "string") {
+      if (existingFlow.nameGenerationStatus === "pending") {
+        return reply.code(409).send({ detail: "FLOW_NAME_GENERATING" });
+      }
+      input.name = normalizeFlowName(body.name);
+      input.nameGenerationStatus = "manual";
+    }
     if (Object.prototype.hasOwnProperty.call(body, "project_id")) {
       const projectId = nullableString(body.project_id);
       if (!projectId || !store.getProject(projectId)) {
@@ -808,26 +810,23 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
         input.leaderRuntimeSdk = lockedSdk ?? resolved.config.sdk;
         input.leaderRuntimeConfigId = leaderRuntimeConfigId;
         input.leaderRuntimeModelId = leaderRuntimeModelId;
-        if (resolved.config.sdk !== "codex" || resolved.config.authMode !== "inherited") {
-          input.leaderRuntimeReasoningEffort = null;
-        }
+        input.leaderRuntimeReasoningEffort = normalizeRuntimeReasoningEffort(
+          resolved.config.sdk,
+          existingFlow.leaderRuntimeReasoningEffort,
+        );
       }
     }
     if (Object.prototype.hasOwnProperty.call(body, "leader_runtime_reasoning_effort")) {
       const sdk = input.leaderRuntimeSdk ?? existingFlow.leaderRuntimeSdk;
-      if (sdk !== "codex") return reply.code(400).send({ detail: "Leader reasoning effort is only supported for Codex" });
+      if (sdk !== "claudecode" && sdk !== "codex") return reply.code(400).send({ detail: "Unsupported runtime sdk" });
       const runtimeConfig = await readFlowLeaderRuntimeConfig({
         sdk,
         configId: input.leaderRuntimeConfigId ?? existingFlow.leaderRuntimeConfigId,
         modelId: input.leaderRuntimeModelId ?? existingFlow.leaderRuntimeModelId,
       });
       if (!runtimeConfig) return reply.code(400).send({ detail: "Leader model is not configured" });
-      if (runtimeConfig.config.authMode !== "inherited") {
-        return reply.code(400).send({ detail: "Leader reasoning effort requires official Codex login" });
-      }
-      const modelName = runtimeConfigModelName(runtimeConfig.config, runtimeConfig.modelId) ?? runtimeConfig.modelId;
-      const effort = parseCodexReasoningEffort(modelName, body.leader_runtime_reasoning_effort);
-      if (!effort) return reply.code(400).send({ detail: "Unsupported Codex reasoning effort" });
+      const effort = parseRuntimeReasoningEffort(runtimeConfig.config.sdk, body.leader_runtime_reasoning_effort);
+      if (!effort) return reply.code(400).send({ detail: "Unsupported reasoning effort" });
       input.leaderRuntimeReasoningEffort = effort;
     }
     const flow = store.updateFlow(flowId, input);

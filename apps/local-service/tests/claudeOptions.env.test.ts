@@ -91,4 +91,29 @@ describe("claude options env isolation", () => {
       delete process.env.CLAUDE_OPTIONS_TEST_MARKER;
     }
   });
+
+  it("disables extended thinking only for ephemeral Flow Namer requests", () => {
+    const options = buildClaudeBaseOptions(baseOptionsInput({
+      runtimeConfig: {
+        ...apiKeyConfig(),
+        reasoningEffort: "high",
+      } as RuntimeConfig & { reasoningEffort: string },
+      settingsPath: path.join(os.tmpdir(), "does-not-exist-claude-settings.json"),
+    }));
+    expect(options.thinking).toBeUndefined();
+    expect(options.effort).toBe("high");
+
+    const namerOptions = buildClaudeBaseOptions({
+      ...baseOptionsInput({
+        runtimeConfig: {
+          ...apiKeyConfig(),
+          reasoningEffort: "high",
+        } as RuntimeConfig & { reasoningEffort: string },
+      }),
+      ephemeral: true,
+    });
+    expect(namerOptions.persistSession).toBe(false);
+    expect(namerOptions.thinking).toEqual({ type: "disabled" });
+    expect(namerOptions.effort).toBeUndefined();
+  });
 });

@@ -37,6 +37,7 @@ export type CodexRuntimeOptions = {
   env: NodeJS.ProcessEnv;
   runtimeProfile: CodexRuntimeProfile;
   appServerCommand: string;
+  ephemeral?: boolean;
   resume?: string;
   sandboxMode: "read-only" | "workspace-write" | "danger-full-access";
   canUseTool?: RuntimeToolPermission;
@@ -74,9 +75,11 @@ function providerName(runtimeConfig: RuntimeConfig | undefined): string {
   return runtimeConfig?.id ? `squadflow-${runtimeConfig.id}` : "openai";
 }
 
+export const DEFAULT_OPENAI_API_BASE_URL = "https://api.openai.com/v1";
+
 export function normalizeCodexBaseUrl(baseUrl: string): string {
   const trimmed = baseUrl.trim().replace(/\/+$/, "");
-  if (!trimmed) return "";
+  if (!trimmed) return DEFAULT_OPENAI_API_BASE_URL;
   return trimmed.endsWith("/responses") ? trimmed.slice(0, -"/responses".length) : trimmed;
 }
 
@@ -140,9 +143,13 @@ type CodexRuntimeConfigOverrides = {
   reasoningEffort?: string | null;
 };
 
-function reasoningEffortConfig(runtimeConfig: RuntimeConfig | undefined): Record<string, unknown> {
+function reasoningEffortConfig(runtimeConfig: RuntimeConfig | undefined, ephemeral = false): Record<string, unknown> {
+  // The Flow Namer gets an explicit per-turn `none` effort below. Do not leave
+  // the main Flow's configured effort in the thread-level config, otherwise it
+  // would be inherited before the one-shot override is applied.
+  if (ephemeral) return {};
   const effort = (runtimeConfig as (RuntimeConfig & CodexRuntimeConfigOverrides) | undefined)?.reasoningEffort?.trim();
-  if (runtimeConfig?.sdk !== "codex" || runtimeConfig.authMode !== "inherited" || !effort) return {};
+  if (runtimeConfig?.sdk !== "codex" || !effort) return {};
   return { model_reasoning_effort: effort };
 }
 
@@ -173,9 +180,10 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
   });
   const model = input.modelName?.trim() || selectedModelName(runtimeConfig);
   const modelProvider = runtimeConfig?.authMode === "inherited" ? "openai" : providerName(runtimeConfig);
-  const contextWindow = runtimeConfig?.authMode === "inherited"
+  const contextWindowK = runtimeConfig?.authMode === "inherited"
     ? null
-    : runtimeModelContextWindowK(runtimeConfig, model) * 1_000;
+    : runtimeModelContextWindowK(runtimeConfig, model);
+  const contextWindow = contextWindowK === null ? null : Math.round(contextWindowK * 1_000);
   const scratchDir = input.scratchDir ? path.resolve(input.scratchDir) : null;
   const env = withCodexRuntimeProfileEnv(codexEnv(runtimeConfig), runtimeProfile);
   if (scratchDir) {
@@ -191,7 +199,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
     modelProvider,
     config: {
       ...providerConfig(runtimeConfig),
-      ...reasoningEffortConfig(runtimeConfig),
+      ...reasoningEffortConfig(runtimeConfig, "ephemeral" in input && input.ephemeral === true),
       model,
       model_provider: modelProvider,
       web_search: "disabled",
@@ -210,6 +218,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
     env,
     runtimeProfile,
     appServerCommand: runtimeProfile.command,
+    ...('ephemeral' in input && input.ephemeral === true ? { ephemeral: true } : {}),
     resume: input.resume,
     sandboxMode: sandboxMode(input.capabilities),
     canUseTool: input.canUseTool,

@@ -26,6 +26,7 @@ describe("domain schemas", () => {
       project_id: null,
       name: "hello",
       description: "",
+      name_generation_status: "generated",
       status: "ready",
       legacy_spec_flow: false,
       leader_session_id: null,

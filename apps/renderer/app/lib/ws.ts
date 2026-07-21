@@ -39,6 +39,7 @@ export type WsInMessage =
   | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
   | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; messages: UIMessage[]; history_boundaries?: HistorySessionBoundary[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
   | { type: "flow:status"; flow_id: string; data: any }
+  | { type: "flow:name_updated"; flow_id: string; data: { name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }
   | { type: "task:event"; flow_id: string; data: any }
   | { type: "user_turn:event"; flow_id: string; data: any }
   | { type: "session:event"; flow_id: string; data: any }

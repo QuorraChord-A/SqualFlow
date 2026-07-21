@@ -166,6 +166,7 @@ describe("verify: on-demand team + dual expert path", () => {
           "save_execution_plan",
           "send_message",
           "submit_orchestration_plan",
+          "update_flow_name",
           "update_task",
         ]);
       } finally {

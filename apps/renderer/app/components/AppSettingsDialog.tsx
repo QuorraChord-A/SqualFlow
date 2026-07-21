@@ -1,6 +1,6 @@
 "use client";
 
-import { type CSSProperties, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from "react";
 import {
   Bot,
   Check,
@@ -9,6 +9,7 @@ import {
   ChevronRight,
   ChevronUp,
   Code2,
+  Copy,
   Eye,
   EyeOff,
   FileCode2,
@@ -78,6 +79,11 @@ type RoleDefinition = {
   Icon: typeof Bot;
 };
 
+type RuntimeModelChoice = RuntimeModel & {
+  selected: boolean;
+  existing: boolean;
+};
+
 const THEME_LABELS: Record<ThemeName, string> = {
   system: "跟随系统",
   dark: "深色",
@@ -85,8 +91,8 @@ const THEME_LABELS: Record<ThemeName, string> = {
 };
 
 const SYSTEM_PROMPT_PREVIEW_LENGTH = 80;
-const CLAUDE_CONTEXT_WINDOW_K_OPTIONS = [200, 1_000] as const;
 const MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K = 128;
+const CLAUDE_CONTEXT_WINDOW_K_OPTIONS = [200, 1_000] as const;
 
 const maskedTextStyle = { WebkitTextSecurity: "disc" } as CSSProperties;
 
@@ -217,13 +223,7 @@ function configDisplayName(config: RuntimeConfig | null | undefined) {
 }
 
 function localAuthModeLabel(sdk: RuntimeSdk) {
-  return sdk === "claudecode" ? "Claude Code本地账号登录态" : "Codex 本地账号登录态";
-}
-
-function authModeLabel(config: RuntimeConfig) {
-  if (config.authMode === "inherited") return localAuthModeLabel(config.sdk);
-  if (config.authMode === "accessToken") return "Access Token";
-  return "自定义 API Key";
+  return sdk === "codex" ? "Codex 本地账号登录态" : "自定义 API Key";
 }
 
 function localAuthStatusClass(status: RuntimeLocalAuthResultDto["status"]) {
@@ -233,71 +233,44 @@ function localAuthStatusClass(status: RuntimeLocalAuthResultDto["status"]) {
 }
 
 function canRefreshAvailableModels(config: RuntimeConfig) {
-  return config.sdk === "codex" && config.authMode === "inherited";
+  return (config.sdk === "codex" && config.authMode === "inherited")
+    || config.authMode === "apiKey"
+    || config.authMode === "accessToken";
 }
 
 function canTestRuntimeModel(config: RuntimeConfig) {
-  return config.authMode !== "inherited" || config.sdk === "codex";
-}
-
-function officialCodexContextWindowK(modelName: string) {
-  const normalizedName = modelName.trim().toLowerCase();
-  if (/^gpt-5(?:$|\.)/u.test(normalizedName)) return 258;
-  return MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K;
-}
-
-function defaultModelContextWindowK(config: RuntimeConfig, model: RuntimeModel) {
-  if (config.sdk === "claudecode") return 200;
-  if (config.authMode === "inherited") return officialCodexContextWindowK(model.name);
-  return MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K;
-}
-
-function displayedModelContextWindowK(config: RuntimeConfig, model: RuntimeModel) {
-  if (config.sdk === "codex" && config.authMode === "inherited") {
-    return model.contextWindowK ?? officialCodexContextWindowK(model.name);
-  }
-  return model.contextWindowK ?? defaultModelContextWindowK(config, model);
+  return config.sdk === "codex" || config.authMode !== "inherited";
 }
 
 function modelContextValidationError(config: RuntimeConfig, model: RuntimeModel) {
-  if (config.sdk === "codex" && config.authMode === "inherited") return null;
-  if (model.contextWindowK === null) {
-    return config.sdk === "claudecode"
-      ? "请选择 Claude Code 上下文大小。"
-      : "请填写非官方 Codex 上下文大小。";
+  if (model.contextWindowK === null || model.contextWindowK === undefined) {
+    return "未获取上下文窗口；请获取模型列表或手动填写。";
   }
-  const contextWindowK = model.contextWindowK ?? defaultModelContextWindowK(config, model);
+  const contextWindowK = model.contextWindowK;
   if (config.sdk === "claudecode") {
-    return CLAUDE_CONTEXT_WINDOW_K_OPTIONS.includes(contextWindowK as 200 | 1_000)
+    return Number.isFinite(contextWindowK) && CLAUDE_CONTEXT_WINDOW_K_OPTIONS.includes(contextWindowK as 200 | 1_000)
       ? null
-      : "Claude Code 上下文只能选择 200K 或 1M。";
+      : "Claude Code 上下文窗口只能是 200K 或 1000K。";
   }
-  if (!Number.isFinite(contextWindowK) || !Number.isInteger(contextWindowK)) {
-    return "非官方 Codex 上下文必须填写整数。";
-  }
+  if (!Number.isFinite(contextWindowK)) return "非官方 Codex 上下文窗口必须填写数字。";
   return contextWindowK >= MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K
     ? null
-    : `非官方 Codex 上下文不能低于 ${MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K}K。`;
+    : `非官方 Codex 上下文窗口不能低于 ${MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K}K。`;
 }
 
-function modelWithDefaultContext(config: RuntimeConfig, model: RuntimeModel): RuntimeModel {
-  if (config.sdk === "codex" && config.authMode === "inherited") {
-    const officialModel = { ...model };
-    delete officialModel.contextWindowK;
-    return officialModel;
-  }
-  return {
-    ...model,
-    contextWindowK: model.contextWindowK ?? defaultModelContextWindowK(config, model),
-  };
+function modelForSave(config: RuntimeConfig, model: RuntimeModel): RuntimeModel {
+  return model;
 }
 
 function newRuntimeModelContext(config: Pick<RuntimeConfig, "sdk" | "authMode">) {
-  if (config.sdk === "claudecode") return 200;
-  return config.authMode === "inherited" ? undefined : MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K;
+  return config.sdk === "claudecode" ? 1_000 : 256;
 }
 
-function uniqueModels(models: RuntimeModel[]): RuntimeModel[] {
+function defaultApiBaseUrl(sdk: RuntimeSdk) {
+  return sdk === "claudecode" ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
+}
+
+function uniqueModels<T extends RuntimeModel>(models: T[]): T[] {
   const usedIds = new Set<string>();
   return models.map((model, index) => {
     let id = model.id.trim() || `model-${index + 1}`;
@@ -357,6 +330,23 @@ function configNameValidationError(configs: RuntimeConfig[], config: RuntimeConf
   if (/\s/.test(name)) return "配置名称不能包含空格。";
   const duplicate = configs.some((item) => item.id !== config.id && configNameKey(item.name) === configNameKey(name));
   return duplicate ? "配置名称不能重复。" : null;
+}
+
+function runtimeConfigValidationError(configs: RuntimeConfig[], config: RuntimeConfig) {
+  const nameError = configNameValidationError(configs, config);
+  if (nameError) return { scope: "runtime" as const, message: nameError };
+  if (config.models.some((model) => !model.name.trim())) {
+    return { scope: "model" as const, message: "请填写所有模型名称。" };
+  }
+  const invalidContextModel = config.models.find((model) => modelContextValidationError(config, model));
+  if (invalidContextModel) {
+    return { scope: "model" as const, message: modelContextValidationError(config, invalidContextModel)! };
+  }
+  return null;
+}
+
+function runtimeConfigVersion(config: RuntimeConfig) {
+  return JSON.stringify(runtimeConfigComparable(config));
 }
 
 function usableModels(config: RuntimeConfig | null | undefined) {
@@ -544,12 +534,18 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingLocalAuth, setIsCheckingLocalAuth] = useState(false);
   const [isRefreshingModels, setIsRefreshingModels] = useState(false);
+  const [availableModelChoices, setAvailableModelChoices] = useState<RuntimeModelChoice[] | null>(null);
+  const [availableModelsDialogOpen, setAvailableModelsDialogOpen] = useState(false);
+  const [availableModelSearchQuery, setAvailableModelSearchQuery] = useState("");
+  const [collapsedModelGroups, setCollapsedModelGroups] = useState({ configured: false, new: false });
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [openPickerRole, setOpenPickerRole] = useState<AgentRole | null>(null);
   const [previewConfigId, setPreviewConfigId] = useState<string | null>(null);
   const [agentChoiceOpen, setAgentChoiceOpen] = useState(false);
   const [draftAgentSdk, setDraftAgentSdk] = useState<RuntimeSdk | null>(null);
   const [configPendingDelete, setConfigPendingDelete] = useState<RuntimeConfig | null>(null);
+  const [copyConfigPathState, setCopyConfigPathState] = useState<"idle" | "copied" | "failed">("idle");
+  const failedAutoSaveVersionsRef = useRef(new Map<string, string>());
   const roleDefinitions = useMemo(() => ROLE_DEFINITIONS.map((role) => {
     const expert = experts.find((item) => item.role === role.role);
     return expert ? { ...role, systemPrompt: expert.system_prompt } : role;
@@ -559,10 +555,6 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const selectedRoleConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[selectedRole.role]) ?? savedRuntimeConfigs[0];
   const selectedRoleModel = boundModelOf(selectedRoleConfig, roleModels[selectedRole.role]);
   const selectedRuntimeConfig = runtimeConfigs.find((config) => config.id === selectedConfigId) ?? runtimeConfigs[0];
-  const persistedSelectedRuntimeConfig = selectedRuntimeConfig
-    ? persistedRuntimeConfigs.find((config) => config.id === selectedRuntimeConfig.id) ?? null
-    : null;
-  const selectedRuntimeConfigDirty = runtimeConfigHasChanges(selectedRuntimeConfig, persistedSelectedRuntimeConfig);
   const SelectedRoleIcon = selectedRole.Icon;
 
   const applySnapshot = (snapshot: { roles: RoleRuntimeBindingDto[]; configs: RuntimeConfig[] }) => {
@@ -603,6 +595,10 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   useEffect(() => {
     setAgentTab(initialTab);
   }, [initialTab]);
+
+  useEffect(() => {
+    setCopyConfigPathState("idle");
+  }, [selectedRuntimeConfig?.id]);
 
   const selectRole = (role: AgentRole) => {
     setSelectedRoleId(role);
@@ -673,6 +669,20 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     );
   };
 
+  const copySelectedConfigPath = async () => {
+    const filePath = selectedRuntimeConfig?.filePath;
+    if (!filePath || !navigator.clipboard) {
+      setCopyConfigPathState("failed");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(filePath);
+      setCopyConfigPathState("copied");
+    } catch {
+      setCopyConfigPathState("failed");
+    }
+  };
+
   const startCreateProvider = () => {
     setAgentChoiceOpen(true);
     setDraftAgentSdk(null);
@@ -689,19 +699,20 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   };
 
   const createDraftAgent = (sdk: RuntimeSdk, authMode: RuntimeAuthMode) => {
+    const supportedAuthMode = sdk === "claudecode" ? "apiKey" : authMode;
     const draftId = `draft-${Date.now()}`;
     const nextConfig: RuntimeConfig = {
       id: draftId,
       fileName: "保存后生成UUID.json",
       name: nextUnnamedConfigName(runtimeConfigs),
       sdk,
-      authMode,
-      baseUrl: "",
+      authMode: supportedAuthMode,
+      baseUrl: supportedAuthMode === "apiKey" ? defaultApiBaseUrl(sdk) : "",
       apiKey: "",
       models: [{
         id: `${draftId}-model-1`,
         name: "",
-        contextWindowK: newRuntimeModelContext({ sdk, authMode }),
+        contextWindowK: newRuntimeModelContext({ sdk, authMode: supportedAuthMode }),
       }],
     };
     setRuntimeConfigs((current) => [...current, nextConfig]);
@@ -709,7 +720,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     setAgentChoiceOpen(false);
     setDraftAgentSdk(null);
     setLocalAuthStatus(null);
-    setRuntimeFeedback(`已新建 ${runtimeSdkLabel(sdk)} 供应商草稿，保存后创建文件`);
+    setRuntimeFeedback(null);
   };
 
   const deleteRuntimeConfigWithConfirmation = async (targetConfig: RuntimeConfig) => {
@@ -762,7 +773,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
         ...selectedRuntimeConfig.models,
       ],
     });
-    showModelFeedback("已添加模型，保存后写入配置文件。");
+    setModelFeedback(null);
   };
 
   const deleteModel = (modelId: string) => {
@@ -775,34 +786,27 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     updateSelectedRuntimeConfig({
       models: selectedRuntimeConfig.models.filter((model) => model.id !== modelId),
     });
-    showModelFeedback("已删除模型，保存后写入配置文件。");
+    setModelFeedback(null);
   };
 
-  const saveSelectedRuntimeConfig = async () => {
-    if (!selectedRuntimeConfig) return;
-    const nameError = configNameValidationError(runtimeConfigs, selectedRuntimeConfig);
-    if (nameError) {
-      setRuntimeFeedback(nameError);
-      return;
-    }
-    const blankModel = selectedRuntimeConfig.models.find((model) => !model.name.trim());
-    if (blankModel) {
-      showModelFeedback("请填写所有模型名称后再保存。", "error");
-      return;
-    }
-    const invalidContextModel = selectedRuntimeConfig.models.find((model) => modelContextValidationError(selectedRuntimeConfig, model));
-    if (invalidContextModel) {
-      showModelFeedback(modelContextValidationError(selectedRuntimeConfig, invalidContextModel)!, "error");
+  const saveRuntimeConfig = async (targetConfig: RuntimeConfig) => {
+    const validationError = runtimeConfigValidationError(runtimeConfigs, targetConfig);
+    if (validationError) {
+      if (targetConfig.id === selectedRuntimeConfig?.id) {
+        if (validationError.scope === "runtime") setRuntimeFeedback(validationError.message);
+        else showModelFeedback(validationError.message, "error");
+      }
       return;
     }
     const normalizedConfig = {
-      ...selectedRuntimeConfig,
-      name: selectedRuntimeConfig.name.trim(),
-      models: sortRuntimeModelsDescending(selectedRuntimeConfig.models.map((model) => modelWithDefaultContext(selectedRuntimeConfig, {
+      ...targetConfig,
+      name: targetConfig.name.trim(),
+      models: sortRuntimeModelsDescending(targetConfig.models.map((model) => modelForSave(targetConfig, {
         ...model,
         name: model.name.trim(),
       }))),
     };
+    const submittedVersion = runtimeConfigVersion(normalizedConfig);
     setIsSaving(true);
     try {
       const savedConfig = isDraftRuntimeConfig(normalizedConfig)
@@ -816,27 +820,52 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           })
         : await updateAgentRuntimeConfig(normalizedConfig.id, normalizedConfig);
       const sortedSavedConfig = withSortedModels(savedConfig);
-      setRuntimeConfigs((current) => current.map((config) =>
-        config.id === selectedRuntimeConfig.id ? sortedSavedConfig : config,
-      ));
-      setPersistedRuntimeConfigs((current) => [
-        ...current.filter((config) => config.id !== selectedRuntimeConfig.id && config.id !== sortedSavedConfig.id),
-        sortedSavedConfig,
-      ]);
-      setSelectedConfigId(sortedSavedConfig.id);
-      try {
-        applySnapshot(await fetchAgentRuntimeConfig());
-      } catch {
-        // 保存已成功；快照刷新失败时保留本地状态。
-      }
-      setRuntimeFeedback("已保存供应商配置");
-      showModelFeedback("模型列表已保存。", "success");
+      setRuntimeConfigs((current) => current.map((config) => {
+        if (config.id !== targetConfig.id) return config;
+        if (runtimeConfigVersion(config) === submittedVersion) return sortedSavedConfig;
+        return isDraftRuntimeConfig(config)
+          ? { ...config, id: sortedSavedConfig.id, fileName: sortedSavedConfig.fileName, filePath: sortedSavedConfig.filePath }
+          : config;
+      }));
+      setPersistedRuntimeConfigs((current) => {
+        const targetIndex = current.findIndex((config) => config.id === targetConfig.id || config.id === sortedSavedConfig.id);
+        if (targetIndex < 0) return [...current, sortedSavedConfig];
+        return current.map((config, index) => index === targetIndex ? sortedSavedConfig : config);
+      });
+      setSelectedConfigId((current) => current === targetConfig.id ? sortedSavedConfig.id : current);
+      failedAutoSaveVersionsRef.current.delete(targetConfig.id);
+      setRuntimeFeedback(null);
+      setModelFeedback(null);
     } catch (error) {
+      failedAutoSaveVersionsRef.current.set(targetConfig.id, submittedVersion);
       setRuntimeFeedback(error instanceof Error ? error.message : "保存供应商配置失败");
     } finally {
       setIsSaving(false);
     }
   };
+
+  useEffect(() => {
+    if (isLoading || isSaving) return;
+    if (selectedRuntimeConfig) {
+      const persistedSelected = persistedRuntimeConfigs.find((config) => config.id === selectedRuntimeConfig.id) ?? null;
+      if (runtimeConfigHasChanges(selectedRuntimeConfig, persistedSelected)) {
+        const validationError = runtimeConfigValidationError(runtimeConfigs, selectedRuntimeConfig);
+        if (validationError?.scope === "runtime") setRuntimeFeedback(validationError.message);
+        if (validationError?.scope === "model") showModelFeedback(validationError.message, "error");
+      }
+    }
+    const nextConfig = runtimeConfigs.find((config) => {
+      const persisted = persistedRuntimeConfigs.find((item) => item.id === config.id) ?? null;
+      if (!runtimeConfigHasChanges(config, persisted)) return false;
+      if (runtimeConfigValidationError(runtimeConfigs, config)) return false;
+      return failedAutoSaveVersionsRef.current.get(config.id) !== runtimeConfigVersion(config);
+    });
+    if (!nextConfig) return;
+    const timer = window.setTimeout(() => {
+      void saveRuntimeConfig(nextConfig);
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [isLoading, isSaving, persistedRuntimeConfigs, runtimeConfigs, selectedRuntimeConfig]);
 
   const refreshSelectedRuntimeModels = async () => {
     if (!selectedRuntimeConfig) return;
@@ -845,7 +874,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       return;
     }
     setIsRefreshingModels(true);
-    showModelFeedback("正在通过 Codex app-server 获取可用模型...");
+    showModelFeedback("正在获取可用模型列表...");
     try {
       const result = await refreshAgentRuntimeModels(selectedRuntimeConfig.id, {
         config: selectedRuntimeConfig,
@@ -855,26 +884,77 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           .filter((model) => model.name.trim())
           .map((model) => [model.name.trim(), model]),
       );
-      const nextModels = sortRuntimeModelsDescending(uniqueModels(result.models.map((model) => {
+      const discoveredChoices = result.models.map((model) => {
         const existingModel = existingModelsByName.get(model.name.trim());
+        const { contextWindowK: discoveredContextWindowK, ...discoveredModel } = model;
+        const contextWindowK = discoveredContextWindowK ?? existingModel?.contextWindowK;
         return {
           ...existingModel,
-          ...model,
+          ...discoveredModel,
+          ...(contextWindowK === undefined ? {} : { contextWindowK }),
           id: existingModel?.id ?? model.id,
           name: model.name,
+          selected: Boolean(existingModel),
+          existing: Boolean(existingModel),
         };
-      })).filter((model) => model.name.trim()));
-      if (nextModels.length === 0) {
-        showModelFeedback("Codex app-server 未返回可用模型。", "error");
+      });
+      const discoveredNames = new Set(discoveredChoices.map((model) => model.name.trim()));
+      const historicalChoices = selectedRuntimeConfig.models
+        .filter((model) => model.name.trim() && !discoveredNames.has(model.name.trim()))
+        .map((model) => ({ ...model, selected: true, existing: true }));
+      const choices = uniqueModels([...discoveredChoices, ...historicalChoices])
+        .filter((model) => model.name.trim()).sort((left, right) => {
+        if (left.existing !== right.existing) return left.existing ? -1 : 1;
+        return right.name.localeCompare(left.name);
+      });
+      if (choices.length === 0) {
+        showModelFeedback("提供商未返回可用模型。", "error");
         return;
       }
-      updateSelectedRuntimeConfig({ models: nextModels });
-      showModelFeedback(`已刷新 ${nextModels.length} 个 Codex 可用模型，保存后写入配置文件。`, "success");
+      setAvailableModelChoices(choices);
+      setCollapsedModelGroups({ configured: false, new: false });
+      setAvailableModelSearchQuery("");
+      setAvailableModelsDialogOpen(true);
+      setModelFeedback(null);
     } catch (error) {
       showModelFeedback(error instanceof Error ? error.message : "刷新可用模型失败", "error");
     } finally {
       setIsRefreshingModels(false);
     }
+  };
+
+  const toggleAvailableModel = (modelId: string) => {
+    setAvailableModelChoices((current) => current?.map((model) =>
+      model.id === modelId ? { ...model, selected: !model.selected } : model,
+    ) ?? null);
+  };
+
+  const updateAvailableModelContext = (modelId: string, contextWindowK: number | null) => {
+    setAvailableModelChoices((current) => current?.map((model) =>
+      model.id === modelId ? { ...model, contextWindowK } : model,
+    ) ?? null);
+  };
+
+  const toggleAllNewModels = () => {
+    setAvailableModelChoices((current) => {
+      if (!current) return current;
+      const newModels = current.filter((model) => !model.existing);
+      const shouldSelect = newModels.some((model) => !model.selected);
+      return current.map((model) => model.existing ? model : { ...model, selected: shouldSelect });
+    });
+  };
+
+  const applyAvailableModels = () => {
+    if (!selectedRuntimeConfig || !availableModelChoices) return;
+    const selectedModels = availableModelChoices.filter((model) => model.selected).map(({ selected: _selected, existing: _existing, ...model }) => model);
+    if (selectedModels.length === 0) {
+      showModelFeedback("请至少选择一个模型。", "error");
+      return;
+    }
+    updateSelectedRuntimeConfig({ models: sortRuntimeModelsDescending(selectedModels) });
+    setAvailableModelsDialogOpen(false);
+    setAvailableModelChoices(null);
+    showModelFeedback(`已加入 ${selectedModels.length} 个模型。`, "success");
   };
 
   const testSelectedRuntimeModel = async (model: RuntimeModel) => {
@@ -915,6 +995,14 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
 
   const checkSelectedLocalAuth = async () => {
     if (!selectedRuntimeConfig) return;
+    if (selectedRuntimeConfig.sdk !== "codex" || selectedRuntimeConfig.authMode !== "inherited") {
+      setLocalAuthStatus({
+        sdk: selectedRuntimeConfig.sdk,
+        status: "unsupported",
+        message: "只有 Codex 官方登录态支持本地登录检测。",
+      });
+      return;
+    }
     setIsCheckingLocalAuth(true);
     setLocalAuthStatus(null);
     setRuntimeFeedback(null);
@@ -1158,13 +1246,10 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
           </Dialog>
         </div>
       ) : !isLoading ? (
-        <div className="grid min-h-0 gap-5 lg:grid-cols-[320px_minmax(0,1fr)]">
+        <div className="grid min-h-0 gap-4 lg:grid-cols-[280px_minmax(0,1fr)]">
           <section className="self-start overflow-hidden rounded-lg border border-border bg-card">
             <div className="flex items-center justify-between border-b border-border px-4 py-3">
-              <div>
-                <h3 className="text-sm font-semibold text-foreground">供应商</h3>
-                <p className="mt-1 text-xs text-muted-foreground">按 Agent 分组，可被多个角色复用</p>
-              </div>
+              <h3 className="text-sm font-semibold text-foreground">供应商</h3>
               <Button variant="outline" size="sm" onClick={startCreateProvider} disabled={isSaving}>
                 新建
               </Button>
@@ -1174,8 +1259,8 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               if (group.length === 0) return null;
               return (
                 <div key={sdk}>
-                  <div className="flex items-center gap-1.5 border-b border-border bg-muted/30 px-4 py-2 text-[11px] font-medium text-muted-foreground">
-                    <AgentIcon sdk={sdk} />
+                  <div className="flex items-center gap-2 border-b border-border bg-muted/30 px-4 py-2.5 text-[11px] font-medium text-muted-foreground">
+                    <AgentIcon sdk={sdk} className="size-5" />
                     {AGENT_META[sdk].label}
                     <span className="text-muted-foreground/70">· {AGENT_META[sdk].format}</span>
                   </div>
@@ -1184,7 +1269,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       key={config.id}
                       type="button"
                       data-selected={!agentChoiceOpen && selectedRuntimeConfig?.id === config.id}
-                      className="group flex w-full items-start gap-3 border-b border-l-2 border-b-border border-l-transparent px-4 py-3.5 text-left transition-colors last:border-b-0 hover:border-l-primary/50 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset data-[selected=true]:border-l-primary data-[selected=true]:bg-primary/10"
+                      className="group flex w-full items-center gap-3 border-b border-l-2 border-b-border border-l-transparent px-4 py-3.5 text-left transition-colors last:border-b-0 hover:border-l-primary/50 hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset data-[selected=true]:border-l-primary data-[selected=true]:bg-primary/10"
                       onClick={() => {
                         setSelectedConfigId(config.id);
                         setAgentChoiceOpen(false);
@@ -1195,17 +1280,8 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                         setModelFeedback(null);
                       }}
                     >
-                      <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground transition-colors group-hover:border-primary/40 group-data-[selected=true]:border-primary/60 group-data-[selected=true]:text-primary">
-                        <FileCode2 className="size-4" />
-                      </span>
-                      <span className="min-w-0">
-                        <span className="block truncate text-sm font-semibold text-foreground">
-                          {configDisplayName(config)}
-                          {isDraftRuntimeConfig(config) ? " · 草稿" : ""}
-                        </span>
-                        <span className="mt-1 block truncate text-xs text-muted-foreground">
-                          {config.fileName} · {config.models.filter((model) => model.name.trim()).length} 个模型
-                        </span>
+                      <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
+                        {configDisplayName(config)}
                       </span>
                     </button>
                   ))}
@@ -1221,7 +1297,9 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                   <h3 className="text-sm font-semibold text-foreground">新建供应商</h3>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {draftAgentSdk
-                      ? "选择认证方式。创建后仍可在详情中调整连接信息。"
+                      ? draftAgentSdk === "claudecode"
+                        ? "Claude Code 仅支持 API Key；创建后可在详情中调整连接信息。"
+                        : "选择认证方式。创建后仍可在详情中调整连接信息。"
                       : "先选择 Agent 运行时。它决定供应商的接口格式，创建后不可更改。"}
                   </p>
                 </div>
@@ -1257,22 +1335,24 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                     {runtimeSdkLabel(draftAgentSdk)}
                     <span className="text-muted-foreground">· {AGENT_META[draftAgentSdk].format}</span>
                   </div>
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <button
-                      type="button"
-                      onClick={() => createDraftAgent(draftAgentSdk, "inherited")}
-                      className="rounded-lg border border-border bg-background p-4 text-left transition-colors hover:border-primary/50 hover:bg-muted/30"
-                    >
-                      <span className="block text-sm font-semibold text-foreground">{localAuthModeLabel(draftAgentSdk)}</span>
-                      <span className="mt-2 block text-xs text-muted-foreground">复用本机已登录的账号，不在此处填写 API Key。</span>
-                    </button>
+                  <div className={`grid gap-3 ${draftAgentSdk === "codex" ? "md:grid-cols-2" : ""}`}>
+                    {draftAgentSdk === "codex" ? (
+                      <button
+                        type="button"
+                        onClick={() => createDraftAgent(draftAgentSdk, "inherited")}
+                        className="rounded-lg border border-border bg-background p-4 text-left transition-colors hover:border-primary/50 hover:bg-muted/30"
+                      >
+                        <span className="block text-sm font-semibold text-foreground">{localAuthModeLabel(draftAgentSdk)}</span>
+                        <span className="mt-2 block text-xs text-muted-foreground">复用本机已登录的账号，不在此处填写 API Key。</span>
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => createDraftAgent(draftAgentSdk, "apiKey")}
                       className="rounded-lg border border-border bg-background p-4 text-left transition-colors hover:border-primary/50 hover:bg-muted/30"
                     >
                       <span className="block text-sm font-semibold text-foreground">自定义 API Key</span>
-                      <span className="mt-2 block text-xs text-muted-foreground">手动填写 Base URL、API Key 和模型名称。</span>
+                      <span className="mt-2 block text-xs text-muted-foreground">填写 Base URL 与 API Key，可通过标准 GET /models 获取模型元数据。</span>
                     </button>
                   </div>
                 </div>
@@ -1293,31 +1373,25 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
             <>
               <section key={selectedRuntimeConfig.id} className="rounded-lg border border-border bg-card p-5">
             <div className="flex items-center justify-between gap-4">
-              <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-foreground">供应商详情</h3>
-                <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
-                  {selectedRuntimeConfig.fileName}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="inline-flex h-7 items-center gap-1.5 rounded-md border border-border bg-muted/30 px-2.5 text-xs text-foreground">
-                    <AgentIcon sdk={selectedRuntimeConfig.sdk} />
-                    {runtimeSdkLabel(selectedRuntimeConfig.sdk)}
-                  </span>
-                  <span className="inline-flex h-7 items-center rounded-md border border-border bg-muted/30 px-2.5 text-xs text-muted-foreground">
-                    {AGENT_META[selectedRuntimeConfig.sdk].format}
-                  </span>
-                  <span className="inline-flex h-7 items-center rounded-md border border-border bg-muted/30 px-2.5 text-xs text-muted-foreground">
-                    {authModeLabel(selectedRuntimeConfig)}
-                  </span>
-                  <span className="inline-flex h-7 items-center rounded-md border border-border bg-muted/30 px-2.5 text-xs text-muted-foreground">
-                    Agent 类型创建后不可更改
-                  </span>
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-border bg-background">
+                  <AgentIcon sdk={selectedRuntimeConfig.sdk} className="size-7" />
+                </span>
+                <div className="min-w-0">
+                  <h3 className="truncate text-base font-semibold text-foreground">{configDisplayName(selectedRuntimeConfig)}</h3>
+                  <p className="mt-1 truncate text-xs text-muted-foreground">
+                    {runtimeSdkLabel(selectedRuntimeConfig.sdk)} · {AGENT_META[selectedRuntimeConfig.sdk].format}
+                  </p>
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <Button size="sm" onClick={() => void saveSelectedRuntimeConfig()} disabled={isSaving || !selectedRuntimeConfigDirty}>
-                  {isSaving ? "保存中" : selectedRuntimeConfigDirty ? "保存" : "无更改"}
-                </Button>
+                {isSaving ? <span className="text-xs text-muted-foreground">自动保存中…</span> : null}
+                {selectedRuntimeConfig.filePath ? (
+                  <Button variant="outline" size="sm" onClick={() => void copySelectedConfigPath()}>
+                    {copyConfigPathState === "copied" ? <Check className="size-4" /> : <Copy className="size-4" />}
+                    {copyConfigPathState === "copied" ? "已复制路径" : copyConfigPathState === "failed" ? "复制失败" : "复制配置路径"}
+                  </Button>
+                ) : null}
                 <Button
                   variant="destructive"
                   size="sm"
@@ -1348,9 +1422,8 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                     setRuntimeFeedback(null);
                   }}
                 />
-                <span className="block text-xs text-muted-foreground">用于角色配置中选择；不能包含空格，且不能重复。</span>
               </label>
-              {selectedRuntimeConfig.authMode === "inherited" ? (
+              {selectedRuntimeConfig.sdk === "codex" && selectedRuntimeConfig.authMode === "inherited" ? (
                 <div className="rounded-lg border border-border bg-background/60 px-3 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
@@ -1377,12 +1450,13 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                   ) : null}
                 </div>
               ) : null}
-              {selectedRuntimeConfig.authMode !== "inherited" ? (
+              {selectedRuntimeConfig.sdk === "claudecode" || selectedRuntimeConfig.authMode !== "inherited" ? (
                 <>
                   <label className="space-y-1.5">
                     <span className="text-xs font-medium text-muted-foreground">Base URL</span>
                     <Input
                       value={selectedRuntimeConfig.baseUrl}
+                      placeholder={defaultApiBaseUrl(selectedRuntimeConfig.sdk)}
                       name="squadflow-runtime-base-url"
                       autoComplete="off"
                       inputMode="url"
@@ -1430,13 +1504,6 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
               <div className="flex items-center justify-between border-b border-border px-3 py-3">
                 <div>
                   <div className="text-xs font-medium text-muted-foreground">模型列表</div>
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {canRefreshAvailableModels(selectedRuntimeConfig)
-                      ? "可联网刷新 Codex 账号可用模型，并逐个测试"
-                      : selectedRuntimeConfig.authMode === "inherited"
-                      ? "编辑模型名称；本地账号登录态只做状态检测"
-                      : "编辑模型名称，并逐个测试连接"}
-                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   {canRefreshAvailableModels(selectedRuntimeConfig) ? (
@@ -1445,9 +1512,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       size="sm"
                       onClick={() => void refreshSelectedRuntimeModels()}
                       disabled={isSaving || isRefreshingModels}
-                      title="通过 Codex app-server 查询账号可用模型，可能发起网络请求"
+                      title={selectedRuntimeConfig.sdk === "codex" && selectedRuntimeConfig.authMode === "inherited"
+                        ? "通过 Codex app-server 查询账号可用模型，可能发起网络请求"
+                        : "请求 Base URL 的标准 GET /models 接口，可能发起网络请求"}
                     >
-                      {isRefreshingModels ? "刷新中" : "刷新可用模型"}
+                      {isRefreshingModels ? "获取中" : "获取模型列表"}
                     </Button>
                   ) : null}
                   <Button variant="outline" size="sm" onClick={addModel}>添加模型</Button>
@@ -1464,7 +1533,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                   return (
                     <div
                       key={model.id}
-                      className="grid grid-cols-[minmax(0,1fr)_150px_72px_auto] items-end gap-3 rounded-lg border border-border bg-card px-3 py-3"
+                      className="grid grid-cols-[minmax(0,40ch)_minmax(150px,180px)_72px_auto] items-end justify-start gap-3 rounded-lg border border-border bg-card px-3 py-3"
                     >
                       <label className="min-w-0 space-y-1.5">
                         <span className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
@@ -1486,49 +1555,55 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       </label>
                       {selectedRuntimeConfig.sdk === "claudecode" ? (
                         <label className="min-w-0 space-y-1.5">
-                          <span className="text-xs font-medium text-muted-foreground">上下文</span>
+                          <span className="text-xs font-medium text-muted-foreground">上下文窗口</span>
                           <Select
-                            value={String(displayedModelContextWindowK(selectedRuntimeConfig, model))}
+                            value={String(model.contextWindowK ?? 1_000)}
                             onValueChange={(value) => updateSelectedModel(model.id, { contextWindowK: Number(value) })}
                           >
-                            <SelectTrigger
-                              className="w-full font-mono text-xs"
-                              aria-label={`模型 ${model.name || "未命名"} 上下文大小`}
-                            >
-                              <SelectValue>
-                                {displayedModelContextWindowK(selectedRuntimeConfig, model) === 1_000 ? "1M" : "200K"}
-                              </SelectValue>
+                            <SelectTrigger className="font-mono text-xs" aria-label={`模型 ${model.name || "未命名"} 上下文窗口`}>
+                              <SelectValue>{model.contextWindowK === 1_000 ? "1M" : "200K"}</SelectValue>
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="200">200K</SelectItem>
-                              <SelectItem value="1000">1M</SelectItem>
+                              {CLAUDE_CONTEXT_WINDOW_K_OPTIONS.map((value) => (
+                                <SelectItem key={value} value={String(value)}>{value === 1_000 ? "1M" : "200K"}</SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         </label>
                       ) : selectedRuntimeConfig.authMode === "inherited" ? (
-                        <div className="min-w-0 space-y-1.5">
-                          <span className="text-xs font-medium text-muted-foreground">上下文</span>
-                          <div
-                            className="flex h-9 items-center rounded-md border border-border bg-muted/40 px-3 font-mono text-xs text-muted-foreground"
-                            aria-label={`模型 ${model.name || "未命名"} 官方固定上下文`}
-                          >
-                            {Math.floor(displayedModelContextWindowK(selectedRuntimeConfig, model))}K
-                            <span className="ml-1 font-sans">（官方固定）</span>
-                          </div>
-                        </div>
-                      ) : (
                         <label className="min-w-0 space-y-1.5">
-                          <span className="text-xs font-medium text-muted-foreground">上下文</span>
+                          <span className="text-xs font-medium text-muted-foreground">上下文窗口</span>
                           <span className="relative block">
                             <Input
                               type="number"
                               min={MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K}
-                              step={1}
-                              value={model.contextWindowK === null
-                                ? ""
-                                : displayedModelContextWindowK(selectedRuntimeConfig, model)}
+                              step={0.001}
+                              value={typeof model.contextWindowK === "number" ? model.contextWindowK : 256}
                               className="pr-7 font-mono text-xs"
-                              aria-label={`模型 ${model.name || "未命名"} 上下文大小（K）`}
+                              aria-label={`模型 ${model.name || "未命名"} 上下文窗口（K）`}
+                              onChange={(event) => {
+                                const value = event.target.value;
+                                updateSelectedModel(model.id, {
+                                  contextWindowK: value === "" ? null : Number(value),
+                                });
+                              }}
+                            />
+                            <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">
+                              K
+                            </span>
+                          </span>
+                        </label>
+                      ) : (
+                        <label className="min-w-0 space-y-1.5">
+                          <span className="text-xs font-medium text-muted-foreground">上下文窗口</span>
+                          <span className="relative block">
+                            <Input
+                              type="number"
+                              min={MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K}
+                              step={0.001}
+                              value={typeof model.contextWindowK === "number" ? model.contextWindowK : ""}
+                              className="pr-7 font-mono text-xs"
+                              aria-label={`模型 ${model.name || "未命名"} 上下文窗口（K）`}
                               onChange={(event) => {
                                 const value = event.target.value;
                                 updateSelectedModel(model.id, {
@@ -1575,6 +1650,115 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                 })}
               </div>
             </div>
+              <Dialog open={availableModelsDialogOpen} onOpenChange={(open) => {
+                setAvailableModelsDialogOpen(open);
+                if (!open) setAvailableModelChoices(null);
+              }}>
+                <DialogContent className="!left-1/2 !top-1/2 !w-[min(760px,calc(100vw-3rem))] !max-w-none !-translate-x-1/2 !-translate-y-1/2 gap-0 overflow-hidden p-0">
+                  <DialogHeader className="border-b border-border px-5 py-4">
+                    <DialogTitle className="text-center text-xl">获取可用模型</DialogTitle>
+                    <div className="relative mx-auto w-full max-w-xl">
+                      <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        type="search"
+                        value={availableModelSearchQuery}
+                        onChange={(event) => setAvailableModelSearchQuery(event.target.value)}
+                        placeholder="搜索模型名称"
+                        aria-label="搜索模型"
+                        className="pl-9"
+                      />
+                    </div>
+                  </DialogHeader>
+                  {availableModelChoices ? (() => {
+                    const normalizedQuery = availableModelSearchQuery.trim().toLocaleLowerCase();
+                    const matchesSearch = (model: RuntimeModelChoice) => !normalizedQuery
+                      || model.name.toLocaleLowerCase().includes(normalizedQuery);
+                    const allNewModels = availableModelChoices.filter((model) => !model.existing);
+                    const configuredModels = availableModelChoices.filter((model) => model.existing && matchesSearch(model));
+                    const newModels = allNewModels.filter(matchesSearch);
+                    const selectedCount = availableModelChoices.filter((model) => model.selected).length;
+                    const allNewSelected = allNewModels.length > 0 && allNewModels.every((model) => model.selected);
+                    const renderChoice = (model: RuntimeModelChoice) => (
+                      <div key={model.id} className="grid grid-cols-[minmax(0,40ch)_160px] items-center justify-center gap-3 rounded-md px-2 py-1.5 hover:bg-muted/40">
+                        <button
+                          type="button"
+                          aria-pressed={model.selected}
+                          onClick={() => toggleAvailableModel(model.id)}
+                          className="flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left text-sm hover:bg-muted"
+                        >
+                          <span className={`flex size-4 shrink-0 items-center justify-center rounded border text-[11px] ${model.selected ? "border-primary bg-primary text-primary-foreground" : "border-border"}`}>
+                            {model.selected ? "✓" : null}
+                          </span>
+                          <span className="truncate font-mono text-xs">{model.name}</span>
+                        </button>
+                        {selectedRuntimeConfig.sdk === "claudecode" ? (
+                          <Select
+                            value={String(model.contextWindowK ?? 1_000)}
+                            onValueChange={(value) => updateAvailableModelContext(model.id, Number(value))}
+                          >
+                            <SelectTrigger className="w-full font-mono text-xs" aria-label={`${model.name} 上下文窗口`}>
+                              <SelectValue>{model.contextWindowK === 1_000 ? "1M" : "200K"}</SelectValue>
+                            </SelectTrigger>
+                            <SelectContent>
+                              {CLAUDE_CONTEXT_WINDOW_K_OPTIONS.map((value) => (
+                                <SelectItem key={value} value={String(value)}>{value === 1_000 ? "1M" : "200K"}</SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <span className="relative block w-full">
+                            <Input
+                              type="number"
+                              min={MIN_CUSTOM_CODEX_CONTEXT_WINDOW_K}
+                              step={0.001}
+                              value={typeof model.contextWindowK === "number" ? model.contextWindowK : 256}
+                              className="pr-7 font-mono text-xs"
+                              aria-label={`${model.name} 上下文窗口（K）`}
+                              onChange={(event) => updateAvailableModelContext(model.id, event.target.value === "" ? null : Number(event.target.value))}
+                            />
+                            <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 font-mono text-xs text-muted-foreground">K</span>
+                          </span>
+                        )}
+                      </div>
+                    );
+                    return (
+                      <>
+                        <div className="max-h-[280px] overflow-y-auto px-3 py-2">
+                          <section className="border-b border-border pb-2">
+                            <button type="button" className="flex w-full items-center justify-between px-2 py-2 text-left text-xs font-semibold" onClick={() => setCollapsedModelGroups((current) => ({ ...current, configured: !current.configured }))}>
+                              <span>{collapsedModelGroups.configured ? "▸" : "⌄"} 历史已配模型 <span className="font-normal text-muted-foreground">{configuredModels.length}</span></span>
+                            </button>
+                            {!collapsedModelGroups.configured
+                              ? configuredModels.length > 0
+                                ? configuredModels.map(renderChoice)
+                                : <div className="px-2 py-3 text-center text-xs text-muted-foreground">没有匹配的历史模型</div>
+                              : null}
+                          </section>
+                          <section className="pt-2">
+                            <div className="flex items-center justify-between px-2 py-2">
+                              <button type="button" className="text-left text-xs font-semibold" onClick={() => setCollapsedModelGroups((current) => ({ ...current, new: !current.new }))}>
+                                {collapsedModelGroups.new ? "▸" : "⌄"} 新获取模型 <span className="font-normal text-muted-foreground">{newModels.length}</span>
+                              </button>
+                              <button type="button" className="text-xs text-muted-foreground hover:text-foreground" onClick={toggleAllNewModels}>
+                                {allNewSelected ? "取消全选" : "全选"}
+                              </button>
+                            </div>
+                            {!collapsedModelGroups.new
+                              ? newModels.length > 0
+                                ? newModels.map(renderChoice)
+                                : <div className="px-2 py-3 text-center text-xs text-muted-foreground">没有匹配的新模型</div>
+                              : null}
+                          </section>
+                        </div>
+                        <div className="flex items-center justify-between border-t border-border bg-muted/30 px-5 py-3">
+                          <span className="text-xs text-muted-foreground">已选 {selectedCount} 个模型</span>
+                          <div className="flex gap-2"><Button variant="outline" onClick={() => setAvailableModelsDialogOpen(false)}>取消</Button><Button onClick={applyAvailableModels}>加入配置</Button></div>
+                        </div>
+                      </>
+                    );
+                  })() : null}
+                </DialogContent>
+              </Dialog>
               </section>
               <Dialog open={Boolean(configPendingDelete)} onOpenChange={(open) => {
                 if (!open) setConfigPendingDelete(null);
@@ -1639,10 +1823,10 @@ export default function AppSettingsDialog({
   }, [initialSection, open]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} disablePointerDismissal onOpenChange={onOpenChange}>
       <DialogContent
         showCloseButton={false}
-        className="!left-4 !top-4 grid !h-[calc(100vh-2rem)] !w-[calc(100vw-2rem)] !max-w-none !translate-x-0 !translate-y-0 grid-cols-[240px_minmax(0,1fr)] gap-0 overflow-hidden rounded-xl border border-border bg-background p-0"
+        className="!left-4 !top-4 grid !h-[calc(100vh-2rem)] !w-[calc(100vw-2rem)] !max-w-none !translate-x-0 !translate-y-0 grid-cols-[180px_minmax(0,1fr)] gap-0 overflow-hidden rounded-xl border border-border bg-background p-0"
       >
         <DialogTitle className="sr-only">设置</DialogTitle>
         <aside className="flex min-h-0 flex-col border-r border-sidebar-border bg-sidebar p-4 text-sidebar-foreground">

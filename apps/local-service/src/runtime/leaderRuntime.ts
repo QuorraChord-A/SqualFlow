@@ -38,12 +38,25 @@ import type { OrchestrationScheduler } from "./orchestrationScheduler.js";
 import { ContextCompactionState } from "./contextCompactionState.js";
 import { createAgentRuntimeAdapter } from "./adapters/factory.js";
 import type { AgentRuntimeAdapterFactory } from "./adapters/factory.js";
-import type { AgentRuntimeAdapter, RuntimeOutputAdapter, RuntimeQueryLike, RuntimeToolPermissionRequest } from "./adapters/runtimeAdapter.js";
+import type {
+  AgentRuntimeAdapter,
+  RuntimeDiagnosticEvent,
+  RuntimeOutputAdapter,
+  RuntimeQueryLike,
+  RuntimeToolPermissionRequest,
+} from "./adapters/runtimeAdapter.js";
 import { normalizeRuntimeCapabilities, type RuntimeCapability } from "./capabilities.js";
-import { currentTurnInputFromTurn, type LeaderPlanFeedback, type LeaderTurnInput } from "./leaderPrompt.js";
+import {
+  buildFlowNameWorkerPrompt,
+  currentTurnInputFromTurn,
+  type LeaderPlanFeedback,
+  type LeaderTurnInput,
+} from "./leaderPrompt.js";
+import { normalizeFlowName } from "../domain/flowName.js";
 import { computeFlowSig } from "../protocol/platformEvent.js";
-import { normalizeCodexReasoningEffort } from "./codexReasoningEffort.js";
+import { normalizeRuntimeReasoningEffort } from "./codexReasoningEffort.js";
 import { checkPermission, type CheckPermissionArgs } from "../permissions/permissionPolicy.js";
+import { classifyLeaderResumeFailure } from "./adapters/runtimeErrors.js";
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
@@ -105,19 +118,20 @@ function parseToolList(value: string | null | undefined) {
   }
 }
 
-type RuntimeConfigWithReasoningEffort = ResolvedFlowRuntimeConfig["config"] & { reasoningEffort?: string };
+type RuntimeConfigWithReasoningEffort = ResolvedFlowRuntimeConfig["config"] & { reasoningEffort?: string | null };
 
 function withFlowReasoningEffort(
   runtimeConfig: ResolvedFlowRuntimeConfig,
   flow: NonNullable<ReturnType<Store["getFlow"]>>,
 ): ResolvedFlowRuntimeConfig {
-  if (runtimeConfig.config.sdk !== "codex" || runtimeConfig.config.authMode !== "inherited") return runtimeConfig;
-  const modelName = runtimeConfigModelName(runtimeConfig.config, runtimeConfig.modelId) ?? runtimeConfig.modelId;
   return {
     ...runtimeConfig,
     config: {
       ...runtimeConfig.config,
-      reasoningEffort: normalizeCodexReasoningEffort(modelName, flow.leaderRuntimeReasoningEffort),
+      reasoningEffort: normalizeRuntimeReasoningEffort(
+        runtimeConfig.config.sdk,
+        flow.leaderRuntimeReasoningEffort,
+      ),
     } as RuntimeConfigWithReasoningEffort,
   };
 }
@@ -249,6 +263,7 @@ class LeaderFlowStream {
     this.resolveFinished = resolve;
   });
   private sessionId: string;
+  private providerSessionEstablished: boolean;
 
   constructor(
     private readonly firstTurn: LeaderTurnInput,
@@ -256,6 +271,11 @@ class LeaderFlowStream {
     private readonly options: unknown,
     private readonly reviewRootPath: string,
     private readonly onCurrentTurnInput: (value: CurrentTurnInput | undefined) => void,
+    private readonly onFlowNameGeneration: (input: {
+      flowId: string;
+      userMessage: string;
+      assistantMessage: string;
+    }) => void,
     private readonly deps: Pick<CreateLeaderRuntimeInput, "store" | "eventBus" | "chatJournal" | "onUserTurnFatal" | "logger">,
     private readonly onClosed: () => void,
     private readonly desktopBridge: DesktopBridge | undefined,
@@ -265,6 +285,14 @@ class LeaderFlowStream {
   ) {
     this.input = runtimeAdapter.createInputQueue();
     this.sessionId = firstTurn.leaderSessionId;
+    const flow = this.deps.store.getFlow(firstTurn.flowId);
+    const agentSession = this.deps.store.getAgentSession(firstTurn.leaderAgentSessionId);
+    this.providerSessionEstablished = Boolean(
+      flow?.leaderSessionId
+      && agentSession?.sessionId
+      && flow.leaderSessionId === agentSession.sessionId
+      && firstTurn.leaderSessionId === agentSession.sessionId,
+    );
   }
 
   get acceptsInput() {
@@ -610,6 +638,18 @@ class LeaderFlowStream {
         }
         consumeControlledEditToolResults(event);
         if (event.type === "turn_completed") {
+          if (this.shouldStartFlowNameGeneration(active)) {
+            if (active.adapter.resultStatus !== "success" || active.adapter.resultIsError) {
+              await this.resolvePendingFlowNameAsFallback(active.turn.flowId);
+              await this.complete(active);
+              continue;
+            }
+            this.onFlowNameGeneration({
+              flowId: active.turn.flowId,
+              userMessage: active.turn.userMessage ?? "",
+              assistantMessage: active.adapter.finalAssistantText ?? "",
+            });
+          }
           if ((active.guideResultDeferrals ?? 0) > 0) {
             active.guideResultDeferrals = (active.guideResultDeferrals ?? 0) - 1;
             continue;
@@ -638,6 +678,26 @@ class LeaderFlowStream {
       }
       this.finalize("consume_finally");
     }
+  }
+
+  private shouldStartFlowNameGeneration(active: DeferredTurn) {
+    return active.turn.kind === "user"
+      && this.deps.store.getFlow(active.turn.flowId)?.nameGenerationStatus === "pending";
+  }
+
+  private async resolvePendingFlowNameAsFallback(flowId: string) {
+    const flow = this.deps.store.getFlow(flowId);
+    if (!flow || flow.nameGenerationStatus !== "pending") return;
+    const updated = this.deps.store.updateFlow(flowId, { nameGenerationStatus: "fallback" });
+    if (!updated) return;
+    await this.deps.eventBus.publish(flowId, {
+      type: "flow:name_updated",
+      flow_id: flowId,
+      data: {
+        name: updated.name,
+        name_generation_status: "fallback",
+      },
+    });
   }
 
   private async complete(active: DeferredTurn) {
@@ -729,6 +789,15 @@ class LeaderFlowStream {
   private syncSdkSessionId(active: DeferredTurn) {
     const sdkSessionId = active.adapter?.sdkSessionId;
     if (!sdkSessionId || sdkSessionId === this.sessionId) return;
+    if (this.providerSessionEstablished) {
+      const flow = this.deps.store.getFlow(active.turn.flowId);
+      throw classifyLeaderResumeFailure(
+        new Error(`Provider returned a different session ID while using Leader session ${flow?.leaderSessionId ?? this.sessionId}`),
+        this.runtimeAdapter.sdk,
+        flow?.leaderSessionId ?? this.sessionId,
+      );
+    }
+    this.providerSessionEstablished = true;
     const oldSessionId = this.sessionId;
     this.sessionId = sdkSessionId;
     this.deps.store.updateAgentSessionSession(active.turn.leaderAgentSessionId, sdkSessionId);
@@ -762,11 +831,14 @@ class LeaderFlowStream {
       // Best-effort.
     }
     this.logLifecycle("query_close_called", { reason: "fail" });
+    const failure = active?.turn.resumeSessionId
+      ? classifyLeaderResumeFailure(error, this.runtimeAdapter.sdk, active.turn.resumeSessionId)
+      : error;
     const rejected = new Set<DeferredTurn>();
     for (const item of [active, ...this.queued]) {
       if (!item || rejected.has(item)) continue;
       rejected.add(item);
-      item.reject(error);
+      item.reject(failure);
     }
     this.queued.length = 0;
     this.active = null;
@@ -778,7 +850,7 @@ class LeaderFlowStream {
         userTurnId: active.turn.userTurnId ?? active.turn.currentTurnInput?.user_turn_id ?? null,
         agentSessionId: active.turn.leaderAgentSessionId,
         sdkSessionId: this.sessionId,
-        ...errorDiagnostic(error),
+        ...errorDiagnostic(failure),
       }, "runtime turn failed");
       this.deps.store.updateAgentSessionStatus(active.turn.leaderAgentSessionId, "failed");
       const userTurnId = active.turn.userTurnId ?? active.turn.currentTurnInput?.user_turn_id;
@@ -804,7 +876,7 @@ class LeaderFlowStream {
           user_turn_id: null,
           expert_id: "exp-leader",
           status: "failed",
-          error_message: error.message,
+          error_message: failure.message,
         },
       });
     }
@@ -814,10 +886,203 @@ class LeaderFlowStream {
 export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRuntime {
   const streams = new Map<string, LeaderFlowStream>();
   const pendingStarts = new Map<string, PendingLeaderStart>();
+  const flowNameJobs = new Map<string, Promise<void>>();
+  const flowNameQueries = new Map<string, RuntimeQueryLike>();
   const cancelledTurnByFlow = new Map<string, string>();
   const mcpTurnContexts = new Map<string, { currentTurnInput?: CurrentTurnInput }>();
   const browserTurnContexts = new Map<string, { agentSessionId: string | null }>();
   const contextCompactions = input.contextCompactions ?? new ContextCompactionState();
+
+  async function publishFlowName(flowId: string, name: string, status: "generated" | "fallback") {
+    await input.eventBus.publish(flowId, {
+      type: "flow:name_updated",
+      flow_id: flowId,
+      data: {
+        name,
+        name_generation_status: status,
+      },
+    });
+  }
+
+  async function resolveFlowNameFallback(flowId: string) {
+    const flow = input.store.getFlow(flowId);
+    if (!flow || flow.nameGenerationStatus !== "pending") return;
+    const updated = input.store.updateFlow(flowId, { nameGenerationStatus: "fallback" });
+    if (updated) await publishFlowName(flowId, updated.name, "fallback");
+  }
+
+  async function runFlowNameGeneration(job: {
+    flowId: string;
+    userMessage: string;
+    assistantMessage: string;
+  }) {
+    const startedAt = Date.now();
+    let lastDiagnostic = "created";
+    let outcome = "unknown";
+    const logNamer = (message: string, bindings: Record<string, unknown> = {}) => {
+      input.logger?.info({
+        flowId: job.flowId,
+        elapsedMs: Date.now() - startedAt,
+        ...bindings,
+      }, message);
+    };
+    logNamer("Flow name generation started");
+    const flow = input.store.getFlow(job.flowId);
+    if (!flow || flow.nameGenerationStatus !== "pending") {
+      outcome = "skipped";
+      logNamer("Flow name generation skipped", { reason: "flow_not_pending" });
+      return;
+    }
+
+    let query: RuntimeQueryLike | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scratchDir = path.join(config.runtimeScratchRoot, job.flowId, "flow-name");
+    try {
+      const runtimeConfig = await resolveLeaderRuntimeConfig(flow);
+      if (!runtimeConfig) {
+        outcome = "fallback_no_runtime";
+        logNamer("Flow name generation has no runtime config");
+        await resolveFlowNameFallback(job.flowId);
+        return;
+      }
+      logNamer("Flow name runtime resolved", {
+        sdk: runtimeConfig.config.sdk,
+        authMode: runtimeConfig.config.authMode,
+        runtimeConfigId: runtimeConfig.configId,
+        modelId: runtimeConfig.modelId,
+        model: runtimeConfigModelName(runtimeConfig.config, runtimeConfig.modelId) ?? null,
+      });
+      const runtimeAdapter = (input.runtimeAdapterFactory ?? createAgentRuntimeAdapter)({
+        sdk: runtimeConfig.config.sdk,
+        role: "leader",
+        runtimeConfig: runtimeConfig.config,
+      });
+      const modelName = runtimeConfigModelName(runtimeConfig.config, runtimeConfig.modelId) ?? null;
+      fs.mkdirSync(scratchDir, { recursive: true });
+      const options = runtimeAdapter.buildLeaderOptions({
+        role: "leader",
+        systemPrompt: "你是 SquadFlow 的 Flow 命名助手。只输出名称本身，不要解释、标点、引号、Markdown 或换行；名称最多 10 个字。",
+        cwd: flowCwd(input.store, job.flowId),
+        scratchDir,
+        capabilities: [],
+        mcpTools: [],
+        maxTurns: 1,
+        ephemeral: true,
+        runtimeConfig: runtimeConfig.config,
+        modelName: modelName ?? undefined,
+        diagnostics: (event: RuntimeDiagnosticEvent) => {
+          lastDiagnostic = event.type === "provider_transport_stage" ? event.stage : event.type;
+          logNamer("Flow name provider diagnostic", {
+            diagnosticType: event.type,
+            diagnosticStage: event.type === "provider_transport_stage" ? event.stage : undefined,
+            diagnostic: event,
+          });
+        },
+      });
+      const output = runtimeAdapter.createOutputAdapter(`flow-name-${job.flowId}-${Date.now()}`);
+      logNamer("Flow name query creating", {
+        sdk: runtimeConfig.config.sdk,
+        model: modelName,
+        ephemeral: true,
+      });
+      query = runtimeAdapter.runQuery({
+        prompt: runtimeAdapter.createSingleTextInput(buildFlowNameWorkerPrompt(job)),
+        options,
+      });
+      flowNameQueries.set(job.flowId, query);
+      logNamer("Flow name query created");
+
+      const consume = (async () => {
+        for await (const event of query!) {
+          output.adapt(event);
+          if (event.type !== "turn_completed") continue;
+          logNamer("Flow name turn completed", {
+            status: event.result.status,
+            isError: event.result.isError,
+            lastDiagnostic,
+          });
+          if (event.result.status !== "success" || event.result.isError) {
+            outcome = "fallback_provider_error";
+            await resolveFlowNameFallback(job.flowId);
+            return;
+          }
+          const latest = input.store.getFlow(job.flowId);
+          if (!latest || latest.nameGenerationStatus !== "pending") return;
+          const name = normalizeFlowName(output.finalAssistantText ?? "", latest.name);
+          const updated = input.store.updateFlow(job.flowId, {
+            name,
+            nameGenerationStatus: "generated",
+          });
+          if (updated) await publishFlowName(job.flowId, updated.name, "generated");
+          outcome = updated ? "generated" : "skipped_after_completion";
+          logNamer("Flow name generation completed", {
+            outcome,
+            nameLength: name.length,
+          });
+          return;
+        }
+        outcome = "fallback_query_ended";
+        await resolveFlowNameFallback(job.flowId);
+      })().catch(async (error) => {
+        outcome = "fallback_query_failed";
+        input.logger?.warn({ flowId: job.flowId, ...errorDiagnostic(error) }, "Flow name query failed");
+        await resolveFlowNameFallback(job.flowId);
+      });
+      const timeout = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), 15_000);
+        timer.unref?.();
+      });
+      const result = await Promise.race([consume.then(() => "completed" as const), timeout]);
+      if (result === "timeout") {
+        outcome = "fallback_timeout";
+        input.logger?.warn({
+          flowId: job.flowId,
+          elapsedMs: Date.now() - startedAt,
+          timeoutMs: 15_000,
+          lastDiagnostic,
+        }, "Flow name generation timed out");
+        query.close?.();
+        await resolveFlowNameFallback(job.flowId);
+        await Promise.race([
+          consume,
+          new Promise<void>((resolve) => {
+            const handle = setTimeout(resolve, 1_000);
+            handle.unref?.();
+          }),
+        ]);
+      }
+    } catch (error) {
+      outcome = "fallback_failed";
+      input.logger?.warn({ flowId: job.flowId, ...errorDiagnostic(error) }, "Flow name generation failed");
+      await resolveFlowNameFallback(job.flowId);
+    } finally {
+      if (timer) clearTimeout(timer);
+      try {
+        query?.close?.();
+      } catch {
+        // Best-effort cleanup for the one-shot naming query.
+      }
+      if (flowNameQueries.get(job.flowId) === query) flowNameQueries.delete(job.flowId);
+      try {
+        fs.rmSync(scratchDir, { recursive: true, force: true });
+      } catch {
+        // Best-effort cleanup for generated scratch data.
+      }
+      logNamer("Flow name generation finished", { outcome, lastDiagnostic });
+    }
+  }
+
+  function scheduleFlowNameGeneration(job: {
+    flowId: string;
+    userMessage: string;
+    assistantMessage: string;
+  }) {
+    if (flowNameJobs.has(job.flowId)) return;
+    const task = runFlowNameGeneration(job)
+      .catch((error) => input.logger?.warn({ flowId: job.flowId, ...errorDiagnostic(error) }, "Flow name job failed"))
+      .finally(() => flowNameJobs.delete(job.flowId));
+    flowNameJobs.set(job.flowId, task);
+  }
 
   function enrichSpecRequestedTurn(turn: LeaderTurnInput): LeaderTurnInput {
     if (turn.specRequested === true || !turn.userTurnId || turn.kind === "spec_run") return turn;
@@ -846,6 +1111,11 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const leaderToolHandlers = createLeaderToolHandlers(
       createStorePort(input.store, input.agentDispatcher),
       {
+        onFlowNameUpdated: ({ flowId, flow }) => input.eventBus.publish(flowId, {
+          type: "flow:name_updated",
+          flow_id: flowId,
+          data: flow,
+        }),
         onDecisionCardCreated: (card) => input.eventBus.publish(card.flowId, {
           type: "flow:decision_card",
           flow_id: card.flowId,
@@ -994,7 +1264,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const leaderMcpTools = parseToolList(leader?.mcpTools);
     const authorizedTools = new Set([...parseToolList(leader?.builtinTools), ...leaderMcpTools]);
     const modelName = runtimeConfigModelName(leaderRuntimeConfig.config, leaderRuntimeConfig.modelId) ?? null;
-    const contextWindowTokens = runtimeModelContextWindowK(leaderRuntimeConfig.config, modelName ?? "") * 1000;
+    const contextWindowK = runtimeModelContextWindowK(leaderRuntimeConfig.config, modelName ?? "");
+    const contextWindowTokens = contextWindowK === null ? null : contextWindowK * 1000;
     const options = runtimeAdapter.buildLeaderOptions({
       role: "leader",
       systemPrompt: withRuntimeEnvironmentNote(leader?.systemPrompt || "你是 SquadFlow Leader Agent。", cwd, turn.flowId),
@@ -1061,6 +1332,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       options,
       cwd,
       (value) => { mcpTurnContext.currentTurnInput = value; },
+      scheduleFlowNameGeneration,
       input,
       () => {
         if (streams.get(turn.flowId) === stream) streams.delete(turn.flowId);
@@ -1193,9 +1465,11 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
 
       const finalSessionId = resultSessionId ?? sdkSessionId;
       if (finalSessionId !== sdkSessionId) {
-        input.store.updateAgentSessionSession(leaderAgentSession.id, finalSessionId);
-        input.store.updateFlow(flowId, { leaderSessionId: finalSessionId });
-        input.chatJournal.renameSession(flowId, sdkSessionId, finalSessionId);
+        throw classifyLeaderResumeFailure(
+          new Error(`Provider returned a different session ID while resuming Leader session ${sdkSessionId}`),
+          runtimeAdapter.sdk,
+          sdkSessionId,
+        );
       }
 
       if (!compactedSnapshot) {
@@ -1373,8 +1647,18 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       const starts = [...pendingStarts.values()];
       for (const start of starts) start.cancelled = true;
       for (const stream of streams.values()) stream.close();
+      for (const query of flowNameQueries.values()) {
+        try {
+          query.close?.();
+        } catch {
+          // Best-effort cleanup for one-shot naming queries.
+        }
+      }
       await Promise.all(starts.map((start) => start.settled));
+      await Promise.all(flowNameJobs.values());
       streams.clear();
+      flowNameJobs.clear();
+      flowNameQueries.clear();
       cancelledTurnByFlow.clear();
       mcpTurnContexts.clear();
       browserTurnContexts.clear();

@@ -535,6 +535,7 @@ export default function LeaderChatPanel({
   const [flowStateConfirmed, setFlowStateConfirmed] = useState(false);
   const [leaderModelConfigured, setLeaderModelConfigured] = useState(false);
   const [runtimeSelectionUpdating, setRuntimeSelectionUpdating] = useState(false);
+  const [sessionRecoveryError, setSessionRecoveryError] = useState<{ message: string; category?: string } | null>(null);
   const browserElementAttachments = useBrowserSelectionStore((state) => state.elements);
   const clearBrowserElementAttachments = useBrowserSelectionStore((state) => state.clearElements);
   const setBrowserElementAttachments = useBrowserSelectionStore((state) => state.setElements);
@@ -758,6 +759,14 @@ export default function LeaderChatPanel({
     const unsubscribe = wsClient.onMessage((msg: WsInMessage) => {
       if (msg.type === "system:error") {
         if (msg.flow_id && msg.flow_id !== flowId) return;
+        if (msg.data?.code === "LEADER_SESSION_RECOVERY_REQUIRED") {
+          setSessionRecoveryError({
+            message: msg.data.message,
+            category: typeof msg.data.category === "string" ? msg.data.category : undefined,
+          });
+          setStatus("ready");
+          setKnownRunningFlow(flowId, false);
+        }
         dispatchingQueueIdRef.current = null;
         if (msg.log_id) {
           const pendingMessageId = pendingMessagesRef.current.get(msg.log_id);
@@ -907,6 +916,7 @@ export default function LeaderChatPanel({
         const event = msg.data?.event as { type?: string } | undefined;
         const eventType = event?.type;
         if (eventType === "turn-started") {
+          setSessionRecoveryError(null);
           setStatus("streaming");
         } else if (eventType === "turn-finished") {
           setStatus("ready");
@@ -920,6 +930,10 @@ export default function LeaderChatPanel({
 
     return unsubscribe;
   }, [dashboardUserTurns, exitPlanMode, flowId, leaderAgentSessionId, planModeLocked, setFlowQueue, setKnownRunningFlow]);
+
+  useEffect(() => {
+    setSessionRecoveryError(null);
+  }, [flowId]);
 
   const transcriptOptimisticMessages = useMemo(
     () => [...initialOptimisticMessages, ...optimisticMessages, ...guidedMessages],
@@ -1493,6 +1507,17 @@ export default function LeaderChatPanel({
 
   return (
     <div data-testid="leader-chat-panel" className="relative flex h-full flex-col">
+      {sessionRecoveryError ? (
+        <div
+          data-testid="leader-session-recovery-error"
+          role="alert"
+          className="mx-auto mt-3 w-[min(880px,calc(100%-128px))] rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 max-[760px]:w-[calc(100%-40px)]"
+        >
+          <div className="font-medium">原 Leader 会话无法继续</div>
+          <div className="mt-1 text-amber-100/80">{sessionRecoveryError.message}</div>
+          <div className="mt-1 text-xs text-amber-100/60">系统不会创建新会话；确认 provider 可用后重新发送即可继续恢复。</div>
+        </div>
+      ) : null}
       <div data-testid="leader-chat-transcript-shell" className="relative min-h-0 flex-1">
         <SessionTranscriptPanel
           flowId={flowId}

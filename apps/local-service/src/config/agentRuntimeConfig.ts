@@ -13,7 +13,7 @@ export const legacySessionRuntimeSdk: RuntimeSdk = "claudecode";
 export type RuntimeModelConfig = {
   id: string;
   name: string;
-  contextWindowK?: number;
+  contextWindowK?: number | null;
 };
 
 export type RuntimeConfig = {
@@ -82,10 +82,18 @@ export function resolveRuntimeModelId(runtimeConfig: RuntimeConfig, modelId: str
 }
 
 export function runtimeConfigModelName(runtimeConfig: RuntimeConfig, modelId: string | null | undefined): string | null {
+  const model = runtimeConfigModel(runtimeConfig, modelId);
+  return model ? model.name.trim() : null;
+}
+
+export function runtimeConfigModel(
+  runtimeConfig: RuntimeConfig,
+  modelId: string | null | undefined,
+): RuntimeModelConfig | null {
   const model = modelId
     ? runtimeConfig.models.find((item) => item.id === modelId && item.name.trim())
     : undefined;
-  return model ? model.name.trim() : null;
+  return model ?? null;
 }
 
 export function runtimeRoleForExpertRole(role: string): AgentRuntimeRole {
@@ -125,6 +133,10 @@ function configPath(configId: string) {
   return path.join(configsDir(), `${configId}.json`);
 }
 
+export function agentRuntimeConfigFilePath(configId: string) {
+  return configPath(configId);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -152,9 +164,25 @@ function normalizeSdk(value: unknown): RuntimeSdk {
   throw new Error(`Unsupported runtime sdk: ${String(value)}`);
 }
 
-function normalizeAuthMode(value: unknown): RuntimeAuthMode {
+function normalizeAuthMode(value: unknown, sdk: RuntimeSdk): RuntimeAuthMode {
+  // Claude Code's official/local OAuth flow is intentionally not a
+  // SquadFlow authentication mode. Old persisted values are migrated to the
+  // API-key form so the UI cannot accidentally continue using local login.
+  if (sdk === "claudecode") return "apiKey";
   if (value === "inherited" || value === "accessToken") return value;
   return "apiKey";
+}
+
+function assertSupportedAuthMode(sdk: RuntimeSdk, value: unknown) {
+  if (
+    sdk === "claudecode"
+    && value !== undefined
+    && value !== null
+    && value !== ""
+    && value !== "apiKey"
+  ) {
+    throw new Error("Claude Code 仅支持 API Key，不支持官方登录态或 Access Token");
+  }
 }
 
 function assertConfigId(configId: string) {
@@ -234,7 +262,7 @@ function normalizeRuntimeConfig(value: unknown, fallbackId: string): RuntimeConf
   assertConfigId(id);
   const fileName = stringValue(record.fileName, `${id}.json`);
   const sdk = normalizeSdk(record.sdk);
-  const authMode = normalizeAuthMode(record.authMode);
+  const authMode = normalizeAuthMode(record.authMode, sdk);
   return {
     id,
     fileName: fileName.endsWith(".json") ? fileName : `${id}.json`,
@@ -355,9 +383,16 @@ async function readConfigs() {
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map(async (entry) => {
       const configId = entry.name.slice(0, -".json".length);
-      return normalizeRuntimeConfig(await readJson(path.join(configsDir(), entry.name)), configId);
+      const filePath = path.join(configsDir(), entry.name);
+      const stat = await fs.stat(filePath);
+      return {
+        config: normalizeRuntimeConfig(await readJson(filePath), configId),
+        createdAtMs: stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs,
+      };
     }));
-  return configs.sort((left, right) => left.fileName.localeCompare(right.fileName));
+  return configs
+    .sort((left, right) => left.createdAtMs - right.createdAtMs || left.config.fileName.localeCompare(right.config.fileName))
+    .map((entry) => entry.config);
 }
 
 function resolvedRoleBinding(
@@ -394,8 +429,15 @@ export function readAgentRuntimeConfigSnapshotSync(): AgentRuntimeConfigSnapshot
     .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
     .map((entry) => {
       const configId = entry.name.slice(0, -".json".length);
-      return normalizeRuntimeConfig(readJsonSync(path.join(configsDir(), entry.name)), configId);
-    });
+      const filePath = path.join(configsDir(), entry.name);
+      const stat = fsSync.statSync(filePath);
+      return {
+        config: normalizeRuntimeConfig(readJsonSync(filePath), configId),
+        createdAtMs: stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.ctimeMs,
+      };
+    })
+    .sort((left, right) => left.createdAtMs - right.createdAtMs || left.config.fileName.localeCompare(right.config.fileName))
+    .map((entry) => entry.config);
   const fallbackConfigId = preferredFallbackConfigId(configs);
   return {
     roles: roleOrder.map((role) => resolvedRoleBinding(role, index, configs, fallbackConfigId)),
@@ -454,10 +496,13 @@ export async function readRuntimeConfig(configId: string): Promise<RuntimeConfig
 
 export async function createRuntimeConfig(input: Partial<RuntimeConfig>): Promise<RuntimeConfig> {
   const configs = await readConfigs();
+  const sdk = normalizeSdk(input.sdk);
+  assertSupportedAuthMode(sdk, input.authMode);
   const id = randomUUID();
   const name = assertUniqueConfigName(configs, normalizeConfigName(input.name, unnamedConfigName(configs)));
   const nextConfig = normalizeRuntimeConfig({
     ...input,
+    sdk,
     id,
     fileName: `${id}.json`,
     name,
@@ -477,6 +522,7 @@ export async function updateRuntimeConfig(configId: string, input: Partial<Runti
   if (requestedSdk !== undefined && requestedSdk !== null && requestedSdk !== "" && normalizeSdk(requestedSdk) !== existingConfig.sdk) {
     throw new Error("供应商的 Agent 类型创建后不可更改");
   }
+  assertSupportedAuthMode(existingConfig.sdk, (input as { authMode?: unknown }).authMode);
   const name = assertUniqueConfigName(configs, normalizeConfigName(input.name, existingConfig.name), configId);
   const nextConfig = normalizeRuntimeConfig({
     ...existingConfig,

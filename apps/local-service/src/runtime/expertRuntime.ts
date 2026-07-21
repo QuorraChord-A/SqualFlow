@@ -1228,7 +1228,8 @@ class FlowExpertWorkerRegistry {
       this.deps.store.updateAgentSessionSession(input.agentSession.id, initialSessionId);
     }
     const modelName = runtimeConfigModelName(expertRuntimeConfig.config, expertRuntimeConfig.runtimeModelId) ?? null;
-    const contextWindowTokens = runtimeModelContextWindowK(expertRuntimeConfig.config, modelName ?? "") * 1000;
+    const contextWindowK = runtimeModelContextWindowK(expertRuntimeConfig.config, modelName ?? "");
+    const contextWindowTokens = contextWindowK === null ? null : contextWindowK * 1000;
 
     worker = new FlowExpertWorker(
       input.flowExpert.id,

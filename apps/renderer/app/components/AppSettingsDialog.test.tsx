@@ -15,6 +15,7 @@ const apiMocks = vi.hoisted(() => ({
   updateAgentRuntimeConfig: vi.fn(),
   updateAgentRuntimeRole: vi.fn(),
 }));
+const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
 
 vi.mock("../lib/api", () => ({
   ...apiMocks,
@@ -40,6 +41,7 @@ const runtimeSnapshot = {
     {
       id: "default-agent-sdk",
       fileName: "default-agent-sdk.json",
+      filePath: "/tmp/agent-runtime/configs/default-agent-sdk.json",
       name: "项目claudecode配置",
       sdk: "claudecode",
       authMode: "apiKey",
@@ -53,6 +55,7 @@ const runtimeSnapshot = {
     {
       id: "codex-glm",
       fileName: "codex-glm.json",
+      filePath: "/tmp/agent-runtime/configs/codex-glm.json",
       name: "codex-glm",
       sdk: "codex",
       authMode: "apiKey",
@@ -67,6 +70,8 @@ describe("AppSettingsDialog", () => {
   beforeEach(() => {
     Object.values(apiMocks).forEach((mock) => mock.mockReset());
     apiMocks.fetchExperts.mockResolvedValue([]);
+    clipboardWriteText.mockClear();
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: clipboardWriteText } });
     useThemeStore.setState({ theme: "system", resolvedTheme: "dark" });
   });
 
@@ -207,14 +212,14 @@ describe("AppSettingsDialog", () => {
 
     await user.click(screen.getByRole("button", { name: /自定义 API Key/ }));
 
-    expect(screen.getByText(/未命名配置1 · 草稿/)).toBeInTheDocument();
-    expect(screen.getAllByText("OpenAI Responses 格式").length).toBeGreaterThan(0);
-    expect(screen.getByText("Agent 类型创建后不可更改")).toBeInTheDocument();
-    expect(screen.getByText("保存后生成UUID.json")).toBeInTheDocument();
+    expect(screen.getAllByText("未命名配置1")).toHaveLength(2);
+    expect(screen.getAllByText(/OpenAI Responses 格式/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Agent 类型创建后不可更改")).not.toBeInTheDocument();
+    expect(screen.queryByText("保存后生成UUID.json")).not.toBeInTheDocument();
     expect(screen.queryByRole("combobox", { name: /SDK/ })).not.toBeInTheDocument();
   });
 
-  it("labels the Claude Code local auth choice explicitly", async () => {
+  it("offers only API key authentication for Claude Code", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
 
@@ -234,11 +239,15 @@ describe("AppSettingsDialog", () => {
     await user.click(screen.getByRole("button", { name: "新建" }));
     await user.click(screen.getByRole("button", { name: /Anthropic Messages 格式/ }));
 
-    expect(screen.getByRole("button", { name: /Claude Code本地账号登录态/ })).toBeInTheDocument();
+    expect(screen.getByText(/Claude Code 仅支持 API Key/)).toBeInTheDocument();
+    const apiKeyChoice = screen.getByRole("button", { name: /自定义 API Key/ });
+    expect(apiKeyChoice).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /本地账号登录态/ })).not.toBeInTheDocument();
+    await user.click(apiKeyChoice);
+    expect(screen.getByRole("textbox", { name: "Base URL" })).toHaveValue("https://api.anthropic.com/v1");
   });
 
-  it("checks local auth status for inherited configs without exposing API key fields", async () => {
-    const user = userEvent.setup();
+  it("does not expose local auth controls for Claude Code configs", async () => {
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
       ...runtimeSnapshot,
       configs: [
@@ -247,19 +256,34 @@ describe("AppSettingsDialog", () => {
           id: "claude-local",
           fileName: "claude-local.json",
           name: "claude-local",
-          authMode: "inherited",
+          authMode: "apiKey",
           apiKey: "",
         },
       ],
     });
-    apiMocks.checkAgentRuntimeLocalAuth.mockResolvedValue({
-      sdk: "claudecode",
-      status: "detected",
-      message: "已检测到 Claude Code 本地账号登录态。",
-      path: "/tmp/.claude.json",
-      source: "file",
-      accountHint: "claude@example.com",
+    render(
+      <AppSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        initialSection="agents"
+        initialAgentTab="runtime_configs"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
+
+    expect(screen.queryByText("自定义 API Key")).not.toBeInTheDocument();
+    expect(screen.getByText("API Key")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "检测登录态" })).not.toBeInTheDocument();
+    expect(apiMocks.checkAgentRuntimeLocalAuth).not.toHaveBeenCalled();
+  });
+
+  it("shows only provider names with distinct Agent icons and copies the selected config path", async () => {
+    const user = userEvent.setup();
+    const clipboardSpy = vi.spyOn(navigator.clipboard, "writeText");
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
 
     render(
       <AppSettingsDialog
@@ -274,19 +298,18 @@ describe("AppSettingsDialog", () => {
       expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
 
-    expect(screen.getByText("Claude Code本地账号登录态")).toBeInTheDocument();
-    expect(screen.queryByText("API Key")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: "测试" }).every((button) => button.hasAttribute("disabled"))).toBe(true);
+    const claudeProvider = screen.getByRole("button", { name: "项目claudecode配置" });
+    const codexProvider = screen.getByRole("button", { name: "codex-glm" });
+    expect(claudeProvider.querySelector('img[src="/icons/claudecode.svg"]')).toBeNull();
+    expect(codexProvider.querySelector('img[src="/icons/codex.svg"]')).toBeNull();
+    expect(screen.getByText("ClaudeCode").parentElement?.querySelector('img[src="/icons/claudecode.svg"]')).toHaveClass("size-5");
+    expect(screen.getByText("Codex").parentElement?.querySelector('img[src="/icons/codex.svg"]')).toHaveClass("size-5");
+    expect(screen.queryByText("default-agent-sdk.json")).not.toBeInTheDocument();
+    expect(screen.queryByText(/用于角色配置中选择/)).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "检测登录态" }));
-
-    await waitFor(() => {
-      expect(apiMocks.checkAgentRuntimeLocalAuth).toHaveBeenCalledWith("claude-local", {
-        config: expect.objectContaining({ id: "claude-local", authMode: "inherited" }),
-      });
-    });
-    expect(screen.getByText(/已检测到 Claude Code 本地账号登录态/)).toBeInTheDocument();
-    expect(screen.getByText("/tmp/.claude.json")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "复制配置路径" }));
+    await waitFor(() => expect(clipboardSpy).toHaveBeenCalledWith("/tmp/agent-runtime/configs/default-agent-sdk.json"));
+    expect(await screen.findByRole("button", { name: "已复制路径" })).toBeInTheDocument();
   });
 
   it("orders provider models descending and inserts a new model on the first row", async () => {
@@ -316,6 +339,61 @@ describe("AppSettingsDialog", () => {
     expect(modelValues()).toEqual(["", "opus", "mimo-v2.5"]);
   });
 
+  it("refreshes Claude API-key models and surfaces missing metadata", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
+      ...runtimeSnapshot,
+      configs: [{
+        ...runtimeSnapshot.configs[0],
+        baseUrl: "https://api.anthropic.com/v1",
+        apiKey: "sk-test",
+        models: [{ id: "old", name: "old-model", contextWindowK: 200 }],
+      }],
+    });
+    apiMocks.refreshAgentRuntimeModels.mockResolvedValue({
+      sdk: "claudecode",
+      endpoint: "https://api.anthropic.com/v1/models",
+      models: [
+        { id: "old-refreshed", name: "old-model" },
+        { id: "claude-new", name: "claude-new", contextWindowK: 200 },
+      ],
+      warnings: ["模型 claude-new 未返回上下文大小；刷新时会保留已有配置，新模型使用 SDK 默认值。"],
+    });
+
+    render(
+      <AppSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        initialSection="agents"
+        initialAgentTab="runtime_configs"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("button", { name: "获取模型列表" }));
+
+    await waitFor(() => expect(apiMocks.refreshAgentRuntimeModels).toHaveBeenCalledWith("default-agent-sdk", {
+      config: expect.objectContaining({ sdk: "claudecode", authMode: "apiKey" }),
+    }));
+    const modelDialog = screen.getByRole("dialog", { name: "获取可用模型" });
+    expect(modelDialog).toHaveClass("!left-1/2", "!top-1/2", "!w-[min(760px,calc(100vw-3rem))]");
+    expect(within(modelDialog).getByRole("heading", { name: "获取可用模型" })).toHaveClass("text-center", "text-xl");
+    const searchInput = within(modelDialog).getByRole("searchbox", { name: "搜索模型" });
+    await user.type(searchInput, "claude-new");
+    expect(within(modelDialog).queryByRole("button", { name: "old-model" })).not.toBeInTheDocument();
+    await user.clear(searchInput);
+    expect(within(modelDialog).queryByText("已配置")).not.toBeInTheDocument();
+    expect(within(modelDialog).queryByText("新模型")).not.toBeInTheDocument();
+    expect(within(modelDialog).getByRole("combobox", { name: "old-model 上下文窗口" })).toHaveTextContent("200K");
+    expect(within(modelDialog).getByRole("button", { name: "claude-new" })).toBeInTheDocument();
+    expect(within(modelDialog).getByRole("combobox", { name: "claude-new 上下文窗口" })).toBeInTheDocument();
+    await user.click(within(modelDialog).getByRole("button", { name: "claude-new" }));
+    await user.click(within(modelDialog).getByRole("button", { name: "加入配置" }));
+    expect(screen.getByDisplayValue("claude-new")).toBeInTheDocument();
+  });
+
   it("refreshes and tests models for Codex local auth configs", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
@@ -336,8 +414,8 @@ describe("AppSettingsDialog", () => {
     apiMocks.refreshAgentRuntimeModels.mockResolvedValue({
       sdk: "codex",
       models: [
-        { id: "gpt-54", name: "gpt-5.4" },
-        { id: "gpt-55", name: "gpt-5.5" },
+        { id: "gpt-54", name: "gpt-5.4", contextWindowK: 256 },
+        { id: "gpt-55", name: "gpt-5.5", contextWindowK: 256 },
       ],
     });
     apiMocks.testAgentRuntimeConnection.mockResolvedValue({
@@ -361,18 +439,19 @@ describe("AppSettingsDialog", () => {
       expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
 
-    expect(screen.getByText("Codex 本地账号登录态")).toBeInTheDocument();
-    expect(screen.getByText("可联网刷新 Codex 账号可用模型，并逐个测试")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "刷新可用模型" }));
+    expect(screen.getByText("本地登录态")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "获取模型列表" }));
 
     await waitFor(() => {
       expect(apiMocks.refreshAgentRuntimeModels).toHaveBeenCalledWith("codex-local", {
         config: expect.objectContaining({ id: "codex-local", authMode: "inherited", sdk: "codex" }),
       });
     });
+    const modelDialog = screen.getByRole("dialog", { name: "获取可用模型" });
+    expect(within(modelDialog).getByRole("button", { name: "gpt-5.5" })).toBeInTheDocument();
+    await user.click(within(modelDialog).getByRole("button", { name: "gpt-5.5" }));
+    await user.click(within(modelDialog).getByRole("button", { name: "加入配置" }));
     expect(screen.getByDisplayValue("gpt-5.5")).toBeInTheDocument();
-    expect(screen.getByText(/已刷新 2 个 Codex 可用模型/)).toBeInTheDocument();
 
     const latestModelInput = screen.getByDisplayValue("gpt-5.5");
     const latestModelRow = latestModelInput.closest("div.grid");
@@ -388,7 +467,7 @@ describe("AppSettingsDialog", () => {
     expect(screen.getByText(/连接成功 · gpt-5.5 · 1200ms/)).toBeInTheDocument();
   });
 
-  it("saves the selected Claude Code 200K or 1M context per model", async () => {
+  it("saves provider-reported Claude Code context sizes per model", async () => {
     const user = userEvent.setup();
     const snapshot = {
       ...runtimeSnapshot,
@@ -413,15 +492,10 @@ describe("AppSettingsDialog", () => {
       expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
 
-    const contextSelect = screen.getByRole("combobox", { name: "模型 mimo-v2.5 上下文大小" });
-    expect(contextSelect).toHaveTextContent("200K");
-    await user.click(contextSelect);
+    const contextInput = screen.getByRole("combobox", { name: "模型 mimo-v2.5 上下文窗口" });
+    expect(contextInput).toHaveTextContent("200");
+    await user.click(contextInput);
     await user.click(await screen.findByRole("option", { name: "1M" }));
-    await waitFor(() => {
-      expect(contextSelect).toHaveTextContent("1M");
-    });
-    await user.click(screen.getByRole("button", { name: "保存" }));
-
     await waitFor(() => {
       expect(apiMocks.updateAgentRuntimeConfig).toHaveBeenCalledWith(
         "default-agent-sdk",
@@ -429,14 +503,14 @@ describe("AppSettingsDialog", () => {
           models: [expect.objectContaining({
             id: "mimo-v25",
             name: "mimo-v2.5",
-            contextWindowK: 1_000,
+            contextWindowK: 1000,
           })],
         }),
       );
     });
   });
 
-  it("validates custom Codex context as an integer of at least 128K", async () => {
+  it("validates custom Codex context as at least 128K", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
       ...runtimeSnapshot,
@@ -459,16 +533,14 @@ describe("AppSettingsDialog", () => {
       expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
 
-    const input = screen.getByRole("spinbutton", { name: "模型 glm-4.7 上下文大小（K）" });
+    const input = screen.getByRole("spinbutton", { name: "模型 glm-4.7 上下文窗口（K）" });
     await user.clear(input);
     await user.type(input, "127");
-    await user.click(screen.getByRole("button", { name: "保存" }));
-
-    expect(screen.getByText("非官方 Codex 上下文不能低于 128K。")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("非官方 Codex 上下文窗口不能低于 128K。")).toBeInTheDocument());
     expect(apiMocks.updateAgentRuntimeConfig).not.toHaveBeenCalled();
   });
 
-  it("shows official Codex context as a fixed read-only value", async () => {
+  it("shows official Codex context only when model metadata provides it", async () => {
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
       ...runtimeSnapshot,
       configs: [{
@@ -481,7 +553,7 @@ describe("AppSettingsDialog", () => {
         apiKey: "",
         models: [
           { id: "gpt-56", name: "gpt-5.6-terra", contextWindowK: 258.4 },
-          { id: "gpt-54-mini", name: "gpt-5.4-mini", contextWindowK: 258.4 },
+          { id: "gpt-54-mini", name: "gpt-5.4-mini" },
         ],
       }],
     });
@@ -499,10 +571,9 @@ describe("AppSettingsDialog", () => {
       expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
     });
 
-    expect(screen.getByLabelText("模型 gpt-5.6-terra 官方固定上下文")).toHaveTextContent("258K（官方固定）");
-    expect(screen.getByLabelText("模型 gpt-5.4-mini 官方固定上下文")).toHaveTextContent("258K（官方固定）");
-    expect(screen.queryByRole("spinbutton")).not.toBeInTheDocument();
-    expect(screen.queryByRole("combobox", { name: /上下文大小/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("spinbutton", { name: "模型 gpt-5.6-terra 上下文窗口（K）" })).toHaveValue(258.4);
+    expect(screen.getByRole("spinbutton", { name: "模型 gpt-5.4-mini 上下文窗口（K）" })).toHaveValue(256);
+    expect(screen.queryByRole("combobox", { name: /上下文窗口/ })).not.toBeInTheDocument();
   });
 
   it("blocks deleting a model that is still bound to a role", async () => {

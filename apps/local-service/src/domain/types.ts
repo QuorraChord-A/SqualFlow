@@ -10,7 +10,7 @@ export interface Flow {
   project_id: string | null;
   // Project is the top-level local directory; there is no workspace container.
   name: string;
-  description: string | null;
+  name_generation_status: "pending" | "generated" | "fallback" | "manual";
   status: FlowStatus;
   legacy_spec_flow: boolean;
   leader_session_id: string | null;

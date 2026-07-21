@@ -14,6 +14,7 @@ import {
   buildAttachmentEvent,
   buildLeaderGuidePrompt,
   buildLeaderPrompt,
+  buildFlowNameRequestPrompt,
   type LeaderPlanFeedback,
   type LeaderTurnInput,
 } from "../leaderPrompt.js";
@@ -116,6 +117,19 @@ function leaderGuideMessage(
     },
     parent_tool_use_id: null,
     priority: "now",
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function leaderFlowNameMessage(flowId: string): SDKUserMessage {
+  return {
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: buildFlowNameRequestPrompt(flowId) }],
+    },
+    parent_tool_use_id: null,
+    priority: "later",
     timestamp: new Date().toISOString(),
   };
 }
@@ -305,6 +319,7 @@ export function createClaudeAgentRuntimeAdapter(input: { query?: ClaudeQueryFn }
     createInputQueue: () => new AsyncMessageQueue<unknown>(),
     createLeaderUserMessage: leaderUserMessage as AgentRuntimeAdapter["createLeaderUserMessage"],
     createLeaderGuideMessage: leaderGuideMessage as AgentRuntimeAdapter["createLeaderGuideMessage"],
+    createLeaderFlowNameMessage: leaderFlowNameMessage as AgentRuntimeAdapter["createLeaderFlowNameMessage"],
     createSingleTextInput: singleTextInput as AgentRuntimeAdapter["createSingleTextInput"],
     createExpertUserMessage: expertUserMessage as AgentRuntimeAdapter["createExpertUserMessage"],
     createOutputAdapter,

@@ -35,6 +35,35 @@ function currentTurnInput(userTurnId: string) {
 }
 
 describe("createStorePort", () => {
+  it("updates a pending Flow name only from the internal naming turn", () => {
+    const store = tempStore();
+    const project = store.createProject({ name: "fixture", localPath: "/repo" });
+    const flow = store.createFlow({
+      id: "flow-name",
+      name: "临时名称",
+      description: "",
+      nameGenerationStatus: "pending",
+      projectId: project.id,
+    });
+    const port = createStorePort(store);
+
+    const result = port.updateFlowName({
+      flowId: flow.id,
+      name: "后台登录系统名称过长",
+      currentTurnInput: {
+        trigger_kind: "flow_name_generation",
+        user_turn_id: "turn-name",
+        created_at: new Date().toISOString(),
+      },
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      flow: { flow_id: flow.id, name: "后台登录系统名称过长".slice(0, 10), name_generation_status: "generated" },
+    });
+    expect(store.getFlow(flow.id)?.nameGenerationStatus).toBe("generated");
+  });
+
   it("exposes context for a Flow", () => {
     const store = tempStore();
     const project = store.createProject({

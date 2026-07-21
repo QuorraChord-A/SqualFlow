@@ -60,7 +60,7 @@ function writeRuntimeConfigFile(
   root: string,
   configId: string,
   sdk: RuntimeSdk,
-  models = [{ id: "model-1", name: "model-1" }],
+  models = [{ id: "model-1", name: "model-1", contextWindowK: 200 }],
 ) {
   fs.writeFileSync(path.join(root, "configs", `${configId}.json`), `${JSON.stringify({
     id: configId,
@@ -709,6 +709,71 @@ describe("LeaderRuntime platform event protocol", () => {
     ]);
   });
 
+  it("runs the first Flow name generation after the visible turn and keeps it out of transcript output", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    store.updateFlow(flow.id, { nameGenerationStatus: "pending" });
+    const prompts: string[] = [];
+    const namerOptions: Record<string, unknown>[] = [];
+    const transcriptEvents: unknown[] = [];
+    const nameUpdates: unknown[] = [];
+    const eventBus = new EventBus();
+    eventBus.subscribe(flow.id, "flow-name-test", (event) => {
+      if (event.type === "session:transcript_event") transcriptEvents.push(event);
+      if (event.type === "flow:name_updated") nameUpdates.push(event);
+    });
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus,
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: (input) => ({
+        async *[Symbol.asyncIterator]() {
+          const ephemeral = typeof input.options === "object"
+            && input.options !== null
+            && "persistSession" in input.options
+            && input.options.persistSession === false;
+          if (ephemeral) {
+            namerOptions.push(input.options as Record<string, unknown>);
+            const messages = input.prompt[Symbol.asyncIterator]();
+            const namingMessage = await messages.next();
+            const namingContent = Array.isArray(namingMessage.value?.message.content) ? namingMessage.value.message.content[0] : undefined;
+            prompts.push(namingContent?.type === "text" ? namingContent.text : "");
+            yield { type: "assistant", message: { content: [{ type: "text", text: "登录页面" }] } };
+            yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
+            return;
+          }
+          if (typeof input.prompt === "string") throw new Error("expected streaming input");
+          const messages = input.prompt[Symbol.asyncIterator]();
+          const first = await messages.next();
+          const firstContent = Array.isArray(first.value?.message.content) ? first.value.message.content[0] : undefined;
+          prompts.push(firstContent?.type === "text" ? firstContent.text : "");
+          yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
+        },
+        close() {},
+      }) }),
+    });
+
+    await runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "实现一个登录页面",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+
+    expect(prompts[0]).toBe("实现一个登录页面");
+    await vi.waitFor(() => expect(prompts[1]).toContain("首条用户需求"));
+    await vi.waitFor(() => expect(store.getFlow(flow.id)?.nameGenerationStatus).toBe("generated"));
+    expect(store.getFlow(flow.id)?.name).toBe("登录页面");
+    expect(namerOptions[0]).toMatchObject({
+      persistSession: false,
+      thinking: { type: "disabled" },
+    });
+    expect(nameUpdates).toHaveLength(1);
+    expect(transcriptEvents.every((event) => JSON.stringify(event).includes("flow_name_request") === false)).toBe(true);
+  });
+
   it("closes a completed streaming query so the runtime lease can be reused", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
@@ -787,7 +852,8 @@ describe("LeaderRuntime platform event protocol", () => {
       runtimeAdapterFactory: createClaudeTestAdapterFactory({
         leaderQuery: (input) => {
           queryCount += 1;
-          const sessionId = `sdk-hung-context-${queryCount}`;
+          // A resumed Leader must keep the provider session identity stable.
+          const sessionId = "sdk-hung-context-1";
           let releaseIterator!: () => void;
           const iteratorHeld = new Promise<void>((resolve) => {
             releaseIterator = resolve;
@@ -1231,7 +1297,7 @@ describe("LeaderRuntime platform event protocol", () => {
           contents.push(guideContent?.type === "text" ? guideContent.text : "");
           yield { type: "result", subtype: "success", session_id: "sdk-leader-before-guide-result", is_error: false };
           await resultReleased;
-          yield { type: "result", subtype: "success", session_id: "sdk-leader-guide-final", is_error: false };
+          yield { type: "result", subtype: "success", session_id: "sdk-leader-before-guide-result", is_error: false };
         },
         close() {},
       }) }),
@@ -1263,7 +1329,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(parseMessageSegments(contents[1] ?? "", flow.id)).toEqual([
       expect.objectContaining({ kind: "event", type: "guide", body: "补充当前 turn" }),
     ]);
-    expect(store.getAgentSession(leader.id)?.sessionId).toBe("sdk-leader-guide-final");
+    expect(store.getAgentSession(leader.id)?.sessionId).toBe("sdk-leader-before-guide-result");
   });
 
   it("waits for a card-paused stream to exit before resuming the same Leader session", async () => {

@@ -21,13 +21,13 @@ export function runtimeSdkLabel(sdk: RuntimeSdk) {
   return AGENT_META[sdk]?.label ?? sdk;
 }
 
-export function AgentIcon({ sdk }: { sdk: RuntimeSdk }) {
+export function AgentIcon({ sdk, className }: { sdk: RuntimeSdk; className?: string }) {
   return (
     <img
       src={AGENT_META[sdk].iconPath}
       alt=""
       aria-hidden="true"
-      className={`size-3.5 shrink-0 object-contain ${sdk === "codex" ? "dark:invert" : ""}`}
+      className={`${className ?? "size-3.5"} shrink-0 object-contain ${sdk === "codex" ? "dark:invert" : ""}`}
     />
   );
 }

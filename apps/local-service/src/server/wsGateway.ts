@@ -22,6 +22,7 @@ import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
 import { planRevisionView } from "../domain/orchestrationView.js";
 import { publishUserTurnEvent } from "../domain/userTurn.js";
 import { LeaderInputRejectedError, type LeaderRuntime } from "../runtime/leaderRuntime.js";
+import { LeaderSessionRecoveryError } from "../runtime/adapters/runtimeErrors.js";
 import { DECISION_CANCELLED_BODY } from "../runtime/leaderPrompt.js";
 import type { ExpertRuntime } from "../runtime/expertRuntime.js";
 import type { OrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
@@ -121,12 +122,13 @@ function errorMessage(
   message: string,
   flowId?: string,
   logId?: string,
+  details?: Record<string, unknown>,
 ): ServerWsMessage {
   return ServerWsMessageSchema.parse({
     type: "system:error",
     ...(flowId ? { flow_id: flowId } : {}),
     ...(logId ? { log_id: logId } : {}),
-    data: { code, message },
+    data: { code, message, ...(details ?? {}) },
   });
 }
 
@@ -443,35 +445,36 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
 function ensureLeaderSession(
   flowId: string,
   connection: WsConnection,
-  options: { restartFailed?: boolean } = {},
 ) {
   const existing = connection.store
     .listAgentSessions(flowId)
     .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-  if (existing) {
-    if (!options.restartFailed || existing.status !== "failed") return existing;
-
-    const sessionId = randomUUID();
-    const updatedSession = connection.store.updateAgentSessionSession(existing.id, sessionId);
-    const restarted = connection.store.updateAgentSessionStatus(existing.id, "idle");
-    if (!updatedSession || !restarted) {
-      throw new Error(`Unable to restart failed Leader session for Flow ${flowId}`);
-    }
-    connection.store.updateFlow(flowId, { leaderSessionId: sessionId });
-    return restarted;
-  }
+  if (existing) return existing;
 
   const created = connection.store.createAgentSession({
     flowId,
     userTurnId: null,
     taskId: null,
     expertId: "exp-leader",
-    sessionId: randomUUID(),
+    sessionId: null,
     displayName: "Leader",
   });
   if (!created) throw new Error(`Unable to create Leader session for Flow ${flowId}`);
-  connection.store.updateFlow(flowId, { leaderSessionId: created.sessionId });
+  // Use the local AgentSession ID as a transcript channel until the provider
+  // returns a real SDK session ID. It is never sent as a provider resume ID.
+  connection.store.updateFlow(flowId, { leaderSessionId: created.id });
   return created;
+}
+
+function leaderProviderResumeSessionId(
+  flow: NonNullable<ReturnType<Store["getFlow"]>>,
+  leader: RuntimeAgentSession,
+): string | undefined {
+  // A newly-created local AgentSession uses its own ID as the transcript
+  // channel until the provider returns an SDK session ID. Never send that
+  // local ID to a provider's resume endpoint.
+  if (!leader.sessionId || flow.leaderSessionId === leader.id) return undefined;
+  return flow.leaderSessionId ?? undefined;
 }
 
 function publishLeaderError(
@@ -479,6 +482,23 @@ function publishLeaderError(
   connection: WsConnection,
   error: unknown,
 ) {
+  if (error instanceof LeaderSessionRecoveryError) {
+    return connection.eventBus.publish(
+      message.flow_id,
+      errorMessage(
+        error.code,
+        error.message,
+        message.flow_id,
+        message.log_id,
+        {
+          category: error.category,
+          provider: error.provider,
+          session_id: error.sessionId,
+          provider_code: error.providerCode,
+        },
+      ),
+    );
+  }
   return connection.eventBus.publish(
     message.flow_id,
     errorMessage(
@@ -625,10 +645,7 @@ async function handleFlowMessage(
     return false;
   }
 
-  const failedLeaderSession = connection.store
-    .listAgentSessions(message.flow_id)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "failed");
-  const leader = ensureLeaderSession(message.flow_id, connection, { restartFailed: true });
+  const leader = ensureLeaderSession(message.flow_id, connection);
   const acceptance = existingSubmission
     ? { outcome: "duplicate" as const, submission: existingSubmission }
     : connection.store.acceptSubmission({
@@ -809,7 +826,10 @@ async function handleFlowMessage(
     userTurnId: userTurn?.id,
     leaderAgentSessionId: leader.id,
     leaderSessionId: leader.sessionId ?? leader.id,
-    resumeSessionId: failedLeaderSession ? undefined : flow.leaderSessionId ?? undefined,
+    // Once the provider has returned a real session ID, every subsequent turn
+    // must resume it. A local AgentSession without a provider ID has no session
+    // to resume yet, so only that first call is allowed to start one.
+    resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     currentTurnInput: {
       trigger_kind: "user_message",
       user_turn_id: userTurn?.id,
@@ -858,10 +878,8 @@ async function handlePlanApprove(message: ClientWsMessage & { type: "flow:plan_a
     planApprovedTasks: planApprovedTaskList(connection.store, run.id),
     leaderAgentSessionId: leader.id,
     leaderSessionId: leader.sessionId ?? leader.id,
-    resumeSessionId: flow.leaderSessionId || undefined,
-  }).catch((error: unknown) => {
-    connection.logger?.error({ flowId: message.flow_id, planRevisionId: resolved.planRevisionId, error: error instanceof Error ? error.message : String(error) }, "plan_approved leader turn failed");
-  });
+    resumeSessionId: leaderProviderResumeSessionId(flow, leader),
+  }).catch((error: unknown) => publishLeaderError(message, connection, error));
 }
 
 function planApprovedTaskList(store: Store, planRunId: string) {
@@ -1328,7 +1346,6 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     data: { status: "active", active_user_turn_id: startedTurn.id },
   }));
 
-  const existingLeaderSessionId = flow.leaderSessionId ?? "";
   const leader = ensureLeaderSession(message.flow_id, connection);
   void connection.leaderRuntime.runLeaderTurn({
     flowId: message.flow_id,
@@ -1336,7 +1353,7 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     kind: "spec_run",
     leaderAgentSessionId: leader.id,
     leaderSessionId: leader.sessionId ?? leader.id,
-    resumeSessionId: existingLeaderSessionId || undefined,
+    resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     logId: message.log_id,
   }).catch((error: unknown) => publishLeaderError(message, connection, error));
 }
@@ -1396,7 +1413,7 @@ export async function deliverDecisionCardLeaderInput(input: {
       },
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? card.sessionId ?? leader.id,
-      resumeSessionId: flow.leaderSessionId || undefined,
+      resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     });
     input.store.markDecisionCardLeaderInputSent(leaderInput.id);
   } catch (error) {

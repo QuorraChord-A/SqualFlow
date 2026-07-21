@@ -37,7 +37,7 @@ function runtimeConfig(patch: Partial<RuntimeConfig> = {}): RuntimeConfig {
     authMode: "apiKey",
     baseUrl: "https://example.test/anthropic",
     apiKey: "sk-test",
-    models: [{ id: "model-1", name: "claude-test-model" }],
+    models: [{ id: "model-1", name: "claude-test-model", contextWindowK: 200 }],
     ...patch,
   };
 }

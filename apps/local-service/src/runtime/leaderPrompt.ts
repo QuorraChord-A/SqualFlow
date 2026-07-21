@@ -144,6 +144,35 @@ export function buildLeaderGuidePrompt(input: {
   ]);
 }
 
+export function buildFlowNameRequestPrompt(flowId: string): string {
+  return buildPlatformEvent({
+    flowId,
+    type: "flow_name_request",
+    body: [
+      "根据本 Flow 的首条用户需求和你刚完成的首次回复，生成一个不超过 10 个字的简洁中文名称。",
+      "只调用 update_flow_name；不要输出文字，不要调用其他工具。",
+    ].join("\n"),
+  });
+}
+
+export function buildFlowNameWorkerPrompt(input: {
+  userMessage: string;
+  assistantMessage: string;
+}): string {
+  const userMessage = input.userMessage.trim().slice(0, 4_000);
+  const assistantMessage = input.assistantMessage.trim().slice(0, 6_000);
+  return [
+    "你是 SquadFlow 的 Flow 命名助手，不是主对话 Agent。",
+    "请根据首条用户需求和首轮回复，生成一个准确、简洁的中文 Flow 名称。",
+    "只输出名称本身，不要解释、标点、引号、Markdown 或换行；名称最多 10 个字。",
+    "如果首轮回复只是问候，也请根据用户需求生成名称。",
+    "\n【首条用户需求】",
+    userMessage || "（无）",
+    "\n【首轮回复】",
+    assistantMessage || "（无）",
+  ].join("\n");
+}
+
 export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInput | undefined {
   const createdAt = new Date().toISOString();
   if (turn.kind === "decision" || turn.kind === "decision_cancelled") {

@@ -8,6 +8,7 @@ import {
   claudeRuntimeModelName,
   runtimeModelContextWindowK,
 } from "../../config/runtimeModelContext.js";
+import { parseRuntimeReasoningEffort } from "../codexReasoningEffort.js";
 import type { RuntimeToolPermission } from "./runtimeAdapter.js";
 import type { RuntimeToolInput } from "../capabilities.js";
 import { claudeCapabilityForTool, claudeToolsForCapabilities } from "./claudeCapabilities.js";
@@ -36,9 +37,10 @@ type BuildClaudeBaseOptionsInput = {
   canUseTool?: Options["canUseTool"];
   disallowedTools?: string[];
   maxTurns?: number;
+  ephemeral?: boolean;
   resume?: string;
   sessionId?: string;
-  runtimeConfig?: RuntimeConfig;
+  runtimeConfig?: RuntimeConfig & { reasoningEffort?: string | null };
   modelName?: string;
   pathToClaudeCodeExecutable?: string;
 };
@@ -90,7 +92,7 @@ function selectedModelName(runtimeConfig: RuntimeConfig | undefined): string | u
 function buildRuntimeEnv(
   runtimeConfig: RuntimeConfig | undefined,
   modelName: string | undefined,
-  contextWindowK: number | undefined,
+  contextWindowK: number | null | undefined,
 ): Options["env"] | undefined {
   if (!runtimeConfig && !modelName) return undefined;
   const env: Record<string, string> = {};
@@ -101,7 +103,7 @@ function buildRuntimeEnv(
     if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
   }
   if (modelName) env.ANTHROPIC_MODEL = modelName;
-  if (runtimeConfig?.sdk === "claudecode" && contextWindowK !== undefined) {
+  if (runtimeConfig?.sdk === "claudecode" && contextWindowK !== undefined && contextWindowK !== null) {
     if (contextWindowK !== 1_000) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
   }
   return Object.keys(env).length > 0 ? env : undefined;
@@ -211,9 +213,19 @@ export function buildClaudeBaseOptions(input: BuildClaudeBaseOptionsInput): Opti
     settingSources: [],
     includePartialMessages: true,
     maxTurns: input.maxTurns,
+    ...(input.ephemeral === true ? {
+      // Flow Namer is a one-shot extraction request. Keep it fast and do not
+      // spend tokens on extended thinking; normal Leader turns keep their
+      // configured effort unchanged.
+      persistSession: false,
+      thinking: { type: "disabled" },
+    } : {}),
     resume: input.resume,
     sessionId: input.sessionId,
     pathToClaudeCodeExecutable: input.pathToClaudeCodeExecutable,
+    ...(input.ephemeral !== true && parseRuntimeReasoningEffort("claudecode", input.runtimeConfig?.reasoningEffort)
+      ? { effort: parseRuntimeReasoningEffort("claudecode", input.runtimeConfig?.reasoningEffort) as Options["effort"] }
+      : {}),
   };
 }
 
@@ -263,6 +275,7 @@ export function buildClaudeLeaderOptions(input: BuildLeaderRuntimeOptionsInput):
     settingsPath: getAgentSettingsPath("leader"),
     canUseTool: toClaudeCanUseTool(input.canUseTool),
     maxTurns: input.maxTurns,
+    ephemeral: input.ephemeral,
     resume: input.resume,
     sessionId: input.resume ? undefined : input.sessionId,
     mcpServers: mcpServers ?? {},

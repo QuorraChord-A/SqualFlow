@@ -32,20 +32,6 @@ interface LeaderModelSelectorProps {
   reasoningEffortDisabled?: boolean;
 }
 
-type ReasoningEffortOption = {
-  value: string;
-  label: string;
-};
-
-const REASONING_EFFORT_OPTIONS_BY_SDK: Partial<Record<AgentRuntimeConfigDto['sdk'], ReasoningEffortOption[]>> = {
-  codex: [
-    { value: 'low', label: 'Low' },
-    { value: 'medium', label: 'Medium' },
-    { value: 'high', label: 'High' },
-    { value: 'xhigh', label: 'Xhigh' },
-  ],
-};
-
 const OFFICIAL_REASONING_EFFORT_LABELS: Record<string, string> = {
   low: '轻度',
   medium: '中',
@@ -55,46 +41,33 @@ const OFFICIAL_REASONING_EFFORT_LABELS: Record<string, string> = {
   ultra: '极高',
 };
 
-const DEFAULT_REASONING_EFFORT_BY_SDK: Partial<Record<AgentRuntimeConfigDto['sdk'], string>> = {
-  codex: 'medium',
-};
-
 function runtimeConfigLabel(config: AgentRuntimeConfigDto | null | undefined) {
   return config?.name?.trim() || config?.fileName || '未配置';
 }
 
-function reasoningEffortOptionsForConfig(
-  config: AgentRuntimeConfigDto | null | undefined,
-  model?: RuntimeModelDto | null,
-) {
-  if (config?.sdk !== 'codex' || config.authMode !== 'inherited') return [];
-  const fallback = REASONING_EFFORT_OPTIONS_BY_SDK.codex ?? [];
-  if (!model?.reasoningEfforts?.length) return fallback;
-  return model.reasoningEfforts.map((value) => ({
-    value,
-    label: fallback.find((option) => option.value === value)?.label
-      ?? `${value.slice(0, 1).toUpperCase()}${value.slice(1)}`,
-  }));
+function reasoningEffortOptionsForConfig(config: AgentRuntimeConfigDto | null | undefined) {
+  const values = config?.sdk === 'codex' && config.authMode === 'inherited'
+    ? ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
+    : [];
+  return values.map((value) => ({ value, label: OFFICIAL_REASONING_EFFORT_LABELS[value] ?? value }));
 }
 
 function defaultReasoningEffortForConfig(
   config: AgentRuntimeConfigDto | null | undefined,
-  model?: RuntimeModelDto | null,
 ) {
-  const options = reasoningEffortOptionsForConfig(config, model);
-  const fallback = model?.defaultReasoningEffort
-    ?? (config ? DEFAULT_REASONING_EFFORT_BY_SDK[config.sdk] ?? options[0]?.value ?? '' : '');
-  return options.some((option) => option.value === fallback) ? fallback : options[0]?.value ?? '';
+  const options = reasoningEffortOptionsForConfig(config);
+  const fallback = config?.sdk === 'codex' && config.authMode === 'inherited' ? 'medium' : '';
+  return options.some((option) => option.value === fallback) ? fallback : '';
 }
 
 function normalizeReasoningEffortForConfig(
   config: AgentRuntimeConfigDto | null | undefined,
-  model: RuntimeModelDto | null | undefined,
+  _model: RuntimeModelDto | null | undefined,
   value: string | null | undefined,
 ) {
-  const options = reasoningEffortOptionsForConfig(config, model);
+  const options = reasoningEffortOptionsForConfig(config);
   if (options.length === 0) return '';
-  return options.some((option) => option.value === value) ? value! : defaultReasoningEffortForConfig(config, model);
+  return options.some((option) => option.value === value) ? value! : defaultReasoningEffortForConfig(config);
 }
 
 function officialReasoningEffortLabel(value: string | null | undefined) {
@@ -348,8 +321,9 @@ export default function LeaderModelSelector({
     return null;
   };
   const isConfigured = Boolean(leaderRuntimeConfig && leaderModel?.name.trim());
-  const usesOfficialCodexEffort = leaderRuntimeConfig?.sdk === 'codex' && leaderRuntimeConfig.authMode === 'inherited';
-  const effortOptions = reasoningEffortOptionsForConfig(leaderRuntimeConfig, leaderModel);
+  const isOfficialCodex = leaderRuntimeConfig?.sdk === 'codex' && leaderRuntimeConfig.authMode === 'inherited';
+  const effortOptions = reasoningEffortOptionsForConfig(leaderRuntimeConfig);
+  const usesOfficialCodexEffort = isOfficialCodex && effortOptions.length > 0;
   const activeReasoningEffort = normalizeReasoningEffortForConfig(leaderRuntimeConfig, leaderModel, selectedReasoningEffort);
   const activeReasoningEffortIndex = Math.max(0, effortOptions.findIndex((option) => option.value === activeReasoningEffort));
   const activeReasoningEffortOption = effortOptions[activeReasoningEffortIndex] ?? null;
@@ -490,7 +464,7 @@ export default function LeaderModelSelector({
     setSelectedRuntimeConfigId(config.id);
     setSelectedRuntimeModelId(model.id);
     if (!flowId && defaultSelection) {
-      const nextEffort = defaultReasoningEffortForConfig(config, model);
+      const nextEffort = defaultReasoningEffortForConfig(config);
       setSelectedReasoningEffort(nextEffort || null);
       onSelectionChange?.({ configId: config.id, modelId: model.id });
       onSelectionReasoningEffortChange?.(nextEffort || null);

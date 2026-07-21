@@ -17,6 +17,7 @@ export const PLATFORM_EVENT_TYPES = [
   "attachment",
   "dispatch_env",
   "leader_message",
+  "flow_name_request",
 ] as const;
 
 export type PlatformEventType = (typeof PLATFORM_EVENT_TYPES)[number];
@@ -56,6 +57,7 @@ const allowedAttrs: Record<PlatformEventType, ReadonlySet<string>> = {
   attachment: new Set(),
   dispatch_env: new Set(["cwd", "scratch", "write"]),
   leader_message: new Set(),
+  flow_name_request: new Set(),
 };
 
 let cachedSalt: { root: string; value: string } | null = null;

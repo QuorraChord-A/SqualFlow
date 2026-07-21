@@ -40,15 +40,16 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T
 
 function withRequestedModel(runtimeConfig: RuntimeConfig, model: string): RuntimeConfig {
   const configuredModel = runtimeConfig.models.find((item) => item.name.trim() === model);
+  const contextWindowK = runtimeConfig.authMode === "inherited"
+    ? null
+    : runtimeModelContextWindowK(runtimeConfig, model);
   return {
     ...runtimeConfig,
     models: [
       {
         id: configuredModel?.id ?? "connection-test-model",
         name: model,
-        ...(runtimeConfig.authMode === "inherited"
-          ? {}
-          : { contextWindowK: runtimeModelContextWindowK(runtimeConfig, model) }),
+        ...(contextWindowK === null ? {} : { contextWindowK }),
       },
       ...runtimeConfig.models.filter((item) => item.id !== configuredModel?.id),
     ],
@@ -82,9 +83,6 @@ function providerConfigError(runtimeConfig: RuntimeConfig): { code: string; mess
   if (runtimeConfig.authMode !== "apiKey") return null;
   if (!runtimeConfig.apiKey.trim()) {
     return { code: "API_KEY_REQUIRED", message: "Codex runtime API key is not configured" };
-  }
-  if (!runtimeConfig.baseUrl.trim()) {
-    return { code: "BASE_URL_REQUIRED", message: "Codex runtime base URL is not configured" };
   }
   return null;
 }

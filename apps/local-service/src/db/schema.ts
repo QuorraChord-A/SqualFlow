@@ -15,6 +15,7 @@ export const flows = sqliteTable("flows", {
   projectId: text("project_id"),
   name: text("name").notNull(),
   description: text("description"),
+  nameGenerationStatus: text("name_generation_status").notNull().default("generated"),
   status: text("status").notNull().default("ready"),
   legacySpecFlow: integer("legacy_spec_flow").notNull().default(0),
   riskMode: text("risk_mode").notNull().default("auto_edit"),

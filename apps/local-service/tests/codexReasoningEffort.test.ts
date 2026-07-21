@@ -1,25 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
-  codexReasoningEffortsForModel,
-  defaultCodexReasoningEffortForModel,
-  parseCodexReasoningEffort,
+  defaultRuntimeReasoningEffortForSdk,
+  parseRuntimeReasoningEffort,
+  runtimeReasoningEffortsForSdk,
 } from "../src/runtime/codexReasoningEffort.js";
 
-describe("Codex reasoning effort metadata", () => {
-  it("exposes the official GPT-5.6 effort levels", () => {
-    expect(codexReasoningEffortsForModel("gpt-5.6-terra")).toEqual([
-      "low", "medium", "high", "xhigh", "max", "ultra",
-    ]);
-    expect(codexReasoningEffortsForModel("gpt-5.6-sol")).toHaveLength(6);
-    expect(codexReasoningEffortsForModel("gpt-5.6-luna")).toEqual([
-      "low", "medium", "high", "xhigh", "max",
-    ]);
+describe("SDK reasoning effort values", () => {
+  it("uses fixed SDK-level values", () => {
+    expect(runtimeReasoningEffortsForSdk("claudecode")).toEqual(["low", "medium", "high", "xhigh", "max"]);
+    expect(runtimeReasoningEffortsForSdk("codex")).toEqual(["low", "medium", "high", "xhigh", "max", "ultra"]);
   });
 
-  it("uses each model's default and rejects unsupported levels", () => {
-    expect(defaultCodexReasoningEffortForModel("gpt-5.6-sol")).toBe("low");
-    expect(defaultCodexReasoningEffortForModel("gpt-5.6-terra")).toBe("medium");
-    expect(parseCodexReasoningEffort("gpt-5.6-luna", "ultra")).toBeNull();
-    expect(parseCodexReasoningEffort("gpt-5.6-terra", "ultra")).toBe("ultra");
+  it("uses SDK defaults and rejects unsupported levels", () => {
+    expect(defaultRuntimeReasoningEffortForSdk("claudecode")).toBe("high");
+    expect(defaultRuntimeReasoningEffortForSdk("codex")).toBe("medium");
+    expect(parseRuntimeReasoningEffort("claudecode", "ultra")).toBeNull();
+    expect(parseRuntimeReasoningEffort("codex", "ultra")).toBe("ultra");
   });
 });

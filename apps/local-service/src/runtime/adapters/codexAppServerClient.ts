@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import readline from "node:readline";
+import { ProviderRequestError } from "./runtimeErrors.js";
 
 export type CodexJsonRpcMessage = Record<string, unknown>;
 
@@ -32,6 +33,7 @@ export class CodexAppServerClient implements CodexAppServerTransport {
   private initialized: Promise<void> | null = null;
   private closed = false;
   private readonly pending = new Map<string | number, PendingRequest>();
+  private readonly pendingRequestParams = new Map<string | number, { method: string; params?: unknown }>();
   private readonly events: CodexJsonRpcMessage[] = [];
   private eventWaiter: ((value: IteratorResult<CodexJsonRpcMessage>) => void) | null = null;
   private stderrRemainder = "";
@@ -50,6 +52,7 @@ export class CodexAppServerClient implements CodexAppServerTransport {
     const message = params === undefined ? { id, method } : { id, method, params };
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
+      this.pendingRequestParams.set(id, { method, params });
       this.send(message);
     });
   }
@@ -157,9 +160,20 @@ export class CodexAppServerClient implements CodexAppServerTransport {
       if (!pending) return;
       this.pending.delete(id);
       if (message.error && typeof message.error === "object") {
-        const error = message.error as { message?: unknown; code?: unknown };
-        pending.reject(new Error(typeof error.message === "string" ? error.message : `Codex app-server request failed: ${String(error.code)}`));
+        const error = message.error as { message?: unknown; code?: unknown; data?: unknown };
+        const request = this.pendingRequestParams.get(id);
+        this.pendingRequestParams.delete(id);
+        const params = request?.params && typeof request.params === "object" ? request.params as Record<string, unknown> : undefined;
+        pending.reject(new ProviderRequestError({
+          provider: "codex",
+          method: request?.method ?? "unknown",
+          code: typeof error.code === "string" || typeof error.code === "number" ? error.code : null,
+          message: typeof error.message === "string" ? error.message : `Codex app-server request failed: ${String(error.code)}`,
+          data: error.data,
+          requestedSessionId: typeof params?.threadId === "string" ? params.threadId : null,
+        }));
       } else {
+        this.pendingRequestParams.delete(id);
         pending.resolve(message.result);
       }
       return;
@@ -188,6 +202,7 @@ export class CodexAppServerClient implements CodexAppServerTransport {
   private rejectAll(error: Error) {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    this.pendingRequestParams.clear();
   }
 
   private resolveEventWaiterDone() {

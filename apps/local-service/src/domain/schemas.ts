@@ -28,7 +28,7 @@ export const FlowSchema = z.object({
   project_id: z.string().nullable(),
   // Project is the top-level local directory.
   name: z.string(),
-  description: z.string().nullable(),
+  name_generation_status: z.enum(["pending", "generated", "fallback", "manual"]),
   status: FlowStatusSchema,
   legacy_spec_flow: z.boolean().default(false),
   leader_session_id: z.string().nullable(),

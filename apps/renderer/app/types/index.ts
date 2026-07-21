@@ -16,7 +16,9 @@ export type PlanApproval = 'on' | 'off';
 export interface SquadFlow {
   id: string;
   name: string;
-  description: string;
+  name_generation_status?: 'pending' | 'generated' | 'fallback' | 'manual';
+  /** @deprecated Flow descriptions are no longer part of the product contract. */
+  description?: string;
   type: FlowType;
   status: FlowStatus;
   current_stage: StageType | null;

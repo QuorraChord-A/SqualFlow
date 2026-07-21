@@ -5,6 +5,7 @@ import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
 import type { StorePort } from "./leaderServer.js";
 import { DeclarativeOrchestrationRuleSchema, diffPlanNodes, evaluateDeclarativeRules, lintOrchestrationPlan } from "../domain/orchestration.js";
 import type { PlanLintIssue, SubmitOrchestrationPlanInput } from "../domain/orchestration.js";
+import { normalizeFlowName } from "../domain/flowName.js";
 
 type AgentDispatchResult = {
   agent_session_id: string;
@@ -116,6 +117,24 @@ export function createStorePort(
       const flow = store.getFlow(flowId);
       const project = flow?.projectId ? store.getProject(flow.projectId) : undefined;
       return { ...snapshot, flow_id: flowId, project_root_path: project?.localPath ?? "" };
+    },
+
+    updateFlowName(input) {
+      const flow = store.getFlow(input.flowId);
+      if (!flow) return { ok: false, error: { code: "FLOW_NOT_FOUND", message: "Flow not found." } };
+      if (input.currentTurnInput?.trigger_kind !== "flow_name_generation") {
+        return { ok: false, error: { code: "FLOW_NAME_GENERATION_REQUIRED", message: "Flow name generation is not active." } };
+      }
+      if (flow.nameGenerationStatus !== "pending") {
+        return { ok: false, error: { code: "FLOW_NAME_ALREADY_RESOLVED", message: "Flow name generation is already resolved." } };
+      }
+      const updated = store.updateFlow(input.flowId, {
+        name: normalizeFlowName(input.name, flow.name),
+        nameGenerationStatus: "generated",
+      });
+      return updated
+        ? { ok: true, flow: { flow_id: updated.id, name: updated.name, name_generation_status: "generated" } }
+        : { ok: false, error: { code: "FLOW_NOT_FOUND", message: "Flow not found." } };
     },
 
     listPendingUserActions({ flowId }) {

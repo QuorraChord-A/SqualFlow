@@ -163,7 +163,7 @@ describe("buildCodexExpertOptions browser MCP config", () => {
     expect(options.config.model_reasoning_effort).toBe("xhigh");
   });
 
-  it("does not pass reasoning effort to an API-key Codex provider", () => {
+  it("passes the configured reasoning effort to an API-key Codex provider", () => {
     const options = buildCodexExpertOptions(baseInput({
       runtimeConfig: {
         ...baseInput().runtimeConfig,
@@ -179,6 +179,31 @@ describe("buildCodexExpertOptions browser MCP config", () => {
       } as BuildExpertRuntimeOptionsInput["runtimeConfig"] & { reasoningEffort: string },
     }));
 
+    expect(options.config.model_reasoning_effort).toBe("high");
+  });
+
+  it("does not inherit the main Flow effort for an ephemeral Namer request", () => {
+    const options = buildCodexLeaderOptions({
+      role: "leader",
+      systemPrompt: "system",
+      cwd: "/tmp/cwd",
+      capabilities: ["read"],
+      mcpTools: [],
+      ephemeral: true,
+      runtimeConfig: {
+        id: "codex-namer",
+        fileName: "codex-namer.json",
+        name: "Codex Namer",
+        sdk: "codex",
+        authMode: "inherited",
+        baseUrl: "",
+        apiKey: "",
+        reasoningEffort: "xhigh",
+        models: [{ id: "gpt-5", name: "gpt-5" }],
+      } as BuildExpertRuntimeOptionsInput["runtimeConfig"] & { reasoningEffort: string },
+    });
+
+    expect(options.ephemeral).toBe(true);
     expect(options.config.model_reasoning_effort).toBeUndefined();
   });
 

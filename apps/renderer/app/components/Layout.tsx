@@ -448,7 +448,7 @@ export default function Layout() {
           const summary: SquadFlow = {
             id: detail.id,
             name: detail.name,
-            description: detail.description || '',
+            name_generation_status: detail.name_generation_status ?? 'generated',
             type: detail.flow_type || detail.type,
             status: detail.status,
             current_stage: detail.current_stage,
@@ -931,7 +931,8 @@ export default function Layout() {
         onClose={closeEditModal}
         onSubmit={(data) => handleSaveEdit(data, editingFlow?.id)}
         mode="edit"
-        initialData={editingFlow ? { name: editingFlow.name, description: editingFlow.description, type: editingFlow.type } : undefined}
+        initialData={editingFlow ? { name: editingFlow.name, type: editingFlow.type } : undefined}
+        nameLocked={editingFlow?.name_generation_status === 'pending'}
       />
       <DeleteFlowModal
         open={deleteModalFlow !== null}

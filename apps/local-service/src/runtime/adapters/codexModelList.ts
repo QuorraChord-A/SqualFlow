@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { config } from "../../config.js";
 import type { RuntimeConfig, RuntimeModelConfig } from "../../config/agentRuntimeConfig.js";
-import { officialCodexContextWindowK } from "../../config/runtimeModelContext.js";
+import { runtimeModelFromProviderValue } from "../modelDiscovery.js";
 import {
   buildCodexExpertOptions,
   codexAppServerArgs,
@@ -52,8 +52,10 @@ function modelFromValue(value: unknown): RuntimeModelConfig | null {
   const record = isRecord(value) ? value : {};
   const name = stringValue(record.model) || stringValue(record.id);
   if (!name.trim()) return null;
+  const metadata = runtimeModelFromProviderValue(record);
   return {
-    id: stringValue(record.id, name).trim(),
+    ...(metadata ?? {}),
+    id: stringValue(record.id, metadata?.id ?? name).trim(),
     name: name.trim(),
   };
 }
@@ -99,13 +101,7 @@ export async function listCodexRuntimeModels(
 
   try {
     await client.start();
-    const models = await withTimeout(requestAllModels(client), 20_000);
-    return runtimeConfig.authMode === "inherited"
-      ? models.map((model) => ({
-          ...model,
-          contextWindowK: officialCodexContextWindowK(model.name),
-        }))
-      : models;
+    return await withTimeout(requestAllModels(client), 20_000);
   } finally {
     client.close();
   }

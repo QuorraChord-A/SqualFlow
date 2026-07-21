@@ -58,6 +58,9 @@ export class CodexToUiChunkAdapter {
       this.trackAgentMessageItem(stringValue(params.itemId));
       const delta = stringValue(params.delta);
       this.lastAgentMessageText += delta;
+      // Keep the latest visible agent-message segment available even when a
+      // provider ends a turn before sending its canonical item/completed event.
+      this._finalAssistantText = this.lastAgentMessageText;
       return this.builder.textDelta(delta);
     }
     if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta") {
