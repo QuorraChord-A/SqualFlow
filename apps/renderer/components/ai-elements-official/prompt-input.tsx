@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type ReactNode } from "react";
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { ArrowUp, Square } from "lucide-react";
+import { ArrowUp } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface PromptInputProps {
@@ -137,13 +137,17 @@ export function PromptInput({
           title={stopActive ? "停止本轮" : "发送消息"}
           size="icon"
           className={cn(
-            "size-8 shrink-0 rounded-xl transition-all hover:scale-[1.03] disabled:cursor-not-allowed disabled:opacity-35",
+            "shrink-0 transition-all disabled:cursor-not-allowed disabled:opacity-35",
             stopActive
-              ? "bg-destructive text-destructive-foreground hover:bg-destructive/90"
-              : "bg-foreground text-background",
+              ? "size-9 rounded-full border border-foreground/10 bg-[color-mix(in_srgb,var(--foreground)_7%,var(--background))] text-foreground/80 shadow-[inset_0_1px_0_color-mix(in_srgb,var(--foreground)_4%,transparent)] hover:-translate-y-px hover:border-foreground/20 hover:bg-[color-mix(in_srgb,var(--foreground)_12%,var(--background))] hover:text-foreground active:translate-y-0 active:scale-[0.94] dark:border-foreground dark:bg-foreground dark:text-background dark:shadow-none dark:hover:border-foreground dark:hover:bg-foreground/90 dark:hover:text-background"
+              : "size-8 rounded-xl bg-foreground text-background hover:scale-[1.03]",
           )}
         >
-          {stopActive ? <Square className="size-[15px] fill-current" /> : <ArrowUp className="size-[17px]" />}
+          {stopActive ? (
+            <span aria-hidden="true" className="size-3 rounded-[2.5px] bg-current" />
+          ) : (
+            <ArrowUp className="size-[17px]" />
+          )}
         </Button>
       </div>
     </div>

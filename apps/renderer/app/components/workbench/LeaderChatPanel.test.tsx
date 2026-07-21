@@ -416,7 +416,10 @@ describe("LeaderChatPanel", () => {
 
     render(<Harness />);
 
-    expect(screen.getByRole("button", { name: "停止本轮" })).toBeVisible();
+    const stopButton = screen.getByRole("button", { name: "停止本轮" });
+    expect(stopButton).toBeVisible();
+    expect(stopButton).toHaveClass("size-9", "rounded-full", "dark:bg-foreground", "dark:text-background");
+    expect(stopButton.querySelector("span")).toHaveClass("size-3");
     expect(screen.getByPlaceholderText("继续输入以排队后续修改")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "settle flow" }));
