@@ -116,6 +116,12 @@ function expertUserMessage(content: string): CodexRuntimeInput {
   return textInput(content);
 }
 
+// Mid-turn text inputs are delivered via `turn/steer` by the query loop, so the
+// guide message shape is identical to a plain user message on Codex.
+function expertGuideMessage(content: string): CodexRuntimeInput {
+  return textInput(content);
+}
+
 function userInput(input: CodexRuntimeInput) {
   if (input.type !== "text") throw new Error(`Unsupported Codex runtime input: ${input.type}`);
   return codexContentWithAttachments(input.text, input.flowId, input.attachments, input.attachmentPlacement);
@@ -557,6 +563,15 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   async getContextUsage() {
     if (this.latestUsage) return this.latestUsage;
     throw new Error("Codex context usage is not available yet");
+  }
+
+  /**
+   * True while injected text input is still awaiting delivery: a mid-turn steer
+   * failed and fell back to `pendingInputs`, so this `turn/completed` is not the
+   * completion of the logical round — the queued input starts a follow-up turn.
+   */
+  hasPendingTextInputs() {
+    return this.pendingInputs.some((input) => input.type === "text");
   }
 
   async *[Symbol.asyncIterator](): AsyncIterator<unknown> {
@@ -1013,12 +1028,24 @@ export function createCodexAgentRuntimeAdapter(input: {
     createLeaderFlowNameMessage: leaderFlowNameMessage as AgentRuntimeAdapter["createLeaderFlowNameMessage"],
     createSingleTextInput: singleTextInput as AgentRuntimeAdapter["createSingleTextInput"],
     createExpertUserMessage: expertUserMessage as AgentRuntimeAdapter["createExpertUserMessage"],
+    createExpertGuideMessage: expertGuideMessage as AgentRuntimeAdapter["createExpertGuideMessage"],
     createOutputAdapter,
-    runQuery: (queryInput: RuntimeQueryInput) => normalizeRuntimeQuery(
-      new CodexRuntimeQuery(queryInput.prompt as AsyncIterable<unknown>, queryInput.options as CodexQueryOptions, clientFactory),
-      classifyEvent,
-      queryInput.previousContextUsage,
-    ),
+    runQuery: (queryInput: RuntimeQueryInput) => {
+      const query = new CodexRuntimeQuery(queryInput.prompt as AsyncIterable<unknown>, queryInput.options as CodexQueryOptions, clientFactory);
+      return normalizeRuntimeQuery(
+        query,
+        (raw, previous) => {
+          const event = classifyEvent(raw, previous);
+          // Steer-fallback race: the turn completed but the injected input is still
+          // queued for a follow-up turn, so this is not the real completion yet.
+          if (event.type === "turn_completed" && query.hasPendingTextInputs()) {
+            return { type: "turn_absorbed", reason: "injection_pending", result: event.result, raw };
+          }
+          return event;
+        },
+        queryInput.previousContextUsage,
+      );
+    },
     compactedTokenSnapshot,
     contextUsageSnapshot: contextUsageFromTokenUsage,
     compactContextInput: async function* () { yield { type: "compact" }; } as AgentRuntimeAdapter["compactContextInput"],

@@ -227,7 +227,6 @@ type DeferredTurn = {
   messageId: string;
   startedAt: string;
   currentTurnInput?: CurrentTurnInput;
-  guideResultDeferrals?: number;
   resolve: () => void;
   reject: (error: Error) => void;
   adapter?: RuntimeOutputAdapter;
@@ -356,7 +355,6 @@ class LeaderFlowStream {
       throw new Error("Leader session does not match the running stream");
     }
     input.beforeDeliver?.();
-    this.active.guideResultDeferrals = (this.active.guideResultDeferrals ?? 0) + 1;
     this.input.push(this.runtimeAdapter.createLeaderGuideMessage(
       input.flowId,
       input.content,
@@ -649,10 +647,6 @@ class LeaderFlowStream {
               userMessage: active.turn.userMessage ?? "",
               assistantMessage: active.adapter.finalAssistantText ?? "",
             });
-          }
-          if ((active.guideResultDeferrals ?? 0) > 0) {
-            active.guideResultDeferrals = (active.guideResultDeferrals ?? 0) - 1;
-            continue;
           }
           await this.complete(active);
         }
@@ -1311,7 +1305,10 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       },
       maxTurns: 80,
       resume: turn.resumeSessionId,
-      sessionId: turn.resumeSessionId ? undefined : turn.leaderSessionId,
+      // `leaderSessionId` may still be the local `ags-*` transcript channel on
+      // the first turn. Let the provider create its own session/thread ID, then
+      // persist the ID reported by the runtime output adapter.
+      sessionId: undefined,
       runtimeConfig: leaderRuntimeConfig.config,
       modelName: modelName ?? undefined,
       diagnostics: (event) => reportRuntimeDiagnostic({

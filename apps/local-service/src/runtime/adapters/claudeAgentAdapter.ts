@@ -157,6 +157,16 @@ function expertUserMessage(content: string): SDKUserMessage {
   };
 }
 
+function expertGuideMessage(content: string): SDKUserMessage {
+  return {
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text: content }] },
+    parent_tool_use_id: null,
+    priority: "now",
+    timestamp: new Date().toISOString(),
+  };
+}
+
 function isResultMessage(raw: unknown) {
   return typeof raw === "object" && raw !== null && (raw as { type?: unknown }).type === "result";
 }
@@ -179,6 +189,52 @@ function classifyEvent(raw: unknown, previous: RuntimePreviousContextUsage | und
   const result = resultInfo(raw);
   if (result) return { type: "turn_completed", result, raw };
   return { type: "other", raw };
+}
+
+type NowInjectionState = { inFlight: boolean };
+
+/**
+ * A `priority:"now"` injection kills the in-flight turn, which emits an extra result
+ * (`terminal_reason:"aborted_streaming"`, subtype `error_during_execution`) before the
+ * new turn processes the injected content. Adjudicate each result so runtimes only see
+ * the real completion: terminal_reason is authoritative; the subtype heuristic is the
+ * fallback for SDK builds that omit the optional field, and requires an injection in
+ * flight so genuine execution errors are never swallowed.
+ */
+function adjudicateEvent(
+  raw: unknown,
+  previous: RuntimePreviousContextUsage | undefined,
+  injection: NowInjectionState,
+): RuntimeEvent {
+  const event = classifyEvent(raw, previous);
+  if (event.type !== "turn_completed") return event;
+  const record = raw as { terminal_reason?: unknown; subtype?: unknown };
+  const terminalReason = typeof record.terminal_reason === "string" ? record.terminal_reason : null;
+  if (terminalReason === "aborted_streaming") {
+    injection.inFlight = false;
+    return { type: "turn_absorbed", reason: "aborted_streaming", result: event.result, raw };
+  }
+  if (terminalReason === null && record.subtype === "error_during_execution" && injection.inFlight) {
+    injection.inFlight = false;
+    return { type: "turn_absorbed", reason: "now_injection_echo", result: event.result, raw };
+  }
+  injection.inFlight = false;
+  return event;
+}
+
+function trackNowInjections(
+  prompt: string | AsyncIterable<SDKUserMessage>,
+  injection: NowInjectionState,
+): string | AsyncIterable<SDKUserMessage> {
+  if (typeof prompt === "string") return prompt;
+  return {
+    async *[Symbol.asyncIterator]() {
+      for await (const message of prompt) {
+        if ((message as { priority?: unknown }).priority === "now") injection.inFlight = true;
+        yield message;
+      }
+    },
+  };
 }
 
 function compactFailure(raw: unknown): string | null {
@@ -322,12 +378,20 @@ export function createClaudeAgentRuntimeAdapter(input: { query?: ClaudeQueryFn }
     createLeaderFlowNameMessage: leaderFlowNameMessage as AgentRuntimeAdapter["createLeaderFlowNameMessage"],
     createSingleTextInput: singleTextInput as AgentRuntimeAdapter["createSingleTextInput"],
     createExpertUserMessage: expertUserMessage as AgentRuntimeAdapter["createExpertUserMessage"],
+    createExpertGuideMessage: expertGuideMessage as AgentRuntimeAdapter["createExpertGuideMessage"],
     createOutputAdapter,
-    runQuery: (queryInput) => normalizeRuntimeQuery(
-      runQuery(normalizeQueryInput(queryInput)) as RuntimeRawQueryLike,
-      classifyEvent,
-      queryInput.previousContextUsage,
-    ),
+    runQuery: (queryInput) => {
+      const injection: NowInjectionState = { inFlight: false };
+      const normalized = normalizeQueryInput(queryInput);
+      return normalizeRuntimeQuery(
+        runQuery({
+          ...normalized,
+          prompt: trackNowInjections(normalized.prompt, injection),
+        }) as RuntimeRawQueryLike,
+        (raw, previous) => adjudicateEvent(raw, previous, injection),
+        queryInput.previousContextUsage,
+      );
+    },
     compactedTokenSnapshot,
     contextUsageSnapshot: (raw) => liveContextUsageToSnapshot(raw as SDKControlGetContextUsageResponse),
     compactContextInput: () => singleTextInput("/compact") as AsyncIterable<unknown>,

@@ -461,7 +461,7 @@ function ensureLeaderSession(
   });
   if (!created) throw new Error(`Unable to create Leader session for Flow ${flowId}`);
   // Use the local AgentSession ID as a transcript channel until the provider
-  // returns a real SDK session ID. It is never sent as a provider resume ID.
+  // returns a real SDK session ID. It is never sent as a provider session ID.
   connection.store.updateFlow(flowId, { leaderSessionId: created.id });
   return created;
 }

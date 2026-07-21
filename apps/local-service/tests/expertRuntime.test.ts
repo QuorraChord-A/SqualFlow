@@ -137,6 +137,7 @@ function createFakeNonClaudeAdapter(
     createLeaderFlowNameMessage: () => ({}),
     createSingleTextInput: async function* () {},
     createExpertUserMessage: (content) => ({ role: "user", content }),
+    createExpertGuideMessage: (content) => ({ role: "user", content, priority: "now" }),
     createOutputAdapter: (messageId) => fakeOutputAdapter(messageId),
     runQuery: () => ({
       async *[Symbol.asyncIterator]() {
@@ -1931,10 +1932,11 @@ describe("ExpertRuntime", () => {
     });
   });
 
-  it("queues a Leader follow-up into the active Expert streaming session", async () => {
+  it("steers a Leader follow-up into the running Expert turn and settles on the real completion", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
     const received: string[] = [];
+    const priorities: Array<string | undefined> = [];
     const chatJournal = new ChatJournal();
     let releaseFirst!: () => void;
     let markFirstReceived!: () => void;
@@ -1948,22 +1950,30 @@ describe("ExpertRuntime", () => {
       runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: (input) => ({
         async *[Symbol.asyncIterator]() {
           if (typeof input.prompt === "string") throw new Error("expected streaming input");
-          let turn = 0;
-          for await (const message of input.prompt) {
-            received.push(sdkUserMessageText(message));
-            if (turn === 0) {
-              markFirstReceived();
-              await firstRelease;
-            }
-            yield { type: "stream_event", event: { delta: { type: "text_delta", text: `done-${turn}` } } };
-            yield {
-              type: "result",
-              subtype: "success",
-              session_id: "sdk-expert-streaming",
-              is_error: false,
-            };
-            turn += 1;
-          }
+          const messages = input.prompt[Symbol.asyncIterator]();
+          const first = await messages.next();
+          received.push(sdkUserMessageText(first.value));
+          markFirstReceived();
+          await firstRelease;
+          const guide = await messages.next();
+          received.push(sdkUserMessageText(guide.value));
+          priorities.push(guide.value?.priority);
+          // Echo of the now-interrupted turn: absorbed by the adapter.
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            session_id: "sdk-expert-streaming",
+            is_error: true,
+            terminal_reason: "aborted_streaming",
+          };
+          // The follow-up turn merges the guidance and closes the round.
+          yield { type: "stream_event", event: { delta: { type: "text_delta", text: "done-final" } } };
+          yield {
+            type: "result",
+            subtype: "success",
+            session_id: "sdk-expert-streaming",
+            is_error: false,
+          };
         },
         close() {},
       }) }),
@@ -1997,6 +2007,7 @@ describe("ExpertRuntime", () => {
         raw: "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
       },
     ]);
+    expect(priorities).toEqual(["now"]);
     expect(parseMessageSegments(received[1] ?? "", flow.id)).toEqual([
       expect.objectContaining({
         kind: "event",
@@ -2013,10 +2024,10 @@ describe("ExpertRuntime", () => {
       ]);
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
       status: "completed",
-      resultJson: expect.stringContaining('"summary":"done-1"'),
+      resultJson: expect.stringContaining('"summary":"done-final"'),
     }));
     expect(store.listEventLog(flow.id).filter((event) => event.eventType === "agent_session.turn_completed"))
-      .toHaveLength(2);
+      .toHaveLength(1);
   });
 
   it("uses the dispatch prompt instead of only the stored task description", async () => {

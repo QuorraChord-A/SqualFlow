@@ -215,6 +215,8 @@ export type AgentRuntimeAdapter = {
   createLeaderFlowNameMessage: (flowId: string) => unknown;
   createSingleTextInput: (text: string) => AsyncIterable<unknown>;
   createExpertUserMessage: (content: string) => unknown;
+  /** Guide (steer) delivery: inject into the in-progress turn instead of queueing behind it. */
+  createExpertGuideMessage: (content: string) => unknown;
   createOutputAdapter: (messageId: string, metadata?: { startedAt?: string } | unknown) => RuntimeOutputAdapter;
   runQuery: RuntimeQueryFn;
   compactedTokenSnapshot: (

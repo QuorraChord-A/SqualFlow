@@ -150,12 +150,16 @@ async function firstPromptContent(input: ClaudeQueryInput | null): Promise<unkno
   return Array.isArray(content) ? content : [];
 }
 
-function createFlowLeader(store: ReturnType<typeof createStore>) {
+function createFlowLeader(
+  store: ReturnType<typeof createStore>,
+  flowId = "flow-1",
+  sessionId: string | null = "leader-session-1",
+) {
   const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-leader-project-"));
   dirs.push(projectRoot);
   const project = store.createProject({ name: "Leader Runtime Project", localPath: projectRoot });
   const flow = store.createFlow({
-    id: "flow-1",
+    id: flowId,
     workspaceId: "ws-default",
     name: "Hello",
     description: "",
@@ -168,7 +172,7 @@ function createFlowLeader(store: ReturnType<typeof createStore>) {
     userTurnId: null,
     taskId: null,
     expertId: "exp-leader",
-    sessionId: "leader-session-1",
+    sessionId,
     displayName: "Leader",
   });
   return { flow, leader };
@@ -182,6 +186,59 @@ afterEach(() => {
 });
 
 describe("LeaderRuntime platform event protocol", () => {
+  it("keeps local AgentSession IDs out of provider options when multiple Flows start concurrently", async () => {
+    const store = tempStore();
+    const first = createFlowLeader(store, "flow-concurrent-a", null);
+    const second = createFlowLeader(store, "flow-concurrent-b", null);
+    store.updateFlow(first.flow.id, { leaderSessionId: first.leader.id });
+    store.updateFlow(second.flow.id, { leaderSessionId: second.leader.id });
+    const providerSessionIds = ["sdk-flow-concurrent-a", "sdk-flow-concurrent-b"];
+    const capturedOptions: Array<ClaudeQueryInput["options"]> = [];
+    let queryIndex = 0;
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-unused", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: (input) => {
+        const providerSessionId = providerSessionIds[queryIndex++]!;
+        capturedOptions.push(input.options);
+        return createQuery([
+          { type: "system", subtype: "init", session_id: providerSessionId },
+          { type: "result", subtype: "success", session_id: providerSessionId, is_error: false },
+        ]);
+      } }),
+    });
+
+    await Promise.all([
+      runtime.runLeaderTurn({
+        flowId: first.flow.id,
+        kind: "user",
+        userMessage: "并发 Flow A",
+        leaderAgentSessionId: first.leader.id,
+        leaderSessionId: first.leader.id,
+      }),
+      runtime.runLeaderTurn({
+        flowId: second.flow.id,
+        kind: "user",
+        userMessage: "并发 Flow B",
+        leaderAgentSessionId: second.leader.id,
+        leaderSessionId: second.leader.id,
+      }),
+    ]);
+
+    expect(capturedOptions).toHaveLength(2);
+    expect(capturedOptions.every((options) => options?.sessionId === undefined)).toBe(true);
+    expect(capturedOptions.every((options) => options?.resume === undefined)).toBe(true);
+    const persistedProviderSessionIds = [
+      store.getAgentSession(first.leader.id)?.sessionId,
+      store.getAgentSession(second.leader.id)?.sessionId,
+    ];
+    expect(new Set(persistedProviderSessionIds)).toEqual(new Set(providerSessionIds));
+    expect(store.getFlow(first.flow.id)?.leaderSessionId).toBe(store.getAgentSession(first.leader.id)?.sessionId);
+    expect(store.getFlow(second.flow.id)?.leaderSessionId).toBe(store.getAgentSession(second.leader.id)?.sessionId);
+  });
+
   it("tells Leader that permission confirmations do not time out", () => {
     const store = tempStore();
     const { flow } = createFlowLeader(store);
@@ -1295,7 +1352,14 @@ describe("LeaderRuntime platform event protocol", () => {
           priorities.push(guide.value?.priority);
           const guideContent = Array.isArray(guide.value?.message.content) ? guide.value.message.content[0] : undefined;
           contents.push(guideContent?.type === "text" ? guideContent.text : "");
-          yield { type: "result", subtype: "success", session_id: "sdk-leader-before-guide-result", is_error: false };
+          // Echo of the now-interrupted turn: absorbed by the adapter, must not settle the round.
+          yield {
+            type: "result",
+            subtype: "error_during_execution",
+            session_id: "sdk-leader-before-guide-result",
+            is_error: true,
+            terminal_reason: "aborted_streaming",
+          };
           await resultReleased;
           yield { type: "result", subtype: "success", session_id: "sdk-leader-before-guide-result", is_error: false };
         },
@@ -1330,6 +1394,52 @@ describe("LeaderRuntime platform event protocol", () => {
       expect.objectContaining({ kind: "event", type: "guide", body: "补充当前 turn" }),
     ]);
     expect(store.getAgentSession(leader.id)?.sessionId).toBe("sdk-leader-before-guide-result");
+  });
+
+  it("completes a guided turn that produces a single completed result (Codex steer-merge semantics)", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    let signalFirstInput!: () => void;
+    const firstInput = new Promise<void>((resolve) => { signalFirstInput = resolve; });
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: (input) => ({
+        async *[Symbol.asyncIterator]() {
+          if (typeof input.prompt === "string") throw new Error("expected streaming input");
+          const messages = input.prompt[Symbol.asyncIterator]();
+          await messages.next();
+          signalFirstInput();
+          // Steer merged into the running turn: the guide arrives, then exactly ONE
+          // completed result closes the whole round (no interrupted-turn echo).
+          await messages.next();
+          yield { type: "result", subtype: "success", session_id: "sdk-leader-steer-merge", is_error: false };
+        },
+        close() {},
+      }) }),
+    });
+
+    const turn = runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "开始处理",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+    await firstInput;
+    const accepted = await runtime.guideLeaderTurn({
+      flowId: flow.id,
+      leaderAgentSessionId: leader.id,
+      content: "并入当前 turn",
+      messageId: "msg-guide-merge",
+    });
+
+    await turn;
+
+    expect(accepted).toEqual({ accepted: true, messageId: "msg-guide-merge" });
+    expect(store.getAgentSession(leader.id)?.status).toBe("completed");
   });
 
   it("waits for a card-paused stream to exit before resuming the same Leader session", async () => {
