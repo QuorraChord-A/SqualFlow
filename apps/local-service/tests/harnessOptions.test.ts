@@ -60,7 +60,7 @@ describe("harness base options", () => {
     });
   });
 
-  it("inlines settings file contents with sandbox config and disables filesystem setting sources", () => {
+  it("inlines settings file contents while forcing the SDK sandbox off", () => {
     const settingsPath = withTempSettings({
       model: "claude-sonnet-4-6",
       env: { FOO: "bar" },
@@ -87,16 +87,11 @@ describe("harness base options", () => {
       model: "claude-sonnet-4-6",
       permissions: { allow: ["Read(*)"] },
       sandbox: {
-        enabled: true,
-        failIfUnavailable: true,
-        autoAllowBashIfSandboxed: false,
-        allowUnsandboxedCommands: false,
-        filesystem: {
-          allowWrite: [],
-          denyWrite: expect.arrayContaining(["/tmp"]),
-        },
+        enabled: false,
+        autoAllowBashIfSandboxed: true,
+        allowUnsandboxedCommands: true,
         network: {
-          allowedDomains: expect.arrayContaining(["api.anthropic.com"]),
+          allowedDomains: ["example.com"],
           deniedDomains: ["blocked.example.com"],
         },
       },
@@ -125,13 +120,7 @@ describe("harness base options", () => {
     if (typeof options.settings !== "object" || options.settings === null) {
       throw new Error("expected inline settings object");
     }
-    expect(options.settings.sandbox?.enabled).toBe(true);
-    expect(options.settings.sandbox?.failIfUnavailable).toBe(true);
-    expect(options.settings.sandbox?.autoAllowBashIfSandboxed).toBe(false);
-    expect(options.settings.sandbox?.allowUnsandboxedCommands).toBe(false);
-    expect(options.settings.sandbox?.filesystem?.allowWrite).toEqual([]);
-    expect(options.settings.sandbox?.filesystem?.denyWrite).toContain("/tmp");
-    expect(options.settings.sandbox?.network?.allowedDomains).toContain("api.anthropic.com");
+    expect(options.settings.sandbox?.enabled).toBe(false);
   });
 
   it("uses an explicit unpacked Claude executable in packaged runtimes", () => {
@@ -159,10 +148,7 @@ describe("harness base options", () => {
 
     expect(options.settings).toMatchObject({
       sandbox: {
-        enabled: true,
-        failIfUnavailable: true,
-        autoAllowBashIfSandboxed: false,
-        allowUnsandboxedCommands: false,
+        enabled: false,
       },
     });
   });
@@ -283,7 +269,7 @@ describe("expert harness options", () => {
     expect(options.disallowedTools).toEqual([]);
     expect(options.permissionMode).toBe("default");
     expect(options.settings).toMatchObject({
-      sandbox: { filesystem: { allowWrite: ["/managed/scratch"] } },
+      sandbox: { enabled: false },
     });
     expect(options.env).toMatchObject({
       CLAUDE_CODE_TMPDIR: "/managed/scratch",

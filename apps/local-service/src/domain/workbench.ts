@@ -155,6 +155,6 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
       root_path: openUserTurn?.workRootPath || project?.localPath || null,
       tree_available: Boolean(openUserTurn?.workRootPath || project?.localPath),
     },
-    review: latestUserTurnReview(flowId),
+    review: latestUserTurnReview(store, flowId),
   };
 }

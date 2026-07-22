@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { Options, Settings } from "@anthropic-ai/claude-agent-sdk";
 import { config, getAgentSettingsPath, type AgentConfigRole } from "../../config.js";
@@ -13,17 +12,6 @@ import type { RuntimeToolPermission } from "./runtimeAdapter.js";
 import type { RuntimeToolInput } from "../capabilities.js";
 import { claudeCapabilityForTool, claudeToolsForCapabilities } from "./claudeCapabilities.js";
 import type { BuildExpertRuntimeOptionsInput, BuildLeaderRuntimeOptionsInput } from "./runtimeAdapter.js";
-
-export const CLAUDE_SANDBOX_ALLOWED_DOMAINS = [
-  "pypi.org",
-  "files.pythonhosted.org",
-  "registry.npmjs.org",
-  "npmjs.com",
-  "registry.npmmirror.com",
-  "github.com",
-  "raw.githubusercontent.com",
-  "api.anthropic.com",
-];
 
 type BuildClaudeBaseOptionsInput = {
   systemPrompt: string;
@@ -50,24 +38,6 @@ const permissionGatedClaudeTools = new Set(["Write", "Edit", "Bash"]);
 function legacySettingsRoleForRuntimeRole(role: AgentRuntimeRole): AgentConfigRole {
   if (role === "leader" || role === "coder" || role === "research") return role;
   return "expert";
-}
-
-function buildSandboxConfig(scratchDir?: string): NonNullable<Settings["sandbox"]> {
-  const allowedScratchDirs = scratchDir ? [path.resolve(scratchDir)] : [];
-  return {
-    enabled: true,
-    failIfUnavailable: true,
-    autoAllowBashIfSandboxed: false,
-    allowUnsandboxedCommands: false,
-    filesystem: {
-      allowWrite: allowedScratchDirs,
-      denyWrite: [...new Set(["/tmp", "/private/tmp", os.tmpdir()].map((item) => path.resolve(item)))],
-    },
-    network: {
-      allowedDomains: [...CLAUDE_SANDBOX_ALLOWED_DOMAINS, "localhost", "127.0.0.1"],
-      allowLocalBinding: true,
-    },
-  };
 }
 
 function readSettingsFile(settingsPath: string): Settings {
@@ -132,9 +102,6 @@ function buildInlineSettings(
 ): { settings: Settings; env?: Options["env"]; model?: string } {
   const parsedSettings = readSettingsFile(settingsPath);
   const { env: settingsEnv, ...settingsWithoutEnv } = parsedSettings;
-  const sandboxConfig = buildSandboxConfig(scratchDir);
-  const inheritedFilesystem = settingsWithoutEnv.sandbox?.filesystem;
-  const enforcedFilesystem = sandboxConfig.filesystem ?? {};
   const configuredModelName = explicitModelName?.trim()
     || selectedModelName(runtimeConfig)
     || (typeof settingsWithoutEnv.model === "string" ? settingsWithoutEnv.model : undefined);
@@ -163,20 +130,7 @@ function buildInlineSettings(
       ...(modelName ? { model: modelName } : {}),
       sandbox: {
         ...settingsWithoutEnv.sandbox,
-        ...sandboxConfig,
-        filesystem: {
-          ...inheritedFilesystem,
-          ...enforcedFilesystem,
-          allowWrite: enforcedFilesystem.allowWrite ?? [],
-          denyWrite: [...new Set([
-            ...(inheritedFilesystem?.denyWrite ?? []),
-            ...(enforcedFilesystem.denyWrite ?? []),
-          ])],
-        },
-        network: {
-          ...settingsWithoutEnv.sandbox?.network,
-          ...sandboxConfig.network,
-        },
+        enabled: false,
       },
     },
     env,

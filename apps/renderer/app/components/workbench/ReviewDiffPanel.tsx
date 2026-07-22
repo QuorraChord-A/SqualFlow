@@ -1,15 +1,19 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, FileText, Search } from "lucide-react";
-import type { UserTurnReview, UserTurnReviewFile, UserTurnReviewLine } from "../../hooks/useFlowWorkbench";
+import { ChevronDown, ChevronRight, FileText, FolderTree, Search } from "lucide-react";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import type { UserTurnReview, UserTurnReviewFile } from "../../hooks/useFlowWorkbench";
+import UnifiedDiff from "./UnifiedDiff";
 
 type ReviewDiffPanelProps = {
   review: UserTurnReview | null;
 };
 
 function statClassName(kind: "additions" | "deletions") {
-  return kind === "additions" ? "text-emerald-400" : "text-red-400";
+  return kind === "additions"
+    ? "text-emerald-700 dark:text-emerald-400"
+    : "text-red-700 dark:text-red-400";
 }
 
 function statusLabel(status: UserTurnReviewFile["status"]) {
@@ -19,9 +23,9 @@ function statusLabel(status: UserTurnReviewFile["status"]) {
 }
 
 function statusClassName(status: UserTurnReviewFile["status"]) {
-  if (status === "added") return "text-emerald-400";
-  if (status === "deleted") return "text-red-400";
-  return "text-sky-300";
+  if (status === "added") return "text-emerald-700 dark:text-emerald-400";
+  if (status === "deleted") return "text-red-700 dark:text-red-400";
+  return "text-sky-700 dark:text-sky-300";
 }
 
 function fileName(path: string) {
@@ -30,28 +34,6 @@ function fileName(path: string) {
 
 function groupName(path: string) {
   return path.includes("/") ? path.split("/", 1)[0] || "." : ".";
-}
-
-function DiffLine({ line }: { line: UserTurnReviewLine }) {
-  const marker = line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
-  const lineClassName = line.kind === "added"
-    ? "bg-emerald-500/12 text-emerald-100"
-    : line.kind === "removed"
-      ? "bg-red-500/12 text-red-100"
-      : "text-muted-foreground";
-
-  return (
-    <div className={`grid min-w-max grid-cols-[52px_52px_28px_minmax(0,1fr)] text-[12px] leading-6 ${lineClassName}`}>
-      <span className="select-none border-r border-border/45 px-2 text-right text-muted-foreground/80">
-        {line.old_line ?? ""}
-      </span>
-      <span className="select-none border-r border-border/45 px-2 text-right text-muted-foreground/80">
-        {line.new_line ?? ""}
-      </span>
-      <span className="select-none px-2 font-semibold">{marker}</span>
-      <code className="whitespace-pre px-2 font-mono">{line.text || " "}</code>
-    </div>
-  );
 }
 
 function ReviewFileCard({ file }: { file: UserTurnReviewFile }) {
@@ -72,9 +54,7 @@ function ReviewFileCard({ file }: { file: UserTurnReviewFile }) {
       </button>
       {expanded ? (
         <div className="max-h-[560px] overflow-auto bg-background/45 font-mono">
-          {file.lines.map((line, index) => (
-            <DiffLine key={`${file.path}:${index}:${line.kind}`} line={line} />
-          ))}
+          <UnifiedDiff lines={file.lines} lineNumbers="single" />
         </div>
       ) : null}
     </section>
@@ -97,7 +77,7 @@ function ReviewFileList({ files }: { files: UserTurnReviewFile[] }) {
   }, [files, normalizedQuery]);
 
   return (
-    <aside className="flex min-h-0 w-[292px] shrink-0 flex-col border-l border-border/70 bg-background/55">
+    <aside data-testid="review-file-list" className="flex min-h-0 w-[292px] shrink-0 flex-col border-l border-border/70 bg-background/55">
       <div className="border-b border-border/70 p-3">
         <label className="flex h-9 items-center gap-2 rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
           <Search className="size-4" />
@@ -140,6 +120,8 @@ function ReviewFileList({ files }: { files: UserTurnReviewFile[] }) {
 }
 
 export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
+  const [fileListVisible, setFileListVisible] = useState(true);
+
   if (!review) {
     return (
       <div data-testid="review-diff-empty" className="flex h-full items-center justify-center px-8 text-sm text-muted-foreground">
@@ -149,7 +131,11 @@ export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
   }
 
   return (
-    <div data-testid="review-diff-panel" className="flex h-full min-h-0 bg-background">
+    <div
+      data-testid="review-diff-panel"
+      data-file-list-visible={fileListVisible ? "true" : "false"}
+      className="flex h-full min-h-0 bg-background"
+    >
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border/70 px-4">
           <h2 className="text-sm font-semibold">本轮对话</h2>
@@ -159,6 +145,18 @@ export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
             <span className="rounded-md border border-border bg-muted/40 px-2 py-1">修改 {review.totals.modified}</span>
             <span className="rounded-md border border-border bg-muted/40 px-2 py-1">新增 {review.totals.added}</span>
             <span className="rounded-md border border-border bg-muted/40 px-2 py-1">删除 {review.totals.deleted}</span>
+            <Tooltip>
+              <TooltipTrigger
+                data-testid="review-file-list-visibility-toggle"
+                type="button"
+                aria-label={fileListVisible ? "隐藏文件列表" : "显示文件列表"}
+                onClick={() => setFileListVisible((visible) => !visible)}
+                className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              >
+                <FolderTree className="size-4" />
+              </TooltipTrigger>
+              <TooltipContent>{fileListVisible ? "隐藏文件列表" : "显示文件列表"}</TooltipContent>
+            </Tooltip>
           </div>
         </header>
         <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
@@ -167,7 +165,7 @@ export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
           ))}
         </div>
       </div>
-      <ReviewFileList files={review.files} />
+      {fileListVisible ? <ReviewFileList files={review.files} /> : null}
     </div>
   );
 }

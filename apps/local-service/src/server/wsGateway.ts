@@ -29,6 +29,7 @@ import type { OrchestrationScheduler } from "../runtime/orchestrationScheduler.j
 import { captureUserTurnBaseline } from "../runtime/userTurnDiff.js";
 import type { ChatJournal, ChatUIMessage } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
+import { finishInterruptedTurn } from "../ws/pusher.js";
 import type { OperationalLogger } from "../observability/operationalLogger.js";
 import { logWsWire } from "../observability/wsWireLog.js";
 
@@ -1697,6 +1698,35 @@ async function publishInterruptedSessions(
       || (session.expertId === "exp-leader" && session.taskId === null));
 
   for (const session of sessions) {
+    const interruptedTiming = await finishInterruptedTurn({
+      flowId,
+      sessionId: session.sessionId ?? session.id,
+      transcriptId: session.flowExpertId ?? session.id,
+      agentSessionId: session.id,
+      flowExpertId: session.flowExpertId ?? session.id,
+      eventBus: connection.eventBus,
+      chatJournal: connection.chatJournal,
+      ...(logId ? { logId } : {}),
+    });
+    if (interruptedTiming) {
+      connection.store.appendEventLog({
+        flowId,
+        userTurnId: session.userTurnId,
+        taskId: session.taskId,
+        agentSessionId: session.id,
+        eventType: "agent_session.turn_completed",
+        payload: {
+          message_id: interruptedTiming.messageId,
+          flow_expert_id: session.flowExpertId,
+          agent_session_id: session.id,
+          sdk_session_id: session.sessionId,
+          started_at: interruptedTiming.startedAt,
+          finished_at: interruptedTiming.finishedAt,
+          duration_ms: interruptedTiming.durationMs,
+          turn_outcome: "interrupted",
+        },
+      });
+    }
     const updated = connection.store.updateAgentSessionStatus(session.id, "interrupted");
     if (!updated) continue;
     await connection.eventBus.publish(flowId, ServerWsMessageSchema.parse({

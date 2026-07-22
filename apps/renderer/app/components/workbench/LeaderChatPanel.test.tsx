@@ -2107,7 +2107,7 @@ describe("LeaderChatPanel", () => {
     expect(onOpenSpecPreview).toHaveBeenCalledWith("spec-1", "Hello_World_abcd.md");
   });
 
-  it("renders one product work header for multiple leader SDK turns in the same user turn", async () => {
+  it("does not render a product work header for text-only SDK turns", async () => {
     renderPanel();
 
     act(() => {
@@ -2168,10 +2168,7 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(await screen.findByText("最终结论。")).toBeInTheDocument();
-    expect(screen.getAllByText(/^已工作/)).toHaveLength(1);
-    const header = screen.getByText("已工作 4 秒");
-    expect(header).toBeInTheDocument();
-    expect(header.compareDocumentPosition(screen.getByText("最终结论。")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
     expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
   });
 
@@ -2231,10 +2228,7 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(await screen.findByText("调研完成。")).toBeInTheDocument();
-    expect(screen.getAllByText(/^已工作/)).toHaveLength(1);
-    const header = screen.getByText("已工作 17 秒");
-    expect(header).toBeInTheDocument();
-    expect(header.compareDocumentPosition(screen.getByText("调研完成。")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
     expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
     expect(screen.queryByText("已工作 10 秒")).toBeNull();
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
@@ -2302,16 +2296,13 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(await screen.findByText("调研完成。")).toBeInTheDocument();
-    expect(screen.getAllByText(/^已工作/)).toHaveLength(1);
-    const header = screen.getByText("已工作 17 秒");
-    expect(header).toBeInTheDocument();
-    expect(header.compareDocumentPosition(screen.getByText("调研完成。")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
     expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
     expect(screen.queryByText("已工作 10 秒")).toBeNull();
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
   });
 
-  it("keeps the product turn working after an internal leader turn has finished", async () => {
+  it("keeps a text-only product turn active without showing a work header", async () => {
     renderPanel();
 
     act(() => {
@@ -2359,11 +2350,11 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(await screen.findByText("我去调研。")).toBeInTheDocument();
-    expect(screen.getByText(/工作中/)).toBeInTheDocument();
+    expect(screen.queryByText(/工作中/)).not.toBeInTheDocument();
     expect(screen.queryByText("已工作 1 秒")).toBeNull();
   });
 
-  it("shows a paused product turn while waiting for a decision card", async () => {
+  it("does not show work timing for a text-only paused product turn", async () => {
     renderPanel();
 
     act(() => {
@@ -2404,7 +2395,7 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(await screen.findByText("需要你确认一个选项。")).toBeInTheDocument();
-    expect(screen.getByText("等待你确认 · 已工作 3 秒")).toBeInTheDocument();
+    expect(screen.queryByText("等待你确认 · 已工作 3 秒")).not.toBeInTheDocument();
     expect(screen.queryByText(/工作中/)).toBeNull();
   });
 

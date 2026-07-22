@@ -2504,12 +2504,25 @@ describe("Fastify app and websocket gateway", () => {
     const cancelledExpertTurns: unknown[] = [];
     const eventBus = new EventBus();
     eventBus.subscribe(flow.id, "test-client", (message) => sent.push(message));
+    const chatJournal = new ChatJournal(store);
+    chatJournal.record(flow.id, leader.sessionId!, {
+      type: "start",
+      messageId: "msg-leader-active",
+      seq: 0,
+      startedAt: new Date(Date.now() - 2_000).toISOString(),
+    }, leader.id, leader.id);
+    chatJournal.record(flow.id, expertSession.sessionId!, {
+      type: "start",
+      messageId: "msg-expert-active",
+      seq: 0,
+      startedAt: new Date(Date.now() - 1_000).toISOString(),
+    }, flowExpert.id, expertSession.id);
     const connection: WsConnection = {
       clientId: "client-1",
       subscriptions: new Set(),
       eventBus,
       store,
-      chatJournal: new ChatJournal(),
+      chatJournal,
       leaderRuntime: {
         runLeaderTurn: async () => undefined,
         cancelFlow: (flowId) => {
@@ -2545,6 +2558,16 @@ describe("Fastify app and websocket gateway", () => {
     expect(store.getAgentSession(expertSession.id)?.status).toBe("interrupted");
     expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
     expect(store.getPlanRun(planRun.id)?.status).toBe("cancelled");
+    expect(store.listTranscriptEntries(flow.id, leader.id)[0]?.message).toEqual(expect.objectContaining({
+      metadata: { turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) },
+    }));
+    expect(store.listTranscriptEntries(flow.id, flowExpert.id)[0]?.message).toEqual(expect.objectContaining({
+      metadata: { turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) },
+    }));
+    expect(store.listEventLog(flow.id).filter((event) => {
+      if (event.eventType !== "agent_session.turn_completed") return false;
+      return JSON.parse(event.payloadJson).turn_outcome === "interrupted";
+    })).toHaveLength(2);
     expect(sent).toContainEqual(expect.objectContaining({
       type: "plan_run:event",
       flow_id: flow.id,

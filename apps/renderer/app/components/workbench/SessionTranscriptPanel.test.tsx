@@ -575,27 +575,19 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("注意必须要求你没满足")).toBeInTheDocument();
     expect(screen.getAllByText("已引导对话")).toHaveLength(1);
     expect(screen.getByText("最终回答内容")).toBeInTheDocument();
-    expect(screen.queryByText("调研中间过程")).not.toBeInTheDocument();
-    expect(screen.queryByText("收到，改成15遍")).not.toBeInTheDocument();
-    expect(screen.queryByText("收到，改成18遍")).not.toBeInTheDocument();
-    expect(screen.queryByText("最终段过程文本")).not.toBeInTheDocument();
-
-    const header = screen.getByText("已工作 41 秒");
-    const firstGuide = screen.getByText("15遍吧");
-    const secondGuide = screen.getByText("18遍吧");
-    const thirdGuide = screen.getByText("注意必须要求你没满足");
-    const finalText = screen.getByText("最终回答内容");
-    expect(header.compareDocumentPosition(firstGuide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(firstGuide.compareDocumentPosition(secondGuide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(secondGuide.compareDocumentPosition(thirdGuide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(thirdGuide.compareDocumentPosition(finalText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-
-    await user.click(screen.getByRole("button", { name: /已工作 41 秒/ }));
-
     expect(screen.getByText("调研中间过程")).toBeInTheDocument();
     expect(screen.getByText("收到，改成15遍")).toBeInTheDocument();
     expect(screen.getByText("收到，改成18遍")).toBeInTheDocument();
     expect(screen.getByText("最终段过程文本")).toBeInTheDocument();
+    expect(screen.queryByText("已工作 41 秒")).not.toBeInTheDocument();
+
+    const firstGuide = screen.getByText("15遍吧");
+    const secondGuide = screen.getByText("18遍吧");
+    const thirdGuide = screen.getByText("注意必须要求你没满足");
+    const finalText = screen.getByText("最终回答内容");
+    expect(firstGuide.compareDocumentPosition(secondGuide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(secondGuide.compareDocumentPosition(thirdGuide) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(thirdGuide.compareDocumentPosition(finalText) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(screen.getAllByText("已引导对话")).toHaveLength(1);
   });
 
@@ -754,13 +746,13 @@ describe("SessionTranscriptPanel", () => {
     });
 
     expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
-    expect(screen.getByText(/^工作中/)).toBeInTheDocument();
+    expect(screen.queryByText(/^工作中/)).not.toBeInTheDocument();
     expect(screen.getByText("引导前内容")).toBeInTheDocument();
     expect(screen.getByText("总共改为18次吧")).toBeInTheDocument();
     expect(screen.getByText("引导后继续执行")).toBeInTheDocument();
   });
 
-  it("collapses a live completed guided turn without waiting for a refreshed history snapshot", () => {
+  it("keeps a tool-free live completed guided turn expanded without waiting for a refreshed history snapshot", () => {
     const activeTurn = {
       id: "turn-live-guided",
       triggerMessageId: "msg-user-live",
@@ -900,7 +892,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("改成18次吧")).toBeInTheDocument();
     expect(screen.getByText("12次就行")).toBeInTheDocument();
     expect(screen.getByText(/最终总结/)).toBeInTheDocument();
-    expect(screen.queryByText("过程 A")).not.toBeInTheDocument();
+    expect(screen.getByText("过程 A")).toBeInTheDocument();
   });
 
   it("keeps the final canonical guide segment when live user turn state is not available", () => {
@@ -1107,7 +1099,7 @@ describe("SessionTranscriptPanel", () => {
 
     expect(screen.getByText("25次就可以。")).toBeInTheDocument();
     expect(screen.getByText(/完整目录调研总结/)).toBeInTheDocument();
-    expect(screen.queryByText("过程 A")).not.toBeInTheDocument();
+    expect(screen.getByText("过程 A")).toBeInTheDocument();
   });
 
   it("loads an Expert tab by flow_expert_id", async () => {
@@ -1789,7 +1781,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("已工作 3 秒")).toBeInTheDocument();
   });
 
-  it("shows the 已工作 X 秒 header for a finished turn after its first text", () => {
+  it("does not show the work header for a finished text-only turn", () => {
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
     emit({
@@ -1814,7 +1806,7 @@ describe("SessionTranscriptPanel", () => {
     });
 
     expect(screen.getByText("hello")).toBeInTheDocument();
-    expect(screen.getByText("已工作 3 秒")).toBeInTheDocument();
+    expect(screen.queryByText("已工作 3 秒")).not.toBeInTheDocument();
   });
 
   it("keeps the original start time through text and tool events", () => {

@@ -165,10 +165,12 @@ function hasLiveBlock(blocks: TranscriptBlock[]): boolean {
   ));
 }
 
-function hasObservableWork(blocks: TranscriptBlock[]): boolean {
+function hasToolWork(blocks: TranscriptBlock[]): boolean {
   return blocks.some((block) => (
-    (block.type === "text" && block.text.trim().length > 0)
-    || (block.type === "tool-group" && block.tools.length > 0)
+    (block.type === "tool-group" && block.tools.length > 0)
+    || block.type === "decision-card"
+    || block.type === "spec-card"
+    || block.type === "plan-card"
   ));
 }
 
@@ -521,7 +523,7 @@ export default function AssistantTurn({
     : showReasoning
       ? blocks
       : mergeAdjacentToolGroups(blocks.filter((block) => block.type !== "reasoning"));
-  const hasObservableWorkStarted = hasObservableWork(visibleBlocks);
+  const hasToolWorkStarted = hasToolWork(visibleBlocks);
   const shouldShowLiveThinking = isLiveTurn && (
     activity === "reasoning" || blocks.some((block) => (
       block.type === "thinking" || (block.type === "reasoning" && block.streaming)
@@ -537,11 +539,12 @@ export default function AssistantTurn({
   const stillLive = finishedSignal && hasLiveBlock(visibleBlocks);
   const effectiveActivity: TranscriptActivity | undefined = waitingForUser ? "finished" : stillLive ? "waiting" : activity;
   const isFinished = (finishedSignal || waitingForUser) && !stillLive;
-  const { canCollapse, pinnedIds } = computeTurnCollapsePlan(visibleBlocks, effectiveActivity);
-  // Keep the pre-output phase visually quiet: reasoning alone remains
-  // "正在思考". Reveal the accumulated timer and divider only after the
-  // first non-empty assistant text or actual tool call becomes observable.
-  const showWorkHeader = waitingForUser || hasObservableWorkStarted;
+  const collapsePlan = computeTurnCollapsePlan(visibleBlocks, effectiveActivity);
+  const canCollapse = hasToolWorkStarted && collapsePlan.canCollapse;
+  const pinnedIds = collapsePlan.pinnedIds;
+  // Work timing represents actual tool execution. Plain assistant text and
+  // reasoning do not reveal the timer or its divider.
+  const showWorkHeader = hasToolWorkStarted;
   // Scope the collapse-state slot to the finished/live phase separately: a
   // turn's id is stable across its whole lifetime, but the "default
   // collapsed" value while running (always false, nothing to hide yet) must

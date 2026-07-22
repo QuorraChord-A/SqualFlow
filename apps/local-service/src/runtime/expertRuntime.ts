@@ -36,7 +36,7 @@ import { beginControlledEditReview, consumeControlledEditToolResults } from "../
 import { checkPermission, type CheckPermissionArgs, type PermissionResult } from "../permissions/permissionPolicy.js";
 import type { ChatJournal } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
-import { WsPusher } from "../ws/pusher.js";
+import { finishInterruptedTurn, WsPusher } from "../ws/pusher.js";
 import type { McpBridgeRegistry } from "../mcp/mcpBridgeRegistry.js";
 import type { DesktopBridge } from "../server/desktopBridge.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
@@ -386,7 +386,7 @@ class FlowExpertWorker {
     // Fixed steer delivery: inject into the running turn (Claude priority:"now",
     // Codex turn/steer). The adapter absorbs the interrupted-turn echo, so the
     // task still settles on the single real turn_completed.
-    void active.pusher.publishUserMessage(content, `msg-user-${Date.now()}-${randomUUID().slice(0, 6)}`);
+    void active.pusher.publishRunningGuide(content, `msg-user-${Date.now()}-${randomUUID().slice(0, 6)}`);
     this.input.push(this.runtimeAdapter.createExpertGuideMessage(buildPlatformEvent({
       flowId: active.task.flowId,
       type: "leader_message",
@@ -453,6 +453,34 @@ class FlowExpertWorker {
     const cancelled = failureResult("Expert task cancelled by Leader", "interrupted");
     const task = this.deps.store.cancelTask(active.task.id, JSON.stringify(cancelled));
     if (!task) return { cancelled: false, queued: [] as FlowExpertTurn[] };
+    const interruptedTiming = await finishInterruptedTurn({
+      flowId: active.task.flowId,
+      sessionId: this.sessionId,
+      transcriptId: this.flowExpertId,
+      agentSessionId: active.agentSessionId,
+      flowExpertId: this.flowExpertId,
+      eventBus: this.deps.eventBus,
+      chatJournal: this.deps.chatJournal,
+    });
+    if (interruptedTiming) {
+      this.deps.store.appendEventLog({
+        flowId: active.task.flowId,
+        userTurnId: active.task.userTurnId,
+        taskId: active.task.id,
+        agentSessionId: active.agentSessionId,
+        eventType: "agent_session.turn_completed",
+        payload: {
+          message_id: interruptedTiming.messageId,
+          flow_expert_id: this.flowExpertId,
+          agent_session_id: active.agentSessionId,
+          sdk_session_id: active.adapter?.sdkSessionId ?? this.sessionId,
+          started_at: interruptedTiming.startedAt,
+          finished_at: interruptedTiming.finishedAt,
+          duration_ms: interruptedTiming.durationMs,
+          turn_outcome: "interrupted",
+        },
+      });
+    }
     const queued = this.queued.splice(0).filter((turn) => {
       const belongsToCancelledSession = turn.task.id === active.task.id
         && turn.agentSessionId === active.agentSessionId;

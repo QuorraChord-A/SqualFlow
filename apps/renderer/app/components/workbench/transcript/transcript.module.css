@@ -1009,42 +1009,6 @@
   line-height: 1.5;
 }
 
-.diffRow {
-  display: grid;
-  min-width: max-content;
-  grid-template-columns: 48px max-content;
-}
-
-.diffRowAdd { background: var(--sqt-diff-add-bg); }
-.diffRowDel { background: var(--sqt-diff-del-bg); }
-.diffRowNeutral { background: var(--sqt-diff-neutral-bg); }
-
-.diffLine {
-  border-right: 1px solid var(--sqt-line-strong);
-  color: var(--sqt-green);
-  padding: 3px 10px;
-  text-align: right;
-  user-select: none;
-}
-
-.diffRowDel .diffLine {
-  color: var(--sqt-red);
-}
-
-.diffCode {
-  color: var(--sqt-text);
-  padding: 3px 13px;
-  white-space: pre;
-}
-
-.diffRowAdd .diffCode {
-  color: var(--sqt-text);
-}
-
-.diffRowDel .diffCode {
-  color: var(--sqt-red);
-}
-
 .plus { color: var(--sqt-green); font-weight: 760; }
 .minus { color: var(--sqt-red); font-weight: 760; }
 

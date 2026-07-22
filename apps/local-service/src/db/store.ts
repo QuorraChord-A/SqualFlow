@@ -351,6 +351,7 @@ export function createStore(databasePath: string) {
       DELETE FROM decision_cards;
       DELETE FROM decision_card_leader_inputs;
       DELETE FROM flow_read_states;
+      DELETE FROM user_turn_reviews;
       DELETE FROM user_turns;
       DELETE FROM artifacts;
       DELETE FROM spec_revisions;
@@ -528,6 +529,12 @@ export function createStore(databasePath: string) {
         CREATE UNIQUE INDEX IF NOT EXISTS decision_card_leader_inputs_action_unique
           ON decision_card_leader_inputs(flow_id, card_id, client_action_id);
         CREATE TABLE IF NOT EXISTS flow_read_states (flow_id TEXT NOT NULL, viewer_id TEXT NOT NULL DEFAULT 'local-default', last_read_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (flow_id, viewer_id));
+        CREATE TABLE IF NOT EXISTS user_turn_reviews (
+          flow_id TEXT PRIMARY KEY,
+          user_turn_id TEXT NOT NULL,
+          review_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS user_turns (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
@@ -1771,6 +1778,7 @@ export function createStore(databasePath: string) {
         db.delete(decisionCards).where(eq(decisionCards.flowId, flowId)).run();
         db.delete(decisionCardLeaderInputs).where(eq(decisionCardLeaderInputs.flowId, flowId)).run();
         db.delete(flowReadStates).where(eq(flowReadStates.flowId, flowId)).run();
+        sqlite.prepare("DELETE FROM user_turn_reviews WHERE flow_id = ?").run(flowId);
         db.delete(userTurns).where(eq(userTurns.flowId, flowId)).run();
         db.delete(artifacts).where(eq(artifacts.flowId, flowId)).run();
         db.delete(specRevisions).where(eq(specRevisions.flowId, flowId)).run();
@@ -3549,6 +3557,32 @@ export function createStore(databasePath: string) {
     },
     listArtifacts(flowId: string) {
       return db.select().from(artifacts).where(eq(artifacts.flowId, flowId)).all();
+    },
+    replaceLatestUserTurnReview(input: { flowId: string; userTurnId: string; reviewJson: string }) {
+      const updatedAt = now();
+      sqlite.prepare(`
+        INSERT INTO user_turn_reviews (flow_id, user_turn_id, review_json, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(flow_id) DO UPDATE SET
+          user_turn_id = excluded.user_turn_id,
+          review_json = excluded.review_json,
+          updated_at = excluded.updated_at
+      `).run(input.flowId, input.userTurnId, input.reviewJson, updatedAt);
+    },
+    getLatestUserTurnReview(flowId: string) {
+      return sqlite.prepare(`
+        SELECT flow_id AS flowId, user_turn_id AS userTurnId, review_json AS reviewJson, updated_at AS updatedAt
+        FROM user_turn_reviews
+        WHERE flow_id = ?
+      `).get(flowId) as {
+        flowId: string;
+        userTurnId: string;
+        reviewJson: string;
+        updatedAt: string;
+      } | undefined;
+    },
+    deleteLatestUserTurnReview(flowId: string) {
+      sqlite.prepare("DELETE FROM user_turn_reviews WHERE flow_id = ?").run(flowId);
     },
     createArtifact(input: { flowId: string; userTurnId?: string | null; taskId?: string | null; type: string; title: string; content: string; sourceAgentSessionId?: string }) {
       const timestamp = now();

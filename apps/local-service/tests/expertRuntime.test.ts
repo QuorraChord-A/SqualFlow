@@ -1201,10 +1201,11 @@ describe("ExpertRuntime", () => {
     const events: any[] = [];
     const eventBus = new EventBus();
     eventBus.subscribe(flow.id, "cancel-task-test", (message) => events.push(message));
+    const chatJournal = new ChatJournal(store);
     const runtime = createExpertRuntime({
       store,
       eventBus,
-      chatJournal: new ChatJournal(),
+      chatJournal,
       onTaskFinished: (event) => { finished.push(event); },
       runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: (queryInput) => ({
         async *[Symbol.asyncIterator]() {
@@ -1258,6 +1259,22 @@ describe("ExpertRuntime", () => {
     expect(events).toContainEqual(expect.objectContaining({
       type: "task:event",
       data: expect.objectContaining({ task_id: task.id, status: "cancelled" }),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "session:transcript_event",
+      data: expect.objectContaining({
+        event: expect.objectContaining({ type: "turn-finished", durationMs: expect.any(Number) }),
+      }),
+    }));
+    const turnCompletion = store.listEventLog(flow.id).find((event) => {
+      if (event.eventType !== "agent_session.turn_completed") return false;
+      return JSON.parse(event.payloadJson).turn_outcome === "interrupted";
+    });
+    expect(JSON.parse(turnCompletion!.payloadJson)).toEqual(expect.objectContaining({
+      agent_session_id: session.id,
+      turn_outcome: "interrupted",
+      finished_at: expect.any(String),
+      duration_ms: expect.any(Number),
     }));
     const completion = store.listEventLog(flow.id).find((event) => event.eventType === "agent_session.completion");
     expect(JSON.parse(completion!.payloadJson)).toEqual(expect.objectContaining({ status: "cancelled" }));
@@ -1953,6 +1970,7 @@ describe("ExpertRuntime", () => {
           const messages = input.prompt[Symbol.asyncIterator]();
           const first = await messages.next();
           received.push(sdkUserMessageText(first.value));
+          yield { type: "stream_event", event: { delta: { type: "text_delta", text: "before-guide" } } };
           markFirstReceived();
           await firstRelease;
           const guide = await messages.next();
@@ -2015,16 +2033,25 @@ describe("ExpertRuntime", () => {
         body: "Also preserve backwards compatibility",
       }),
     ]);
-    expect(chatJournal.getHistory(flow.id, "sdk-expert-streaming")
-      .filter((message) => message.role === "user")
-      .map((message) => message.content))
-      .toEqual([
-        "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
-        "Also preserve backwards compatibility",
-      ]);
+    expect(chatJournal.getHistory(flow.id, "sdk-expert-streaming").map((message) => ({
+      role: message.role,
+      content: message.content,
+      localMessageKind: message.metadata && "localMessageKind" in message.metadata
+        ? message.metadata.localMessageKind
+        : undefined,
+    }))).toEqual([
+      {
+        role: "user",
+        content: "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
+        localMessageKind: undefined,
+      },
+      { role: "assistant", content: "before-guide", localMessageKind: undefined },
+      { role: "user", content: "Also preserve backwards compatibility", localMessageKind: "running-guide" },
+      { role: "assistant", content: "done-final", localMessageKind: undefined },
+    ]);
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
       status: "completed",
-      resultJson: expect.stringContaining('"summary":"done-final"'),
+      resultJson: expect.stringContaining('"summary":"before-guidedone-final"'),
     }));
     expect(store.listEventLog(flow.id).filter((event) => event.eventType === "agent_session.turn_completed"))
       .toHaveLength(1);

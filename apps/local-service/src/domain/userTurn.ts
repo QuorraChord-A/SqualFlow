@@ -97,7 +97,7 @@ export async function completeUserTurnIfSettled(input: {
   saveUserTurnDiffArtifacts(input.store, input.userTurnId);
   const completed = input.store.completeUserTurn(input.userTurnId);
   if (completed) {
-    finalizeUserTurnReview(completed.flowId, completed.id, completed.completedAt);
+    finalizeUserTurnReview(input.store, completed.flowId, completed.id, completed.completedAt);
     await publishUserTurnEvent(input.eventBus, completed, input.logId);
   }
   return completed;

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { TextDecoder } from "node:util";
+import type { Store } from "../db/store.js";
 import type { RuntimeCapability } from "./runtimeCapabilities.js";
 
 const MAX_REVIEW_FILE_BYTES = 1_000_000;
@@ -62,7 +63,6 @@ type DraftReview = {
 
 const pendingEdits = new Map<string, PendingControlledEdit>();
 const draftReviews = new Map<string, DraftReview>();
-const latestReviews = new Map<string, UserTurnReview>();
 
 function toolPath(input: Record<string, unknown>): string | null {
   for (const key of ["file_path", "path"]) {
@@ -175,7 +175,12 @@ export function consumeControlledEditToolResults(eventOrRaw: unknown) {
   }
 }
 
-export function finalizeUserTurnReview(flowId: string, userTurnId: string, completedAt: string | null) {
+export function finalizeUserTurnReview(
+  store: Store,
+  flowId: string,
+  userTurnId: string,
+  completedAt: string | null,
+) {
   for (const [toolUseId, pending] of pendingEdits) {
     if (pending.userTurnId === userTurnId) pendingEdits.delete(toolUseId);
   }
@@ -183,7 +188,7 @@ export function finalizeUserTurnReview(flowId: string, userTurnId: string, compl
   const draft = draftReviews.get(userTurnId);
   draftReviews.delete(userTurnId);
   if (!draft) {
-    latestReviews.delete(flowId);
+    store.deleteLatestUserTurnReview(flowId);
     return null;
   }
 
@@ -210,7 +215,7 @@ export function finalizeUserTurnReview(flowId: string, userTurnId: string, compl
     .sort((left, right) => left.path.localeCompare(right.path));
 
   if (files.length === 0) {
-    latestReviews.delete(flowId);
+    store.deleteLatestUserTurnReview(flowId);
     return null;
   }
 
@@ -228,16 +233,27 @@ export function finalizeUserTurnReview(flowId: string, userTurnId: string, compl
     },
     files,
   };
-  latestReviews.set(flowId, review);
+  store.replaceLatestUserTurnReview({
+    flowId,
+    userTurnId,
+    reviewJson: JSON.stringify(review),
+  });
   return review;
 }
 
-export function latestUserTurnReview(flowId: string): UserTurnReview | null {
-  return latestReviews.get(flowId) ?? null;
+export function latestUserTurnReview(store: Store, flowId: string): UserTurnReview | null {
+  const stored = store.getLatestUserTurnReview(flowId);
+  if (!stored) return null;
+  try {
+    const review = JSON.parse(stored.reviewJson) as UserTurnReview;
+    return review.flow_id === flowId && review.user_turn_id === stored.userTurnId ? review : null;
+  } catch {
+    return null;
+  }
 }
 
-export function clearUserTurnReview(flowId: string) {
-  latestReviews.delete(flowId);
+export function clearUserTurnReview(flowId: string, store?: Store) {
+  store?.deleteLatestUserTurnReview(flowId);
   for (const [userTurnId, draft] of draftReviews) {
     if (draft.flowId === flowId) draftReviews.delete(userTurnId);
   }

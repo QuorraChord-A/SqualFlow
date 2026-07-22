@@ -1022,7 +1022,7 @@ describe("TranscriptTimelineRenderer", () => {
       expect(screen.queryByText(/工作中 \d 秒/)).toBeNull();
     });
 
-    it("shows the accumulated work header after the first text appears", () => {
+    it("does not show a work header for assistant text without a tool call", () => {
       const startedAt = new Date(Date.now() - 2000).toISOString();
       const turnTiming: TurnTiming = {
         startedAt,
@@ -1043,10 +1043,32 @@ describe("TranscriptTimelineRenderer", () => {
         />,
       );
 
-      const workLabel = screen.getByText(/工作中 \d 秒/);
-      expect(workLabel.className).toContain("animatedStatusText");
+      expect(screen.queryByText(/工作中 \d 秒/)).toBeNull();
       expect(screen.getByText("开始处理。")).toBeVisible();
       expect(screen.queryByText("正在思考")).toBeNull();
+    });
+
+    it("does not show a finished work header for a plain-text turn", () => {
+      const turnTiming: TurnTiming = {
+        startedAt: "2026-06-19T10:00:00.000Z",
+        finishedAt: "2026-06-19T10:00:02.000Z",
+        durationMs: 2000,
+      };
+
+      render(
+        <TranscriptTimelineRenderer
+          blocks={[{ id: "text-1", type: "text", text: "好的，等你决定好了再改。", streaming: false }]}
+          flowId="flow-1"
+          decisionCardsById={new Map()}
+          specCardsById={new Map()}
+          onSpecOpen={() => {}}
+          activity="finished"
+          turnTiming={turnTiming}
+        />,
+      );
+
+      expect(screen.getByText("好的，等你决定好了再改。")).toBeVisible();
+      expect(screen.queryByText(/已工作 \d 秒/)).toBeNull();
     });
 
     it("shows the accumulated work header after the first MCP tool call", () => {

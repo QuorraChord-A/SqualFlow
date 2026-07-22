@@ -1,35 +1,26 @@
 import type { ToolPresentation } from "./types";
+import UnifiedDiff, { type UnifiedDiffLine } from "../UnifiedDiff";
 import styles from "./transcript.module.css";
 
 function DiffDetail({ oldString, newString }: { oldString: string; newString: string }) {
   const oldLines = oldString === "" ? [] : oldString.split("\n");
   const newLines = newString === "" ? [] : newString.split("\n");
-  const rows: Array<{ kind: "add" | "del" | "neutral"; no: string; code: string }> = [];
+  const rows: UnifiedDiffLine[] = [];
 
   oldLines.forEach((line, index) => {
-    rows.push({ kind: "del", no: String(index + 1), code: line });
+    rows.push({ kind: "removed", old_line: index + 1, new_line: null, text: line });
   });
   newLines.forEach((line, index) => {
-    rows.push({ kind: "add", no: String(index + 1), code: line });
+    rows.push({ kind: "added", old_line: null, new_line: index + 1, text: line });
   });
 
   if (rows.length === 0) {
-    rows.push({ kind: "neutral", no: "", code: "无变更" });
+    rows.push({ kind: "context", old_line: null, new_line: null, text: "无变更" });
   }
 
   return (
     <div className={styles.diffCard}>
-      {rows.map((row, index) => (
-        <div
-          key={index}
-          className={`${styles.diffRow} ${
-            row.kind === "add" ? styles.diffRowAdd : row.kind === "del" ? styles.diffRowDel : styles.diffRowNeutral
-          }`}
-        >
-          <div className={styles.diffLine}>{row.no}</div>
-          <div className={styles.diffCode}>{row.code}</div>
-        </div>
-      ))}
+      <UnifiedDiff lines={rows} lineNumbers="single" />
     </div>
   );
 }
