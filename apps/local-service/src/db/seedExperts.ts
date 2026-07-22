@@ -41,7 +41,7 @@ const stableExperts: Array<{
     role: "leader",
     name: "Leader",
     personNameCandidates: [],
-    builtinTools: ["read", "search"],
+    builtinTools: ["read", "write", "edit", "search", "shell"],
     mcpTools: [...leaderMcpTools, ...BROWSER_MCP_TOOL_NAMES],
   },
   {

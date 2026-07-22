@@ -221,12 +221,13 @@ export function buildClaudeLeaderOptions(input: BuildLeaderRuntimeOptionsInput):
     systemPrompt: input.systemPrompt,
     cwd: input.cwd,
     scratchDir: input.scratchDir,
-    // 内置只读工具不进 allowedTools 预授权名单：预授权会跳过 canUseTool，
+    // Leader 内置工具不进 allowedTools 预授权名单：预授权会跳过 canUseTool，
     // 而 Leader 的路径守卫（checkLeaderToolPath）依赖 canUseTool 对每次调用生效。
     allowedTools: [...input.mcpTools],
     tools: builtinTools,
     disallowedTools: [],
     settingsPath: getAgentSettingsPath("leader"),
+    additionalDirectories: [path.parse(input.cwd).root],
     canUseTool: toClaudeCanUseTool(input.canUseTool),
     maxTurns: input.maxTurns,
     ephemeral: input.ephemeral,

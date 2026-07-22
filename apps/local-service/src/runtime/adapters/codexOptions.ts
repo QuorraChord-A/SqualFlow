@@ -185,6 +185,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
     : runtimeModelContextWindowK(runtimeConfig, model);
   const contextWindow = contextWindowK === null ? null : Math.round(contextWindowK * 1_000);
   const scratchDir = input.scratchDir ? path.resolve(input.scratchDir) : null;
+  const isLeader = input.role === "leader";
   const env = withCodexRuntimeProfileEnv(codexEnv(runtimeConfig), runtimeProfile);
   if (scratchDir) {
     env.TMPDIR = scratchDir;
@@ -208,11 +209,12 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
         model_auto_compact_token_limit: modelAutoCompactTokenLimit(contextWindow),
       }),
       "sandbox_workspace_write.exclude_tmpdir_env_var": true,
-      "sandbox_workspace_write.exclude_slash_tmp": true,
+      "sandbox_workspace_write.exclude_slash_tmp": !isLeader,
       "sandbox_workspace_write.writable_roots": [
         path.resolve(input.cwd),
         ...(scratchDir ? [scratchDir] : []),
         codexPoolTempDir(runtimeConfig?.authMode === "inherited" ? "official" : "custom"),
+        ...(isLeader ? ["/tmp"] : []),
       ],
     },
     env,

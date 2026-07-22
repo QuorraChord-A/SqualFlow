@@ -255,6 +255,27 @@ describe("buildCodexExpertOptions browser MCP config", () => {
 });
 
 describe("buildCodexLeaderOptions MCP config", () => {
+  it("gives a writable Leader the project and slash tmp without changing Expert sandbox defaults", () => {
+    const options = buildCodexLeaderOptions({
+      role: "leader",
+      systemPrompt: "system",
+      cwd: "/repo/project",
+      scratchDir: "/managed/leader-scratch",
+      capabilities: ["read", "write", "edit", "search", "shell"],
+      mcpTools: [],
+    });
+
+    expect(options.sandboxMode).toBe("workspace-write");
+    expect(options.config["sandbox_workspace_write.exclude_tmpdir_env_var"]).toBe(true);
+    expect(options.config["sandbox_workspace_write.exclude_slash_tmp"]).toBe(false);
+    expect(options.config["sandbox_workspace_write.writable_roots"]).toEqual([
+      "/repo/project",
+      "/managed/leader-scratch",
+      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/custom$/),
+      "/tmp",
+    ]);
+  });
+
   it("exposes Leader and browser MCP namespaces to the external official-login runtime", () => {
     process.env.SQUADFLOW_EXTERNAL_CODEX_COMMAND = "/usr/local/bin/codex";
     const options = buildCodexLeaderOptions({

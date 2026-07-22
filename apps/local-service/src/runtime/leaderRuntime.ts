@@ -55,7 +55,12 @@ import {
 import { normalizeFlowName } from "../domain/flowName.js";
 import { computeFlowSig } from "../protocol/platformEvent.js";
 import { normalizeRuntimeReasoningEffort } from "./codexReasoningEffort.js";
-import { checkPermission, type CheckPermissionArgs } from "../permissions/permissionPolicy.js";
+import {
+  checkPermission,
+  isInsideAnyDir,
+  resolveInputPath,
+  type CheckPermissionArgs,
+} from "../permissions/permissionPolicy.js";
 import { classifyLeaderResumeFailure } from "./adapters/runtimeErrors.js";
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
@@ -201,19 +206,20 @@ function withRuntimeEnvironmentNote(systemPrompt: string, cwd: string, flowId: s
   ].join("\n");
 }
 
-function isInsideDir(resolvedPath: string, dir: string) {
-  const relative = path.relative(path.resolve(dir), resolvedPath);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-function checkLeaderToolPath(request: RuntimeToolPermissionRequest, allowedRoots: string[]) {
+function checkLeaderToolPath(request: RuntimeToolPermissionRequest, writableRoots: string[]) {
   const rawPath = request.input.path;
   if (!rawPath || !path.isAbsolute(rawPath)) return { behavior: "allow" as const };
-  const resolved = path.resolve(rawPath);
-  if (allowedRoots.some((root) => isInsideDir(resolved, root))) return { behavior: "allow" as const };
+  if (request.capability === "read" || request.capability === "search") {
+    return { behavior: "allow" as const };
+  }
+  if (request.capability !== "write" && request.capability !== "edit") {
+    return { behavior: "allow" as const };
+  }
+  const resolved = resolveInputPath(path.parse(rawPath).root, rawPath);
+  if (isInsideAnyDir(resolved, writableRoots)) return { behavior: "allow" as const };
   return {
     behavior: "deny" as const,
-    message: `路径在项目根之外：${rawPath}。当前项目根目录是 ${allowedRoots[0]}，请改用该目录下的路径。`,
+    message: `仅允许写入当前项目目录或 /tmp，当前路径：${rawPath}。当前项目根目录是 ${writableRoots[0]}。`,
   };
 }
 
@@ -1269,7 +1275,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       mcpTools: leaderMcpTools,
       mcpServerConfigs,
       canUseTool: async (request) => {
-        const pathResult = checkLeaderToolPath(request, [cwd, leaderScratchDir]);
+        const leaderWritableDirs = [cwd, "/tmp"];
+        const pathResult = checkLeaderToolPath(request, leaderWritableDirs);
         if (pathResult.behavior === "deny") return pathResult;
         const permissionArgs: CheckPermissionArgs = {
           toolName: request.providerToolName,
@@ -1278,11 +1285,10 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           providerInput: request.providerInput,
           cwd,
           readableDirs: [cwd, leaderScratchDir],
-          writableDirs: [cwd],
-          authorizedCapabilities: request.capability
-            ? new Set([...leaderCapabilities, request.capability])
-            : leaderCapabilities,
-          authorizedTools: new Set([...authorizedTools, request.providerToolName]),
+          writableDirs: leaderWritableDirs,
+          allowReadOutsideDirs: true,
+          authorizedCapabilities: leaderCapabilities,
+          authorizedTools,
           riskMode: input.store.getRiskMode(turn.flowId),
         };
         const result = checkPermission(permissionArgs);

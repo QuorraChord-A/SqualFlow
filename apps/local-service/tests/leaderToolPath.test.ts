@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import { describe, expect, it } from "vitest";
 import { leaderRuntimeTestExports } from "../src/runtime/leaderRuntime.js";
 import type { RuntimeToolPermissionRequest } from "../src/runtime/adapters/runtimeAdapter.js";
@@ -8,10 +9,13 @@ const PROJECT_ROOT = "/Users/tester/workspace/demo-app";
 const SCRATCH_DIR = "/Users/tester/.squadflow/scratch/flow-1/leader";
 const ROOTS = [PROJECT_ROOT, SCRATCH_DIR];
 
-function request(inputPath: string | null): RuntimeToolPermissionRequest {
+function request(
+  inputPath: string | null,
+  capability: RuntimeToolPermissionRequest["capability"] = "read",
+): RuntimeToolPermissionRequest {
   return {
-    capability: "read",
-    providerToolName: "Read",
+    capability,
+    providerToolName: capability === "write" ? "Write" : "Read",
     input: { path: inputPath },
     providerInput: inputPath ? { file_path: inputPath } : {},
     context: { toolUseId: null },
@@ -19,12 +23,12 @@ function request(inputPath: string | null): RuntimeToolPermissionRequest {
 }
 
 describe("checkLeaderToolPath", () => {
-  it("allows paths inside the project root", () => {
+  it("allows reads inside the project root", () => {
     expect(checkLeaderToolPath(request(`${PROJECT_ROOT}/src/index.ts`), ROOTS)).toEqual({ behavior: "allow" });
     expect(checkLeaderToolPath(request(PROJECT_ROOT), ROOTS)).toEqual({ behavior: "allow" });
   });
 
-  it("allows paths inside the leader scratch dir", () => {
+  it("allows reads inside the leader scratch dir", () => {
     expect(checkLeaderToolPath(request(`${SCRATCH_DIR}/screenshot.png`), ROOTS)).toEqual({ behavior: "allow" });
   });
 
@@ -33,19 +37,22 @@ describe("checkLeaderToolPath", () => {
     expect(checkLeaderToolPath(request(null), ROOTS)).toEqual({ behavior: "allow" });
   });
 
-  it("denies hallucinated absolute paths with a corrective message", () => {
-    for (const bad of ["/home/user/project/src", "/", "/tmp", "/workspace", "/Users/user/project"]) {
-      const result = checkLeaderToolPath(request(bad), ROOTS);
-      expect(result.behavior).toBe("deny");
-      if (result.behavior === "deny") {
-        expect(result.message).toContain(bad);
-        expect(result.message).toContain(PROJECT_ROOT);
-      }
+  it("allows read and search paths outside the project", () => {
+    for (const externalPath of ["/home/user/project/src", "/", "/tmp", "/workspace", "/Users/user/project"]) {
+      expect(checkLeaderToolPath(request(externalPath, "read"), ROOTS)).toEqual({ behavior: "allow" });
+      expect(checkLeaderToolPath(request(externalPath, "search"), ROOTS)).toEqual({ behavior: "allow" });
     }
   });
 
-  it("denies prefix-sibling directories outside the root", () => {
-    const result = checkLeaderToolPath(request(`${PROJECT_ROOT}-copy/file.ts`), ROOTS);
+  it("allows writes only inside configured writable roots", () => {
+    expect(checkLeaderToolPath(request(`${PROJECT_ROOT}/src/index.ts`, "write"), [PROJECT_ROOT, "/tmp"]))
+      .toEqual({ behavior: "allow" });
+    expect(checkLeaderToolPath(request("/tmp/leader-note.txt", "write"), [PROJECT_ROOT, "/tmp"]))
+      .toEqual({ behavior: "allow" });
+    expect(checkLeaderToolPath(request(`${fs.realpathSync.native("/tmp")}/leader-note.txt`, "write"), [PROJECT_ROOT, "/tmp"]))
+      .toEqual({ behavior: "allow" });
+
+    const result = checkLeaderToolPath(request(`${PROJECT_ROOT}-copy/file.ts`, "write"), [PROJECT_ROOT, "/tmp"]);
     expect(result.behavior).toBe("deny");
   });
 });

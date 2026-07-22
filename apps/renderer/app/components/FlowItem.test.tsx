@@ -158,6 +158,52 @@ describe("FlowItem", () => {
     await waitFor(() => {
       expect(screen.getByText("clarify")).toBeInTheDocument();
       expect(screen.getByText("ccdev")).toBeInTheDocument();
+      expect(screen.getByText("flow-1")).toBeInTheDocument();
+    });
+  });
+
+  it("shows localized flow status labels in the details card", async () => {
+    render(
+      <FlowItem
+        flow={{ ...flow, status: "idle", has_pending_decision: false }}
+        projectName="ccdev"
+        selected={false}
+        onClick={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "打开流程：等待确认的 Flow" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("空闲")).toBeInTheDocument();
+      expect(screen.queryByText("idle")).not.toBeInTheDocument();
+    });
+  });
+
+  it("suppresses the details card and keeps the action icon while the action menu is open", async () => {
+    const user = userEvent.setup();
+    render(
+      <FlowItem
+        flow={{ ...flow, has_pending_decision: false }}
+        projectName="ccdev"
+        selected
+        onClick={vi.fn()}
+        onEditFlow={vi.fn()}
+      />,
+    );
+
+    const item = screen.getByRole("button", { name: "打开流程：等待确认的 Flow" });
+    const trigger = screen.getByRole("button", { name: "等待确认的 Flow 操作" });
+    await user.click(trigger);
+    expect(await screen.findByRole("menuitem", { name: "修改流程" })).toBeInTheDocument();
+
+    fireEvent.mouseLeave(item);
+    fireEvent.mouseEnter(item);
+
+    await waitFor(() => {
+      expect(screen.queryByText("clarify")).not.toBeInTheDocument();
+      expect(screen.queryByTestId("flow-item-timestamp")).not.toBeInTheDocument();
+      expect(screen.getByTestId("flow-item-menu-open-icon")).toBeInTheDocument();
     });
   });
 

@@ -370,6 +370,7 @@ describe("leader harness options", () => {
     expect(options.sessionId).toBeUndefined();
     expect(options.disallowedTools).toEqual([]);
     expect(options.tools).toEqual(["Read", "Write", "Edit", "Glob", "Grep", "Bash"]);
+    expect(options.additionalDirectories).toEqual([path.parse("/repo").root]);
     // 内置工具不再预授权：必须每次经过 canUseTool 路径守卫
     expect(options.allowedTools).toEqual(["mcp__leader__create_tasks"]);
     expect(options.mcpServers).toEqual({

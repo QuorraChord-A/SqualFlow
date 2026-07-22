@@ -1,5 +1,6 @@
 'use client';
 
+import { useState } from 'react';
 import { Copy, Folder, FolderOpen, MoreHorizontal, Pencil, Pin, PinOff, Trash2, XCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import {
@@ -42,6 +43,12 @@ export function formatRelativeTime(value: string, currentTime = Date.now()) {
   return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(new Date(value));
 }
 
+const FLOW_STATUS_LABELS: Record<SquadFlow['status'], string> = {
+  ready: '未开始',
+  active: '进行中',
+  idle: '空闲',
+};
+
 export default function FlowItem({
   flow,
   projectName,
@@ -54,6 +61,8 @@ export default function FlowItem({
   onTogglePinned,
   displayTimestamp = flow.updated_at,
 }: FlowItemProps) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const displayName = useFlowNameReveal(flow.name);
   const isStreaming = Boolean(flow.is_streaming);
   const isRunning = flow.status === 'active';
@@ -92,7 +101,10 @@ export default function FlowItem({
   };
 
   return (
-    <HoverCard>
+    <HoverCard
+      open={!menuOpen && detailsOpen}
+      onOpenChange={(open) => setDetailsOpen(menuOpen ? false : open)}
+    >
       <HoverCardTrigger
         delay={350}
         closeDelay={120}
@@ -173,14 +185,26 @@ export default function FlowItem({
           </span>
         )}
 
-        <DropdownMenu>
+        <DropdownMenu
+          open={menuOpen}
+          onOpenChange={(open) => {
+            setMenuOpen(open);
+            if (open) setDetailsOpen(false);
+          }}
+        >
           <DropdownMenuTrigger
             aria-label={`${flow.name} 操作`}
             onClick={(event) => event.stopPropagation()}
             className="flex h-7 min-w-10 shrink-0 items-center justify-end rounded px-1 text-[11px] text-muted-foreground transition-[width,min-width,background-color,color] hover:text-foreground group-hover:w-7 group-hover:min-w-7 group-hover:justify-center group-hover:bg-background/70 group-hover:px-0 data-popup-open:w-7 data-popup-open:min-w-7 data-popup-open:justify-center data-popup-open:bg-background/70 data-popup-open:px-0"
           >
-            <span className="group-hover:hidden">{formatRelativeTime(displayTimestamp)}</span>
-            <MoreHorizontal className="hidden size-4 group-hover:block" />
+            {menuOpen ? (
+              <MoreHorizontal data-testid="flow-item-menu-open-icon" className="size-4" />
+            ) : (
+              <>
+                <span data-testid="flow-item-timestamp" className="group-hover:hidden">{formatRelativeTime(displayTimestamp)}</span>
+                <MoreHorizontal className="hidden size-4 group-hover:block" />
+              </>
+            )}
           </DropdownMenuTrigger>
 
           <DropdownMenuContent align="end" side="bottom" className="w-40">
@@ -254,12 +278,16 @@ export default function FlowItem({
           <div className="flex items-center justify-between gap-3">
             <span>状态</span>
             <span className="truncate text-foreground">
-              {flow.has_pending_decision ? '等待操作' : flow.status}
+              {flow.has_pending_decision ? '等待操作' : FLOW_STATUS_LABELS[flow.status]}
             </span>
           </div>
           <div className="flex items-center gap-1.5">
             <Folder className="size-3.5 shrink-0" />
             <span className="truncate">{projectName ?? '未绑定项目'}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span>Flow ID</span>
+            <span className="truncate text-foreground" title={flow.id}>{flow.id}</span>
           </div>
         </div>
       </HoverCardContent>

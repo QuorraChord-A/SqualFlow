@@ -20,6 +20,7 @@ export type CheckPermissionArgs = {
   cwd: string;
   readableDirs: readonly string[];
   writableDirs: readonly string[];
+  allowReadOutsideDirs?: boolean;
   authorizedTools: ReadonlySet<string> | readonly string[];
   authorizedCapabilities?: ReadonlySet<RuntimeCapability> | readonly RuntimeCapability[];
   riskMode?: "auto_edit" | "full_access";
@@ -1021,6 +1022,9 @@ export function checkPermission(args: CheckPermissionArgs): PermissionResult {
   }
 
   if (capability === "read" || capability === "search") {
+    if (args.allowReadOutsideDirs === true) {
+      return { behavior: "allow" };
+    }
     const filePath = inputPath(input);
     if (!filePath) {
       return { behavior: "allow" };

@@ -752,7 +752,13 @@ describe("store", () => {
 
     const leader = store.getExpert("exp-leader");
     expect(leader?.systemPrompt).toBe(DEFAULT_LEADER_SYSTEM_PROMPT);
-    expect(JSON.parse(leader?.builtinTools ?? "[]")).toEqual(["read", "search"]);
+    expect(JSON.parse(leader?.builtinTools ?? "[]")).toEqual([
+      "read",
+      "write",
+      "edit",
+      "search",
+      "shell",
+    ]);
     const leaderMcpTools = JSON.parse(leader?.mcpTools ?? "[]") as string[];
     expect(leaderMcpTools).not.toContain("save_spec");
     expect(leaderMcpTools).not.toContain("save_artifact");

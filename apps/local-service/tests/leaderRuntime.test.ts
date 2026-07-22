@@ -1784,7 +1784,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(store.getAgentSession(leader.id)?.status).toBe("failed");
   });
 
-  it("allows leader configured write and command tools through the permission callback", async () => {
+  it("exposes all local Leader tools except web search and enforces read/write path policy", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     const userTurn = beginUserTurn(store, { flowId: flow.id });
@@ -1815,13 +1815,54 @@ describe("LeaderRuntime platform event protocol", () => {
       leaderSessionId: leader.sessionId ?? leader.id,
     });
 
+    expect(captured?.options?.tools).toEqual(["Read", "Write", "Edit", "Glob", "Grep", "Bash"]);
+    for (const builtinTool of ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]) {
+      expect(captured?.options?.allowedTools).not.toContain(builtinTool);
+    }
+    expect(captured?.options?.tools).not.toContain("WebSearch");
+
+    await expect(
+      captured?.options?.canUseTool?.(
+        "Read",
+        { file_path: "/etc/hosts" },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({ behavior: "allow", updatedInput: { file_path: "/etc/hosts" } });
+    await expect(
+      captured?.options?.canUseTool?.(
+        "Write",
+        { file_path: "/tmp/squadflow-leader-note.txt", content: "note" },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { file_path: "/tmp/squadflow-leader-note.txt", content: "note" },
+    });
+    await expect(
+      captured?.options?.canUseTool?.(
+        "Write",
+        { file_path: "/etc/squadflow-leader-denied.txt", content: "no" },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual(expect.objectContaining({ behavior: "deny" }));
+
     await expect(
       captured?.options?.canUseTool?.("Bash", { command: "echo hi" }, { signal: new AbortController().signal }),
     ).resolves.toEqual({ behavior: "allow", updatedInput: { command: "echo hi" } });
     await expect(
       captured?.options?.canUseTool?.(
         "Bash",
-        { command: 'echo -n "should_not_exist" > /tmp/squadflow-leader-boundary.txt' },
+        { command: 'echo -n "temporary" > /tmp/squadflow-leader-boundary.txt' },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { command: 'echo -n "temporary" > /tmp/squadflow-leader-boundary.txt' },
+    });
+    await expect(
+      captured?.options?.canUseTool?.(
+        "Bash",
+        { command: 'echo -n "denied" > /etc/squadflow-leader-boundary.txt' },
         { signal: new AbortController().signal },
       ),
     ).resolves.toEqual({
@@ -1842,7 +1883,7 @@ describe("LeaderRuntime platform event protocol", () => {
     await expect(
       captured?.options?.canUseTool?.(
         "Bash",
-        { command: 'echo -n "should_not_exist" > /tmp/squadflow-leader-boundary.txt' },
+        { command: 'echo -n "denied" > /etc/squadflow-leader-boundary.txt' },
         { signal: new AbortController().signal },
       ),
     ).resolves.toEqual({
@@ -1852,6 +1893,43 @@ describe("LeaderRuntime platform event protocol", () => {
     await expect(
       captured?.options?.canUseTool?.("Bash", { command: "rm -rf build" }, { signal: new AbortController().signal }),
     ).resolves.toEqual({ behavior: "allow", updatedInput: { command: "rm -rf build" } });
+  });
+
+  it("does not let an unexpected Claude tool request add its own capability", async () => {
+    const store = tempStore();
+    store.sqlite.prepare("UPDATE experts SET builtin_tools = ? WHERE id = ?")
+      .run(JSON.stringify(["read", "search"]), "exp-leader");
+    const { flow, leader } = createFlowLeader(store);
+    let captured: ClaudeQueryInput | null = null;
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: (input) => {
+        captured = input;
+        return createQuery([
+          { type: "result", subtype: "success", session_id: "sdk-leader-static-auth", is_error: false },
+        ]);
+      } }),
+    });
+
+    await runtime.runLeaderTurn({
+      flowId: flow.id,
+      kind: "user",
+      userMessage: "inspect",
+      leaderAgentSessionId: leader.id,
+      leaderSessionId: leader.sessionId ?? leader.id,
+    });
+
+    expect(captured?.options?.tools).toEqual(["Read", "Glob", "Grep"]);
+    await expect(
+      captured?.options?.canUseTool?.(
+        "Bash",
+        { command: "echo hi" },
+        { signal: new AbortController().signal },
+      ),
+    ).resolves.toEqual({ behavior: "deny", message: "tool not allowed by expert: Bash" });
   });
 
   it("captures platform diff artifacts before completing a quiescent UserTurn", async () => {

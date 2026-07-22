@@ -170,6 +170,22 @@ describe("checkPermission", () => {
     }
   });
 
+  it("allows Leader reads outside configured directories when explicitly enabled", () => {
+    const result = checkPermission({
+      toolName: "Read",
+      capability: "read",
+      input: { path: "/etc/hosts" },
+      cwd: "/repo/work",
+      readableDirs: ["/repo/work"],
+      writableDirs: ["/repo/work", "/tmp"],
+      allowReadOutsideDirs: true,
+      authorizedCapabilities: new Set(["read"]),
+      authorizedTools: new Set<string>(),
+    });
+
+    expect(result).toEqual({ behavior: "allow" });
+  });
+
   it("denies read tools outside allowed directories without prefix false positives", () => {
     const result = checkPermission({
       toolName: "read",
