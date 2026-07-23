@@ -410,6 +410,7 @@ desktop_verify_release_artifacts() (
   local bundled_codex_manifest="$APP_PATH/Contents/Resources/codex-runtime/darwin-$ARCH/manifest.json"
   local app_executable="$PRODUCT_NAME"
   local temp_dir mount_dir mounted_app mounted_codex smoke_pid
+  local ports_file backend_port="" renderer_port="" backend_ready=0 frontend_ready=0
 
   desktop_verify_artifacts
 
@@ -477,9 +478,22 @@ desktop_verify_release_artifacts() (
     "$temp_dir/user-data" \
     "$temp_dir/app-smoke.log"
   smoke_pid="$DESKTOP_SMOKE_PID"
-  sleep 5
-  if ! kill -0 "$smoke_pid" 2>/dev/null; then
-    echo "Packaged app exited during startup smoke test:" >&2
+  ports_file="$temp_dir/user-data/service-ports.json"
+  for _ in {1..60}; do
+    kill -0 "$smoke_pid" 2>/dev/null || break
+    if [[ -z "$backend_port" && -f "$ports_file" ]]; then
+      backend_port="$(node -p "require(process.argv[1]).backend || ''" "$ports_file" 2>/dev/null || true)"
+      renderer_port="$(node -p "require(process.argv[1]).renderer || ''" "$ports_file" 2>/dev/null || true)"
+    fi
+    if [[ -n "$backend_port" && -n "$renderer_port" ]]; then
+      curl --max-time 2 -fsS "http://127.0.0.1:$backend_port/health" >/dev/null 2>&1 && backend_ready=1
+      curl --max-time 2 -fsS "http://127.0.0.1:$renderer_port/" >/dev/null 2>&1 && frontend_ready=1
+    fi
+    [[ "$backend_ready" = "1" && "$frontend_ready" = "1" ]] && break
+    sleep 1
+  done
+  if [[ "$backend_ready" != "1" || "$frontend_ready" != "1" ]]; then
+    echo "Packaged app services did not become ready during startup smoke test (backend=$backend_ready frontend=$frontend_ready):" >&2
     if desktop_release_log_contains_credential "$temp_dir/app-smoke.log"; then
       echo "Startup log suppressed because it contained signing or notarization credential material." >&2
     else

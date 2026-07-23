@@ -1,5 +1,7 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 const { createDesktopUpdater } = require("../app-updater");
 const releaseConfig = require("../electron-builder.release.cjs");
@@ -38,6 +40,24 @@ test("keeps private self-signed update testing separate from the notarized relea
   }]);
   assert.equal(privateTestConfig.mac.notarize, false);
   assert.equal(releaseConfig.mac.notarize, true);
+  assert.equal(privateTestConfig.mac.entitlements, "build/entitlements.mac.private-test.plist");
+  assert.equal(
+    privateTestConfig.mac.entitlementsInherit,
+    "build/entitlements.mac.private-test.inherit.plist",
+  );
+  assert.equal(releaseConfig.mac.entitlements, "build/entitlements.mac.plist");
+  assert.equal(releaseConfig.mac.entitlementsInherit, "build/entitlements.mac.inherit.plist");
+
+  const privateEntitlements = readFileSync(
+    path.join(__dirname, "..", privateTestConfig.mac.entitlements),
+    "utf8",
+  );
+  const releaseEntitlements = readFileSync(
+    path.join(__dirname, "..", releaseConfig.mac.entitlements),
+    "utf8",
+  );
+  assert.match(privateEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
+  assert.doesNotMatch(releaseEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
 });
 
 test("keeps desktop updates disabled without packaged update configuration", () => {

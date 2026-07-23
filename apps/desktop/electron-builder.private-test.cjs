@@ -10,5 +10,7 @@ module.exports = {
     ...release.mac,
     identity: process.env.CSC_NAME,
     notarize: false,
+    entitlements: "build/entitlements.mac.private-test.plist",
+    entitlementsInherit: "build/entitlements.mac.private-test.inherit.plist",
   },
 };
