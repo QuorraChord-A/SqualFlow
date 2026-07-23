@@ -87,6 +87,42 @@ describe("createStorePort", () => {
     expect(port.getContext(flow.id)).toEqual(expect.objectContaining({ legacy_spec_flow: false }));
   });
 
+  it("returns get_context timestamps in the system timezone instead of UTC", () => {
+    const store = tempStore();
+    const flow = store.createFlow({
+      id: "flow-local-time",
+      workspaceId: "ws-default",
+      name: "Local time",
+      description: "",
+      projectId: null,
+    });
+    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-local-time" })!;
+    store.appendEventLog({
+      flowId: flow.id,
+      userTurnId: turn.id,
+      eventType: "test.timestamp",
+      payload: { observed_at: "2026-07-23T03:28:10.473Z" },
+    });
+
+    const context = createStorePort(store).getContext(flow.id)!;
+    const turns = context.user_turns as Array<Record<string, unknown>>;
+    const events = context.recent_events as Array<Record<string, unknown>>;
+    const payload = events[0]!.payload as Record<string, unknown>;
+
+    for (const timestamp of [
+      context.created_at,
+      turns[0]!.started_at,
+      events[0]!.created_at,
+      payload.observed_at,
+    ]) {
+      expect(timestamp).toEqual(expect.stringMatching(/[+-]\d{2}:\d{2}$/));
+      expect(String(timestamp)).not.toMatch(/Z$/);
+    }
+    expect(new Date(String(context.created_at)).toISOString()).toBe(flow.createdAt);
+    expect(new Date(String(turns[0]!.started_at)).toISOString()).toBe(turn.startedAt);
+    expect(new Date(String(payload.observed_at)).toISOString()).toBe("2026-07-23T03:28:10.473Z");
+  });
+
   it("creates and lists current-UserTurn tasks through the V1 API", () => {
     const store = tempStore();
     const flow = store.createFlow({

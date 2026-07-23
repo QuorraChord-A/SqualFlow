@@ -50,6 +50,33 @@ function parseJsonArray(value: string): string[] {
   }
 }
 
+function localIsoTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (part: number, width = 2) => String(part).padStart(width, "0");
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+  const offsetHours = Math.floor(Math.abs(offsetMinutes) / 60);
+  const offsetRemainder = Math.abs(offsetMinutes) % 60;
+  return [
+    `${pad(date.getFullYear(), 4)}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
+    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}.${pad(date.getMilliseconds(), 3)}`,
+    `${offsetSign}${pad(offsetHours)}:${pad(offsetRemainder)}`,
+  ].join("");
+}
+
+function localizeContextTimestamps(value: unknown, key = ""): unknown {
+  if (typeof value === "string" && key.endsWith("_at")) return localIsoTimestamp(value);
+  if (Array.isArray(value)) return value.map((item) => localizeContextTimestamps(item));
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([childKey, childValue]) => [
+      childKey,
+      localizeContextTimestamps(childValue, childKey),
+    ]),
+  );
+}
+
 function taskToPlatform(
   task: ReturnType<Store["listTasks"]>[number],
   blockedBy: string[],
@@ -116,7 +143,11 @@ export function createStorePort(
       if ("error" in snapshot) return null;
       const flow = store.getFlow(flowId);
       const project = flow?.projectId ? store.getProject(flow.projectId) : undefined;
-      return { ...snapshot, flow_id: flowId, project_root_path: project?.localPath ?? "" };
+      return localizeContextTimestamps({
+        ...snapshot,
+        flow_id: flowId,
+        project_root_path: project?.localPath ?? "",
+      }) as Record<string, unknown>;
     },
 
     updateFlowName(input) {
