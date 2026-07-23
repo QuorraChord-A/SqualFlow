@@ -214,6 +214,22 @@ describe("adaptClaudeMessageToUiChunks", () => {
     );
   });
 
+  it("keeps the provider wording when the SDK marks the assistant message as an API error", () => {
+    const adapter = createClaudeToUiChunkAdapter("msg-api-error");
+    const providerError = "API Error: 400 Unsupported model mimo-v2.5-pro[1m].";
+
+    const chunks = adapter.adapt({
+      type: "assistant",
+      isApiErrorMessage: true,
+      error: "unknown",
+      message: { content: [{ type: "text", text: providerError }] },
+    });
+
+    expect(chunks.map((chunk) => chunk.type)).toEqual(["text-start", "text-delta", "text-end"]);
+    expect(adapter.resultError).toBe(providerError);
+    expect(adapter.resultIsError).toBe(true);
+  });
+
   it("ignores unknown non-error events conservatively", () => {
     const chunks = adaptClaudeMessageToUiChunks(
       { type: "system", subtype: "permission_denied", tool_name: "Write", tool_use_id: "tool-1" },

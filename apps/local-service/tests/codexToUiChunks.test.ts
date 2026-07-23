@@ -199,4 +199,26 @@ describe("Codex to UI chunk adapter", () => {
     expect(adapter.resultStatus).toBe("success");
     expect(adapter.resultIsError).toBe(false);
   });
+
+  it("preserves the provider error wording from a failed turn", () => {
+    const adapter = createCodexToUiChunkAdapter("msg-error");
+    const providerError = "Unsupported model mimo-v2.5-pro[1m].";
+
+    const chunks = adapter.adapt({
+      method: "turn/completed",
+      params: {
+        threadId: "thread-error",
+        turn: {
+          id: "turn-error",
+          status: "failed",
+          error: { message: providerError },
+        },
+      },
+    });
+
+    expect(chunks).toEqual([]);
+    expect(adapter.resultError).toBe(providerError);
+    expect(adapter.resultStatus).toBe("failed");
+    expect(adapter.resultIsError).toBe(true);
+  });
 });

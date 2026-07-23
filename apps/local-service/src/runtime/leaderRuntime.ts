@@ -61,7 +61,7 @@ import {
   resolveInputPath,
   type CheckPermissionArgs,
 } from "../permissions/permissionPolicy.js";
-import { classifyLeaderResumeFailure } from "./adapters/runtimeErrors.js";
+import { classifyLeaderResumeFailure, isExplicitLeaderResumeFailure } from "./adapters/runtimeErrors.js";
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
@@ -386,19 +386,19 @@ class LeaderFlowStream {
     }
   }
 
-  close() {
-    this.releaseForReuse("stream_close");
+  async close() {
+    await this.releaseForReuse("stream_close");
   }
 
   /**
    * Force-close the SDK query and release the runtime lease.
    * Used after an idle turn completes, on cancel/fail, and as a wait-finished safety net.
    */
-  releaseForReuse(reason: string) {
+  async releaseForReuse(reason: string) {
     this.clearProgressWatch();
     if (this.finalized) {
       try {
-        this.query?.close?.();
+        await this.query?.close?.();
       } catch {
         // Best-effort: query may already be torn down.
       }
@@ -414,14 +414,14 @@ class LeaderFlowStream {
       // Input may already be closed.
     }
     try {
-      this.query?.close?.();
+      await this.query?.close?.();
     } catch {
-      // Best-effort: SDK close must not block chat lifecycle.
+      // Best-effort: the query is already being torn down.
     }
     this.finalize(reason);
   }
 
-  cancel() {
+  async cancel() {
     if (this.closed && this.finalized) return;
     this.clearProgressWatch();
     this.closed = true;
@@ -438,7 +438,7 @@ class LeaderFlowStream {
       // Input may already be closed.
     }
     try {
-      this.query?.close?.();
+      await this.query?.close?.();
     } catch {
       // Best-effort.
     }
@@ -672,7 +672,7 @@ class LeaderFlowStream {
         // Input may already be closed.
       }
       try {
-        this.query?.close?.();
+        await this.query?.close?.();
       } catch {
         // Best-effort.
       }
@@ -782,11 +782,16 @@ class LeaderFlowStream {
     // same streaming query after an idle gap (hot-reuse leaves the next turn stuck
     // with no SDK events). Same-query reuse still works for turns already in `queued`.
     this.finishInput();
-    this.releaseForReuse("idle_after_turn_complete");
+    await this.releaseForReuse("idle_after_turn_complete");
     active.resolve();
   }
 
   private syncSdkSessionId(active: DeferredTurn) {
+    // A provider can attach a transient/new session id to an API-error event
+    // (for example after switching to an unavailable model). Do not turn that
+    // ordinary provider failure into a session-recovery error; preserve the
+    // provider's own message and let complete()/fail() handle it.
+    if (active.adapter?.resultIsError) return;
     const sdkSessionId = active.adapter?.sdkSessionId;
     if (!sdkSessionId || sdkSessionId === this.sessionId) return;
     if (this.providerSessionEstablished) {
@@ -826,12 +831,12 @@ class LeaderFlowStream {
       // Input may already be closed.
     }
     try {
-      this.query?.close?.();
+      await this.query?.close?.();
     } catch {
       // Best-effort.
     }
     this.logLifecycle("query_close_called", { reason: "fail" });
-    const failure = active?.turn.resumeSessionId
+    const failure = active?.turn.resumeSessionId && isExplicitLeaderResumeFailure(error, active.turn.resumeSessionId)
       ? classifyLeaderResumeFailure(error, this.runtimeAdapter.sdk, active.turn.resumeSessionId)
       : error;
     const rejected = new Set<DeferredTurn>();
@@ -1587,8 +1592,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           existing.finished,
           new Promise<void>((resolve) => {
             setTimeout(() => {
-              existing.releaseForReuse("wait_finished_timeout");
-              resolve();
+              void existing.releaseForReuse("wait_finished_timeout").finally(resolve);
             }, queryWaitFinishedMs());
           }),
         ]);
@@ -1611,7 +1615,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       try {
         const stream = await createStream(enrichedTurn);
         if (start.cancelled) {
-          stream.cancel();
+          void stream.cancel();
           return;
         }
         const completion = stream.enqueue(enrichedTurn);
@@ -1641,7 +1645,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       if (pendingStart) pendingStart.cancelled = true;
       const stream = streams.get(flowId);
       if (stream) {
-        stream.cancel();
+        void stream.cancel();
         streams.delete(flowId);
       }
       return Boolean(userTurnId || pendingStart || stream);
@@ -1649,7 +1653,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     async close() {
       const starts = [...pendingStarts.values()];
       for (const start of starts) start.cancelled = true;
-      for (const stream of streams.values()) stream.close();
+      await Promise.all([...streams.values()].map((stream) => stream.close()));
       for (const query of flowNameQueries.values()) {
         try {
           query.close?.();

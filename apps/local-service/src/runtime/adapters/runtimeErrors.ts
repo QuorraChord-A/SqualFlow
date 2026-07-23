@@ -96,3 +96,18 @@ export function classifyLeaderResumeFailure(
     message: "原 Leader 会话暂时无法恢复，系统不会创建新会话。请重试恢复。",
   });
 }
+
+/**
+ * Only an explicit session-identity failure should be rendered as the
+ * dedicated session-recovery banner. A model, image, or other provider
+ * failure can happen during/after resume and must keep its original message.
+ */
+export function isExplicitLeaderResumeFailure(error: unknown, sessionId?: string): boolean {
+  if (error instanceof LeaderSessionRecoveryError) return true;
+  if (!(error instanceof ProviderRequestError) || error.provider !== "codex" || error.method !== "thread/resume") {
+    return false;
+  }
+  const requestedSessionId = error.requestedSessionId;
+  if (!requestedSessionId || (sessionId && requestedSessionId !== sessionId)) return false;
+  return codexMissingSession(error, requestedSessionId) || codexInvalidSession(error, requestedSessionId);
+}

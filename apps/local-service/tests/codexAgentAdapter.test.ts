@@ -1459,6 +1459,50 @@ describe("Codex runtime adapter", () => {
     }
   });
 
+  it("does not interrupt a turn whose completion event has already been yielded", async () => {
+    const requests: string[] = [];
+    let clientClosed = false;
+    const clientFactory: CodexClientFactory = () => ({
+      start: async () => {},
+      request: async (method) => {
+        requests.push(method);
+        if (method === "thread/start") return { thread: { id: "thread-complete" } };
+        if (method === "turn/start") return { turn: { id: "turn-complete" } };
+        if (method === "turn/interrupt") throw new Error("turn/interrupt should not be sent");
+        throw new Error(`unexpected request: ${method}`);
+      },
+      notify: () => {},
+      respond: () => {},
+      close: () => { clientClosed = true; },
+      notifications: async function* () {
+        yield {
+          method: "turn/completed",
+          params: { threadId: "thread-complete", turn: { id: "turn-complete", status: "completed" } },
+        };
+        await new Promise(() => {});
+      },
+    });
+    const adapter = createCodexAgentRuntimeAdapter({ clientFactory });
+    const options = adapter.buildExpertOptions({
+      role: "backend",
+      systemPrompt: "expert",
+      cwd: "/tmp/project",
+      scratchDir: "/tmp/scratch",
+      capabilities: ["read"],
+      mcpTools: [],
+      runtimeConfig: runtimeConfig(),
+    });
+    const query = adapter.runQuery({ prompt: adapter.createSingleTextInput("done"), options });
+    const iterator = query[Symbol.asyncIterator]();
+
+    const completed = await iterator.next();
+    expect(completed.value).toMatchObject({ type: "turn_completed" });
+    await query.close?.();
+
+    expect(requests).toEqual(["thread/start", "turn/start"]);
+    expect(clientClosed).toBe(true);
+  });
+
   it("prepares Leader MCP as an HTTP bridge inside the Codex adapter", async () => {
     const adapter = createCodexAgentRuntimeAdapter();
     const serverFactory = () => ({ close: async () => {} }) as any;

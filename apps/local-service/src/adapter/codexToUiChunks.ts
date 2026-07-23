@@ -22,6 +22,7 @@ export class CodexToUiChunkAdapter {
   private _sdkSessionId: string | null = null;
   private _resultStatus: string | null = null;
   private _resultIsError: boolean | null = null;
+  private _resultError: string | null = null;
   private _finalAssistantText: string | null = null;
   private _durationMs: number | null = null;
   private _resultCacheUsage: {
@@ -38,6 +39,7 @@ export class CodexToUiChunkAdapter {
   get sdkSessionId() { return this._sdkSessionId; }
   get resultStatus() { return this._resultStatus; }
   get resultIsError() { return this._resultIsError; }
+  get resultError() { return this._resultError; }
   get finalAssistantText() { return this._finalAssistantText; }
   get durationMs() { return this._durationMs; }
   get resultCacheUsage() { return this._resultCacheUsage; }
@@ -96,6 +98,7 @@ export class CodexToUiChunkAdapter {
     const status = stringValue(turn?.status) || "unknown";
     this._resultStatus = status === "completed" ? "success" : status;
     this._resultIsError = status !== "completed";
+    if (this._resultIsError) this._resultError = codexTurnErrorText(params, turn);
     this._durationMs = numberOrNull(turn?.durationMs);
   }
 
@@ -171,6 +174,19 @@ export class CodexToUiChunkAdapter {
     }
     return [];
   }
+}
+
+function codexTurnErrorText(params: UnknownRecord, turn: UnknownRecord | null): string | null {
+  const directError = stringValue(turn?.error) || stringValue(params.error);
+  if (directError) return directError;
+  const error = asRecord(turn?.error) ?? asRecord(params.error);
+  return stringValue(error?.message)
+    || stringValue(error?.additionalDetails)
+    || stringValue(turn?.errorMessage)
+    || stringValue(turn?.error_message)
+    || stringValue(params.errorMessage)
+    || stringValue(params.error_message)
+    || null;
 }
 
 function cacheUsage(tokenUsage: UnknownRecord | null) {

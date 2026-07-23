@@ -35,6 +35,7 @@ export class ClaudeToUiChunkAdapter {
   private _resultStatus: string | null = null;
   private _resultIsError: boolean | null = null;
   private _resultError: string | null = null;
+  private _apiErrorMessageSeen = false;
   private _finalAssistantText: string | null = null;
   private pendingStreamedText = "";
   private readonly streamedToolCallIds = new Set<string>();
@@ -140,6 +141,7 @@ export class ClaudeToUiChunkAdapter {
   }
 
   private adaptAssistantMessage(msg: UnknownRecord): UiMessageChunk[] {
+    const syntheticApiError = isSyntheticApiErrorMessage(msg) || msg.error != null;
     const chunks: UiMessageChunk[] = [];
     let messageText = "";
     for (const block of contentBlocks(msg)) {
@@ -172,6 +174,12 @@ export class ClaudeToUiChunkAdapter {
       }
     }
     if (messageText) this._finalAssistantText = messageText;
+    if (syntheticApiError) {
+      this._apiErrorMessageSeen = true;
+      this._resultStatus = "api_error";
+      this._resultIsError = true;
+      this._resultError = messageText || stringValue(msg.error) || "Claude Code API request failed";
+    }
     this.pendingStreamedText = "";
     this.streamedTextSinceAssistant = false;
     this.streamedReasoningSinceAssistant = false;
@@ -202,9 +210,11 @@ export class ClaudeToUiChunkAdapter {
 
   private adaptResultMessage(msg: UnknownRecord): UiMessageChunk[] {
     this.captureSdkSessionId(msg);
-    this._resultStatus = stringValue(msg.subtype) || null;
-    this._resultIsError = booleanValue(msg.is_error);
-    this._resultError = this._resultIsError ? resultErrorText(msg) : null;
+    const resultStatus = stringValue(msg.subtype) || null;
+    const resultIsError = booleanValue(msg.is_error);
+    this._resultStatus = this._apiErrorMessageSeen && !resultIsError ? "api_error" : resultStatus;
+    this._resultIsError = resultIsError || this._apiErrorMessageSeen;
+    if (this._resultIsError) this._resultError = resultErrorText(msg) ?? this._resultError;
     this._resultCacheUsage = cacheUsageFromResult(msg);
     if (typeof msg.duration_ms === "number" && Number.isFinite(msg.duration_ms)) {
       this._durationMs = msg.duration_ms;
@@ -230,6 +240,10 @@ function resultErrorText(msg: UnknownRecord): string | null {
   if (!Array.isArray(msg.errors)) return null;
   const errors = msg.errors.filter((error): error is string => typeof error === "string" && error.trim().length > 0);
   return errors.length > 0 ? errors.join("; ") : null;
+}
+
+function isSyntheticApiErrorMessage(msg: UnknownRecord): boolean {
+  return msg.isApiErrorMessage === true || msg.is_api_error_message === true;
 }
 
 function contentBlocks(msg: UnknownRecord): unknown[] {

@@ -1719,6 +1719,7 @@ describe("LeaderRuntime platform event protocol", () => {
       runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: () => createQuery([
         {
           type: "assistant",
+          isApiErrorMessage: true,
           error: "authentication_failed",
           message: { content: [{ type: "text", text: providerError }] },
         },

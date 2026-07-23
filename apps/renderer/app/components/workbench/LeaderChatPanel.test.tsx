@@ -218,6 +218,24 @@ describe("LeaderChatPanel", () => {
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ flow_expert_id: expect.anything() }));
   });
 
+  it("shows ordinary provider errors without using the session-recovery banner", () => {
+    renderPanel();
+    const providerError = "Unsupported model mimo-v2.5-pro[1m].";
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "system:error",
+          flow_id: "flow-1",
+          data: { code: "leader_error", message: providerError },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    expect(screen.getByTestId("leader-runtime-error")).toHaveTextContent(providerError);
+    expect(screen.queryByTestId("leader-session-recovery-error")).not.toBeInTheDocument();
+  });
+
   it("keeps the drafted message unsent until the runtime selection finishes saving", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");

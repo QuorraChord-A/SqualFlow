@@ -536,6 +536,7 @@ export default function LeaderChatPanel({
   const [leaderModelConfigured, setLeaderModelConfigured] = useState(false);
   const [runtimeSelectionUpdating, setRuntimeSelectionUpdating] = useState(false);
   const [sessionRecoveryError, setSessionRecoveryError] = useState<{ message: string; category?: string } | null>(null);
+  const [leaderRuntimeError, setLeaderRuntimeError] = useState<string | null>(null);
   const browserElementAttachments = useBrowserSelectionStore((state) => state.elements);
   const clearBrowserElementAttachments = useBrowserSelectionStore((state) => state.clearElements);
   const setBrowserElementAttachments = useBrowserSelectionStore((state) => state.setElements);
@@ -766,6 +767,10 @@ export default function LeaderChatPanel({
           });
           setStatus("ready");
           setKnownRunningFlow(flowId, false);
+        } else if (msg.data?.code === "leader_error" && typeof msg.data?.message === "string" && msg.data.message.trim()) {
+          setSessionRecoveryError(null);
+          setLeaderRuntimeError(msg.data.message);
+          setKnownRunningFlow(flowId, false);
         }
         dispatchingQueueIdRef.current = null;
         if (msg.log_id) {
@@ -917,6 +922,7 @@ export default function LeaderChatPanel({
         const eventType = event?.type;
         if (eventType === "turn-started") {
           setSessionRecoveryError(null);
+          setLeaderRuntimeError(null);
           setStatus("streaming");
         } else if (eventType === "turn-finished") {
           setStatus("ready");
@@ -933,6 +939,7 @@ export default function LeaderChatPanel({
 
   useEffect(() => {
     setSessionRecoveryError(null);
+    setLeaderRuntimeError(null);
   }, [flowId]);
 
   const transcriptOptimisticMessages = useMemo(
@@ -1516,6 +1523,16 @@ export default function LeaderChatPanel({
           <div className="font-medium">原 Leader 会话无法继续</div>
           <div className="mt-1 text-amber-100/80">{sessionRecoveryError.message}</div>
           <div className="mt-1 text-xs text-amber-100/60">系统不会创建新会话；确认 provider 可用后重新发送即可继续恢复。</div>
+        </div>
+      ) : null}
+      {leaderRuntimeError && !sessionRecoveryError ? (
+        <div
+          data-testid="leader-runtime-error"
+          role="alert"
+          className="mx-auto mt-3 w-[min(880px,calc(100%-128px))] rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-foreground max-[760px]:w-[calc(100%-40px)]"
+        >
+          <div className="font-medium">请求失败</div>
+          <div className="mt-1 text-muted-foreground">{leaderRuntimeError}</div>
         </div>
       ) : null}
       <div data-testid="leader-chat-transcript-shell" className="relative min-h-0 flex-1">

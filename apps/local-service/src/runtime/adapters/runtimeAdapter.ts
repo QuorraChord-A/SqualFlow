@@ -18,14 +18,14 @@ export type RuntimeQueryInput = {
 };
 
 export type RuntimeQueryLike = AsyncIterable<RuntimeEvent> & {
-  close?: () => void;
+  close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
 };
 
 export type RuntimeQueryFn = (input: RuntimeQueryInput) => RuntimeQueryLike;
 
 export type RuntimeRawQueryLike = AsyncIterable<unknown> & {
-  close?: () => void;
+  close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
 };
 

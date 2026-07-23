@@ -457,6 +457,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   private readonly reportedForeignNotifications = new Set<string>();
   private lastConnectionStatusKey = "";
   private observedProviderWebsocket = false;
+  private closePromise: Promise<void> | null = null;
 
   constructor(
     private readonly input: AsyncIterable<unknown>,
@@ -543,8 +544,8 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     });
   }
 
-  close() {
-    if (this.closed) return;
+  close(): Promise<void> {
+    if (this.closePromise) return this.closePromise;
     this.closed = true;
     const threadId = this.currentThreadId;
     const turnId = this.currentTurnId;
@@ -554,10 +555,15 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
         const handle = setTimeout(resolve, 3000);
         handle.unref?.();
       });
-      void Promise.race([interrupt, timeout]).finally(() => this.client.close());
-      return;
+      this.closePromise = Promise.race([interrupt, timeout]).then(() => {
+        this.currentTurnId = null;
+        this.client.close();
+      });
+      return this.closePromise;
     }
     this.client.close();
+    this.closePromise = Promise.resolve();
+    return this.closePromise;
   }
 
   async getContextUsage() {
@@ -756,24 +762,33 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
         await this.answerServerRequest(event);
         continue;
       }
+      const completedTurn = method(event) === "turn/completed"
+        && stringValue(params(event)?.threadId) === threadId;
+      const eventTurn = completedTurn && isRecord(params(event)?.turn)
+        ? params(event)?.turn as Record<string, unknown>
+        : {};
+      const observedTurnId = stringValue(params(event)?.turnId) || stringValue(eventTurn.id);
+      const isCurrentCompletedTurn = completedTurn
+        && (!turnId || !observedTurnId || observedTurnId === turnId);
+      // The event is yielded before the generator resumes. Clear this state
+      // first so an upper-layer normal-completion close cannot mistake the
+      // already-finished turn for an active one and send turn/interrupt.
+      if (isCurrentCompletedTurn && this.currentTurnId === turnId) this.currentTurnId = null;
       yield event;
-      if (method(event) === "turn/completed" && stringValue(params(event)?.threadId) === threadId) {
-        const eventTurn = isRecord(params(event)?.turn) ? params(event)?.turn as Record<string, unknown> : {};
-        if (!turnId || stringValue(eventTurn.id) === turnId) {
-          this.emitTransportStage("turn_completed", turnStartedAt, {
-            sessionId: threadId,
-            turnId,
-            method: "turn/completed",
-            sinceTurnStartMs: performance.now() - turnStartedAt,
-          });
-          this.options.diagnostics?.({
-            type: "provider_turn_completed",
-            sessionId: threadId,
-            turnId,
-            status: stringValue(eventTurn.status, "unknown"),
-          });
-          return;
-        }
+      if (isCurrentCompletedTurn) {
+        this.emitTransportStage("turn_completed", turnStartedAt, {
+          sessionId: threadId,
+          turnId,
+          method: "turn/completed",
+          sinceTurnStartMs: performance.now() - turnStartedAt,
+        });
+        this.options.diagnostics?.({
+          type: "provider_turn_completed",
+          sessionId: threadId,
+          turnId,
+          status: stringValue(eventTurn.status, "unknown"),
+        });
+        return;
       }
     }
   }
@@ -955,6 +970,9 @@ function createOutputAdapter(messageId: string, metadata?: { startedAt?: string 
     },
     get resultIsError() {
       return adapter.resultIsError;
+    },
+    get resultError() {
+      return adapter.resultError;
     },
     get finalAssistantText() {
       return adapter.finalAssistantText;
