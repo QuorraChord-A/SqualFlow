@@ -118,14 +118,59 @@ run_release() {
   desktop_print_artifacts
 }
 
+private_test_preflight() {
+  [[ -n "${CSC_LINK:-}" ]] || release_fail "CSC_LINK is required for a private test build."
+  [[ -n "${CSC_KEY_PASSWORD:-}" ]] || release_fail "CSC_KEY_PASSWORD is required for a private test build."
+  [[ -n "${CSC_NAME:-}" ]] || release_fail "CSC_NAME is required for a private test build."
+}
+
+run_private_test_package() {
+  private_test_preflight
+  desktop_initialize_paths "$ROOT" "$ROOT/dist"
+  desktop_require_packaging_dependencies
+  desktop_build_production_services
+  desktop_prepare_codex_runtime required
+  desktop_clean_output
+
+  echo "Building self-signed private GitHub update test artifacts..."
+  (
+    cd "$ELECTRON_DIR"
+    ./node_modules/.bin/electron-builder --mac --config electron-builder.private-test.cjs
+  )
+
+  desktop_verify_release_artifacts false
+  desktop_print_artifacts
+}
+
+run_private_test_publish() {
+  [[ -n "${GH_TOKEN:-}" ]] || release_fail "GH_TOKEN is required to publish a private GitHub Release."
+  private_test_preflight
+  desktop_initialize_paths "$ROOT" "$ROOT/dist"
+  desktop_require_packaging_dependencies
+  desktop_build_production_services
+  desktop_prepare_codex_runtime required
+  desktop_clean_output
+
+  echo "Building and publishing self-signed private GitHub update test artifacts..."
+  (
+    cd "$ELECTRON_DIR"
+    ./node_modules/.bin/electron-builder --mac --config electron-builder.private-test.cjs --publish always
+  )
+
+  desktop_verify_release_artifacts false
+  desktop_print_artifacts
+}
+
 desktop_require_macos
 case "${1:-}" in
   package) run_local_package ;;
   smoke) run_local_smoke ;;
   release) run_release ;;
+  private-test-package) run_private_test_package ;;
+  private-test-publish) run_private_test_publish ;;
   preflight) release_preflight ;;
   *)
-    echo "Usage: $0 {package|smoke|release|preflight}" >&2
+    echo "Usage: $0 {package|smoke|release|private-test-package|private-test-publish|preflight}" >&2
     exit 2
     ;;
 esac

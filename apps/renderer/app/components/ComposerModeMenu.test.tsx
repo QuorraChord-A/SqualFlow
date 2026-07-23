@@ -72,4 +72,21 @@ describe("ComposerModeMenu", () => {
     expect(trigger.className).toContain("hover:text-orange-500");
     expect(trigger.className).not.toContain("destructive");
   });
+
+  it("offers image attachment in the add menu and forwards selected files", async () => {
+    const user = userEvent.setup();
+    const onAddImages = vi.fn();
+    const { container } = renderMenu({ onAddImages });
+
+    await user.click(screen.getByRole("button", { name: "添加消息选项" }));
+    expect(screen.getByText("添加")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加图片" })).toHaveTextContent("PNG、JPEG、WebP 或 GIF");
+
+    const file = new File(["image"], "example.png", { type: "image/png" });
+    const input = container.querySelector('input[type="file"]');
+    expect(input).not.toBeNull();
+    await user.upload(input as HTMLInputElement, file);
+
+    expect(onAddImages).toHaveBeenCalledWith([file]);
+  });
 });

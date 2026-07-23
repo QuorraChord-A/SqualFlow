@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ClipboardList, PencilLine, Plus, Settings2, ShieldAlert } from "lucide-react";
+import { Check, ClipboardList, ImagePlus, PencilLine, Plus, Settings2, ShieldAlert } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -55,6 +55,7 @@ interface ComposerModeMenuProps {
   onSpecChange: (requested: boolean) => void;
   onRiskModeChange?: (mode: RiskMode) => void;
   onPlanApprovalChange?: (approval: PlanApproval) => void;
+  onAddImages?: (files: File[]) => void | Promise<void>;
 }
 
 export default function ComposerModeMenu({
@@ -66,12 +67,14 @@ export default function ComposerModeMenu({
   onSpecChange,
   onRiskModeChange,
   onPlanApprovalChange,
+  onAddImages,
 }: ComposerModeMenuProps) {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
   const [planApprovalDialogOpen, setPlanApprovalDialogOpen] = useState(false);
   const [rollDirection, setRollDirection] = useState(1);
   const openPlanApprovalDialogAfterMenuCloseRef = useRef(false);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const previousModeRef = useRef<(typeof modeOptions)[number]["value"] | null>(null);
   const reduceMotion = useReducedMotion();
   const selectedMode = specRequested ? "plan" : riskMode;
@@ -105,6 +108,20 @@ export default function ComposerModeMenu({
 
   return (
     <div className="flex min-w-0 items-center gap-1.5">
+      <input
+        ref={imageInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        multiple
+        className="hidden"
+        aria-hidden="true"
+        tabIndex={-1}
+        onChange={(event) => {
+          const files = Array.from(event.currentTarget.files ?? []);
+          event.currentTarget.value = "";
+          if (files.length > 0) void onAddImages?.(files);
+        }}
+      />
       <Popover
         open={addMenuOpen}
         onOpenChange={setAddMenuOpen}
@@ -118,7 +135,11 @@ export default function ComposerModeMenu({
           type="button"
           aria-label="添加消息选项"
           disabled={disabled}
-          className="flex size-6 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-ui-control hover:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+          className={`flex size-7 shrink-0 items-center justify-center rounded-full transition-all disabled:cursor-not-allowed disabled:opacity-45 ${
+            addMenuOpen
+              ? "rotate-45 bg-foreground text-background"
+              : "bg-ui-control text-muted-foreground hover:bg-ui-control-hover hover:text-foreground"
+          }`}
         >
           <Plus className="size-[15px]" />
         </PopoverTrigger>
@@ -127,8 +148,32 @@ export default function ComposerModeMenu({
           align="start"
           sideOffset={10}
           collisionAvoidance={{ side: "none", align: "shift", fallbackAxisSide: "none" }}
-          className="w-[min(340px,calc(100vw-40px))] gap-0 rounded-2xl border border-ui-border-strong bg-[color-mix(in_srgb,var(--ui-surface-raised)_92%,var(--background))] p-1.5 shadow-[var(--ui-shadow-overlay)] ring-0"
+          className="w-[min(360px,calc(100vw-40px))] gap-0 rounded-2xl border border-ui-border-strong bg-[color-mix(in_srgb,var(--ui-surface-raised)_94%,var(--background))] p-1.5 shadow-[var(--ui-shadow-dialog)] ring-0"
         >
+          {onAddImages ? (
+            <>
+              <div className="px-2.5 pb-1 pt-1 text-[11px] font-medium text-muted-foreground">添加</div>
+              <button
+                type="button"
+                aria-label="添加图片"
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  window.setTimeout(() => imageInputRef.current?.click(), 0);
+                }}
+                className="flex min-h-12 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-ui-control-hover"
+              >
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ui-control text-muted-foreground">
+                  <ImagePlus className="size-4" />
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-semibold text-foreground">图片</span>
+                  <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">PNG、JPEG、WebP 或 GIF</span>
+                </span>
+              </button>
+              <div className="mx-2 my-1 h-px bg-ui-border-subtle" />
+            </>
+          ) : null}
+          <div className="px-2.5 pb-1 pt-1 text-[11px] font-medium text-muted-foreground">Flow 设置</div>
           <button
             type="button"
             aria-label={`编排审批设置，当前：${selectedPlanApproval.label}`}
@@ -136,9 +181,11 @@ export default function ComposerModeMenu({
               openPlanApprovalDialogAfterMenuCloseRef.current = true;
               setAddMenuOpen(false);
             }}
-            className="flex min-h-11 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-ui-control-hover"
+            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-ui-control-hover"
           >
-            <Settings2 className="size-4 shrink-0 text-muted-foreground" />
+            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ui-control text-muted-foreground">
+              <Settings2 className="size-4" />
+            </span>
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-2">
                 <span className="text-[13px] font-semibold text-foreground">编排审批设置</span>

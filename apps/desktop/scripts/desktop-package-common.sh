@@ -405,6 +405,7 @@ desktop_verify_release_artifacts() (
   set -euo pipefail
   umask 077
 
+  local require_notarization="${1:-true}"
   local bundled_codex="$APP_PATH/Contents/Resources/codex-runtime/darwin-$ARCH/codex"
   local bundled_codex_manifest="$APP_PATH/Contents/Resources/codex-runtime/darwin-$ARCH/manifest.json"
   local app_executable="$PRODUCT_NAME"
@@ -412,7 +413,7 @@ desktop_verify_release_artifacts() (
 
   desktop_verify_artifacts
 
-  echo "Verifying release signatures and notarization ticket..."
+  echo "Verifying release signatures..."
   codesign --verify --deep --strict --verbose=2 "$APP_PATH"
   [[ -x "$bundled_codex" ]] || {
     echo "Bundled Codex runtime not found in release app: $bundled_codex" >&2
@@ -423,8 +424,11 @@ desktop_verify_release_artifacts() (
     exit 1
   }
   codesign --verify --strict --verbose=2 "$bundled_codex"
-  spctl --assess --type execute --verbose=4 "$APP_PATH"
-  xcrun stapler validate "$APP_PATH"
+  if [[ "$require_notarization" == "true" ]]; then
+    echo "Verifying release notarization ticket..."
+    spctl --assess --type execute --verbose=4 "$APP_PATH"
+    xcrun stapler validate "$APP_PATH"
+  fi
 
   temp_dir="$(mktemp -d "${TMPDIR:-/tmp}/squadflow-release-verify.XXXXXX")"
   mount_dir="$temp_dir/mount"
@@ -462,8 +466,10 @@ desktop_verify_release_artifacts() (
   }
   codesign --verify --deep --strict --verbose=2 "$mounted_app"
   codesign --verify --strict --verbose=2 "$mounted_codex"
-  spctl --assess --type execute --verbose=4 "$mounted_app"
-  xcrun stapler validate "$mounted_app"
+  if [[ "$require_notarization" == "true" ]]; then
+    spctl --assess --type execute --verbose=4 "$mounted_app"
+    xcrun stapler validate "$mounted_app"
+  fi
 
   echo "Running packaged app startup smoke test..."
   desktop_launch_release_smoke \

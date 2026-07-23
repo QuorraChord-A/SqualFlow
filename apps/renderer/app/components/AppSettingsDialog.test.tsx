@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import AppSettingsDialog from "./AppSettingsDialog";
 import { useThemeStore } from "../stores/useThemeStore";
+import type { DesktopUpdateBridge, DesktopUpdateState } from "../lib/desktopUpdate";
 
 const apiMocks = vi.hoisted(() => ({
   fetchAgentRuntimeConfig: vi.fn(),
@@ -16,6 +17,32 @@ const apiMocks = vi.hoisted(() => ({
   updateAgentRuntimeRole: vi.fn(),
 }));
 const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+const updateState: DesktopUpdateState = {
+  enabled: true,
+  automaticUpdates: true,
+  status: "idle",
+  currentVersion: "0.1.0",
+  availableVersion: null,
+  notes: null,
+  progress: null,
+  error: null,
+  lastCheckedAt: "2026-07-22T20:00:00.000Z",
+};
+
+function installUpdateBridge(state = updateState) {
+  const bridge: DesktopUpdateBridge = {
+    getState: vi.fn().mockResolvedValue(state),
+    check: vi.fn().mockResolvedValue(state),
+    setAutomaticUpdates: vi.fn().mockImplementation(async (enabled) => ({
+      ...state,
+      automaticUpdates: enabled,
+    })),
+    install: vi.fn().mockResolvedValue(true),
+    onState: vi.fn().mockReturnValue(() => {}),
+  };
+  window.squadflowDesktopUpdate = bridge;
+  return bridge;
+}
 
 vi.mock("../lib/api", () => ({
   ...apiMocks,
@@ -68,6 +95,7 @@ const runtimeSnapshot = {
 
 describe("AppSettingsDialog", () => {
   beforeEach(() => {
+    delete window.squadflowDesktopUpdate;
     Object.values(apiMocks).forEach((mock) => mock.mockReset());
     apiMocks.fetchExperts.mockResolvedValue([]);
     clipboardWriteText.mockClear();
@@ -81,6 +109,24 @@ describe("AppSettingsDialog", () => {
     const themeSelect = screen.getByRole("combobox");
     expect(themeSelect).toHaveTextContent("跟随系统");
     expect(themeSelect).not.toHaveTextContent("system");
+  });
+
+  it("controls background updates and supports a manual update check", async () => {
+    const user = userEvent.setup();
+    const bridge = installUpdateBridge();
+
+    render(<AppSettingsDialog open onOpenChange={vi.fn()} />);
+
+    const automaticUpdates = await screen.findByRole("switch", { name: "自动更新" });
+    expect(automaticUpdates).toBeChecked();
+    expect(screen.getByText(/不会自动重启/)).toBeInTheDocument();
+    expect(screen.getByText("版本 0.1.0")).toBeInTheDocument();
+
+    await user.click(automaticUpdates);
+    expect(bridge.setAutomaticUpdates).toHaveBeenCalledWith(false);
+
+    await user.click(screen.getByRole("button", { name: "检查更新" }));
+    expect(bridge.check).toHaveBeenCalledTimes(1);
   });
 
   it("does not render role switches with initial defaults while agent settings are loading", async () => {

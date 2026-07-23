@@ -16,6 +16,7 @@ import {
   FileText,
   Moon,
   Palette,
+  RefreshCw,
   Search,
   Settings2,
   SlidersHorizontal,
@@ -38,6 +39,7 @@ import { MessageResponse } from "@/components/ai-elements-official/message";
 import { useThemeStore, type ThemeName } from "../stores/useThemeStore";
 import { useAppPreferencesStore } from "../stores/useAppPreferencesStore";
 import { useModalStore } from "../stores/useModalStore";
+import { getDesktopUpdateBridge, type DesktopUpdateState } from "../lib/desktopUpdate";
 import { AGENT_META, AGENT_ORDER, AgentIcon, runtimeSdkLabel } from "../lib/agentMeta";
 import {
   createAgentRuntimeConfig,
@@ -360,6 +362,94 @@ function boundModelOf(config: RuntimeConfig | null | undefined, modelId: string)
     ?? null;
 }
 
+function updateStatusText(state: DesktopUpdateState) {
+  if (!state.enabled) return "当前安装包未配置更新源。正式发布版本会连接 GitHub Releases。";
+  if (state.status === "checking") return "正在检查更新…";
+  if (state.status === "downloading") {
+    return state.progress === null ? "正在后台下载更新…" : `正在后台下载更新，${state.progress}%`;
+  }
+  if (state.status === "ready") {
+    return `版本 ${state.availableVersion ?? ""} 已下载。可以立即重启，或在退出应用时自动安装。`;
+  }
+  if (state.status === "error") return state.error || "检查更新失败。";
+  if (state.lastCheckedAt) return "当前已是最新版本。";
+  return "尚未检查更新。";
+}
+
+function DesktopUpdateSettings() {
+  const [bridge] = useState(() => getDesktopUpdateBridge());
+  const [state, setState] = useState<DesktopUpdateState | null>(null);
+
+  useEffect(() => {
+    if (!bridge) return undefined;
+    let active = true;
+    const unsubscribe = bridge.onState((nextState) => {
+      if (active) setState(nextState);
+    });
+    void bridge.getState().then((nextState) => {
+      if (active) setState(nextState);
+    }).catch(() => {});
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [bridge]);
+
+  if (!bridge || !state) return null;
+
+  const busy = state.status === "checking" || state.status === "downloading";
+  const lastCheckedLabel = state.lastCheckedAt
+    ? new Date(state.lastCheckedAt).toLocaleString()
+    : "尚未检查";
+
+  return (
+    <section className="overflow-hidden rounded-lg border border-border bg-card">
+      <div className="grid gap-4 border-b border-border px-5 py-4 md:grid-cols-[1fr_auto] md:items-center">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+            <RefreshCw className="size-4 text-muted-foreground" />
+            自动更新
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            后台检查并下载新版本；不会自动重启，退出 SquadFlow 时安装已下载的更新。
+          </p>
+        </div>
+        <Switch
+          checked={state.automaticUpdates}
+          disabled={!state.enabled}
+          onCheckedChange={(enabled) => {
+            void bridge.setAutomaticUpdates(enabled).then(setState).catch(() => {});
+          }}
+          aria-label="自动更新"
+        />
+      </div>
+
+      <div className="grid gap-4 px-5 py-4 md:grid-cols-[1fr_auto] md:items-center">
+        <div>
+          <div className="text-sm font-semibold text-foreground">版本 {state.currentVersion || "未知"}</div>
+          <p
+            className={`mt-1 text-sm ${state.status === "error" ? "text-destructive" : "text-muted-foreground"}`}
+            role="status"
+          >
+            {updateStatusText(state)}
+          </p>
+          <p className="mt-1 text-xs text-muted-foreground">上次检查：{lastCheckedLabel}</p>
+        </div>
+        <Button
+          variant="outline"
+          disabled={!state.enabled || busy}
+          onClick={() => {
+            void bridge.check().then(setState).catch(() => {});
+          }}
+        >
+          <RefreshCw className={`size-4 ${busy ? "animate-spin" : ""}`} />
+          {busy ? "检查中" : "检查更新"}
+        </Button>
+      </div>
+    </section>
+  );
+}
+
 function GeneralSettings() {
   const { theme, setTheme, availableThemes } = useThemeStore();
   const { showReasoning, setShowReasoning } = useAppPreferencesStore();
@@ -418,6 +508,7 @@ function GeneralSettings() {
           </Button>
         </div>
       </section>
+      <DesktopUpdateSettings />
     </div>
   );
 }

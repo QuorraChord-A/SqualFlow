@@ -53,6 +53,7 @@ export const MessageResponse = memo(
       )}
       controls={controls ?? chatMarkdownControls}
       isAnimating={isAnimating}
+      linkSafety={{ enabled: false }}
       mode={mode ?? (isAnimating ? "streaming" : "static")}
       plugins={streamdownPlugins}
       remarkPlugins={props.remarkPlugins ?? streamdownRemarkPlugins}

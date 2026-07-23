@@ -2,17 +2,20 @@ export type DesktopUpdateStatus = "idle" | "checking" | "downloading" | "ready" 
 
 export interface DesktopUpdateState {
   enabled: boolean;
+  automaticUpdates: boolean;
   status: DesktopUpdateStatus;
   currentVersion: string;
   availableVersion: string | null;
   notes: string | null;
   progress: number | null;
   error: string | null;
+  lastCheckedAt: string | null;
 }
 
 export interface DesktopUpdateBridge {
   getState: () => Promise<DesktopUpdateState>;
   check: () => Promise<DesktopUpdateState>;
+  setAutomaticUpdates: (enabled: boolean) => Promise<DesktopUpdateState>;
   install: () => Promise<boolean>;
   onState: (listener: (state: DesktopUpdateState) => void) => () => void;
 }

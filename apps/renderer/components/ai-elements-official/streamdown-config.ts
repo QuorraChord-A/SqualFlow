@@ -1,5 +1,6 @@
 import { cjk } from "@streamdown/cjk";
 import { createCodePlugin } from "@streamdown/code";
+import { createMathPlugin } from "@streamdown/math";
 import { mermaid } from "@streamdown/mermaid";
 import { defaultRemarkPlugins } from "streamdown";
 import type { ControlsConfig, PluginConfig, StreamdownTranslations } from "streamdown";
@@ -7,8 +8,9 @@ import type { ControlsConfig, PluginConfig, StreamdownTranslations } from "strea
 const code = createCodePlugin({
   themes: ["github-light", "github-dark"],
 });
+const math = createMathPlugin({ singleDollarTextMath: true });
 
-export const streamdownPlugins: PluginConfig = { cjk, code, mermaid };
+export const streamdownPlugins: PluginConfig = { cjk, code, math, mermaid };
 
 type MarkdownTree = {
   type?: string;
@@ -53,12 +55,13 @@ export const streamdownRemarkPlugins = [
 ];
 
 export const chatMarkdownControls: ControlsConfig = {
-  table: false,
+  table: { copy: true, download: false, fullscreen: false },
   code: { copy: true, download: false },
   mermaid: { copy: true, download: false, fullscreen: true, panZoom: true },
 };
 
 export const streamdownTranslations: Partial<StreamdownTranslations> = {
+  close: "关闭",
   copied: "已复制",
   copyCode: "复制代码",
   copyLink: "复制链接",
@@ -67,5 +70,10 @@ export const streamdownTranslations: Partial<StreamdownTranslations> = {
   copyTableAsMarkdown: "复制为 Markdown",
   copyTableAsTsv: "复制为 TSV",
   downloadFile: "下载文件",
+  downloadImage: "下载图片",
+  externalLinkWarning: "即将在系统浏览器中打开外部网站。",
+  imageNotAvailable: "图片无法显示",
+  openExternalLink: "打开外部链接？",
   openLink: "打开链接",
+  viewFullscreen: "全屏查看",
 };

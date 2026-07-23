@@ -392,6 +392,7 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
                   onSpecChange={setSpecRequested}
                   onRiskModeChange={handleNewTaskRiskModeChange}
                   onPlanApprovalChange={handleNewTaskPlanApprovalChange}
+                  onAddImages={(files) => handlePasteImages(files, prompt.length)}
                 />
               ) : (
                 <div

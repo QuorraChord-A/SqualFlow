@@ -1439,6 +1439,7 @@ export default function LeaderChatPanel({
       onSpecChange={handleSpecChange}
       onRiskModeChange={handleRiskModeChange}
       onPlanApprovalChange={handlePlanApprovalChange}
+      onAddImages={(files) => handlePasteImages(files, effectiveComposerValue.length)}
     />
   );
   const composer = (

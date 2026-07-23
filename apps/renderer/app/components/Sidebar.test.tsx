@@ -107,12 +107,15 @@ describe("Sidebar", () => {
     const brand = screen.getByText("SquadFlow");
     const updateButton = screen.getByRole("button", { name: "更新应用" });
     const settingsButton = screen.getByRole("button", { name: "设置" });
-    const bottomOverlay = brand.closest(".absolute");
+    const bottomOverlay = brand.closest(".bottom-0");
     const bottomActions = screen.getByTestId("sidebar-bottom-actions");
+    const brandContainer = screen.getByTestId("sidebar-brand");
 
     expect(bottomOverlay).toHaveClass("bottom-0");
     expect(settingsButton.closest(".absolute")).toBe(bottomOverlay);
-    expect(screen.getByTestId("sidebar-brand").querySelector("svg")).toBeNull();
+    expect(brandContainer).toHaveClass("left-1/2", "-translate-x-1/2");
+    expect(brandContainer).toHaveStyle({ maxWidth: "calc(100% - 16px)" });
+    expect(brandContainer.querySelector("svg")).toBeNull();
     expect(bottomActions.children[0]).toBe(updateButton);
     expect(bottomActions.children[1]).toBe(settingsButton);
     expect(screen.getByTestId("project-task-list").closest(".overflow-hidden")).toBeInTheDocument();

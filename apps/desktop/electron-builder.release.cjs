@@ -6,6 +6,13 @@ if (!runtimeArch) {
 
 module.exports = {
   ...base,
+  publish: [
+    {
+      provider: "github",
+      owner: "QuorraChord-A",
+      repo: "SqualFlow",
+    },
+  ],
   extraResources: (base.extraResources || []).map((resource) => (
     resource.to === "codex-runtime"
       ? { ...resource, filter: [`darwin-${runtimeArch}/codex`] }
@@ -21,7 +28,7 @@ module.exports = {
     entitlementsInherit: "build/entitlements.mac.inherit.plist",
     binaries: [
       ...(base.mac.binaries || []),
-      "Contents/Resources/codex-runtime/darwin-${arch}/codex",
+      `Contents/Resources/codex-runtime/darwin-${runtimeArch}/codex`,
     ],
   },
 };

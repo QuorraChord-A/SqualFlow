@@ -28,6 +28,8 @@
     "desktop:package": "bash apps/desktop/scripts/desktop-macos.sh package",
     "desktop:smoke": "bash apps/desktop/scripts/desktop-macos.sh smoke",
     "desktop:release": "bash apps/desktop/scripts/desktop-macos.sh release",
+    "desktop:private-test-package": "bash apps/desktop/scripts/desktop-macos.sh private-test-package",
+    "desktop:private-test-publish": "bash apps/desktop/scripts/desktop-macos.sh private-test-publish",
     "codex:build": "bash apps/desktop/scripts/build-bundled-codex.sh"
   }
 }

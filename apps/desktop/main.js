@@ -156,10 +156,12 @@ const desktopUpdater = createDesktopUpdater({
   updater: autoUpdater,
   logger: desktopLogger,
   getWindow: () => mainWindow,
+  preferencesPath: path.join(app.getPath("userData"), "update-preferences.json"),
 });
 
 ipcMain.handle("desktop-update:get-state", () => desktopUpdater.getState());
 ipcMain.handle("desktop-update:check", () => desktopUpdater.checkForUpdates());
+ipcMain.handle("desktop-update:set-automatic", (_event, enabled) => desktopUpdater.setAutomaticUpdates(enabled));
 ipcMain.handle("desktop-update:install", () => desktopUpdater.install());
 
 async function startLocalServices() {

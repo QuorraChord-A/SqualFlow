@@ -92,7 +92,14 @@ export default function MessageImageAttachments() {
         </div>
       ))}
       {preview && typeof document !== "undefined" ? createPortal(
-        <div className="fixed inset-0 z-[10000] flex items-center justify-center bg-background/95 p-8" role="dialog" aria-modal="true">
+        <div
+          className="fixed inset-0 z-[10000] flex items-center justify-center bg-background/95 p-8"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setPreviewId(null);
+          }}
+        >
           <div className="absolute right-6 top-6 flex items-center gap-2">
             <button
               type="button"

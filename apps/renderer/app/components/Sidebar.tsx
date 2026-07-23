@@ -1,6 +1,7 @@
 'use client';
 
 import { ArrowLeft, ArrowRight, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { useLayoutEffect, useRef, useState } from 'react';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import AppSettingsMenu from './AppSettingsMenu';
 import AppUpdateButton from './AppUpdateButton';
@@ -49,6 +50,8 @@ export default function Sidebar({
   onDeleteFlow,
   onOpenSettings,
 }: SidebarProps) {
+  const bottomActionsRef = useRef<HTMLDivElement>(null);
+  const [bottomActionsWidth, setBottomActionsWidth] = useState(0);
   const isAnimatingDrawer = drawerAnimation !== null;
   const visible = isOpen || isPreviewOpen || isAnimatingDrawer;
   const isOverlay = !isOpen || isAnimatingDrawer;
@@ -63,6 +66,17 @@ export default function Sidebar({
     width: isOverlay ? effectiveWidth : visible ? effectiveWidth : 0,
     '--left-sidebar-width': `${effectiveWidth}px`,
   } as React.CSSProperties;
+
+  useLayoutEffect(() => {
+    const actions = bottomActionsRef.current;
+    if (!actions) return undefined;
+    const updateWidth = () => setBottomActionsWidth(actions.getBoundingClientRect().width);
+    updateWidth();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(actions);
+    return () => observer.disconnect();
+  }, []);
 
   return (
     <>
@@ -155,11 +169,19 @@ export default function Sidebar({
           </div>
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 bg-gradient-to-t from-sidebar via-sidebar/95 to-transparent px-3 pb-3 pt-10">
-            <div className="pointer-events-auto flex items-center justify-between gap-3 rounded-lg border border-sidebar-border/80 bg-sidebar/95 px-3 py-2 shadow-lg backdrop-blur">
-              <div data-testid="sidebar-brand" className="flex min-w-0 items-center">
+            <div className="pointer-events-auto relative flex min-h-10 items-center rounded-lg border border-sidebar-border/80 bg-sidebar/95 px-2 py-2 shadow-lg backdrop-blur">
+              <div
+                data-testid="sidebar-brand"
+                className="pointer-events-none absolute left-1/2 flex min-w-0 -translate-x-1/2 items-center justify-center overflow-hidden"
+                style={{ maxWidth: `calc(100% - ${Math.ceil(bottomActionsWidth * 2 + 16)}px)` }}
+              >
                 <span className="truncate text-sm font-bold text-sidebar-foreground">SquadFlow</span>
               </div>
-              <div data-testid="sidebar-bottom-actions" className="flex shrink-0 items-center gap-2">
+              <div
+                ref={bottomActionsRef}
+                data-testid="sidebar-bottom-actions"
+                className="ml-auto flex shrink-0 items-center gap-1"
+              >
                 <AppUpdateButton />
                 <AppSettingsMenu onOpenSettings={onOpenSettings} />
               </div>

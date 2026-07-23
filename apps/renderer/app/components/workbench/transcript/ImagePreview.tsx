@@ -101,7 +101,10 @@ export function ImagePreviewOverlay({ src, alt, emptyLabel = "暂无图片", onC
       className={styles.browserCommentPreview}
       role="dialog"
       aria-modal="true"
-      onClick={() => setMenu(null)}
+      onClick={(event) => {
+        setMenu(null);
+        if (event.target === event.currentTarget) onClose();
+      }}
     >
       <div className={styles.browserCommentPreviewActions}>
         <button

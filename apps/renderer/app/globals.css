@@ -4,8 +4,10 @@
 @import "./themes/dark.css";
 @import "./themes/light.css";
 @import "./themes/semantic.css";
+@import "katex/dist/katex.min.css";
 @source "../node_modules/streamdown/dist/*.js";
 @source "../node_modules/@streamdown/code/dist/*.js";
+@source "../node_modules/@streamdown/math/dist/*.js";
 @source "../node_modules/@streamdown/mermaid/dist/*.js";
 
 @custom-variant dark (&:is(.dark *));
@@ -404,6 +406,54 @@ html[data-squadflow-desktop="true"] :where(
 
 .sf-markdown [data-streamdown="code-block-body"] code > span {
   padding-right: 1rem;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] {
+  position: relative;
+  gap: 0;
+  overflow: visible;
+  border-color: var(--ui-border-subtle);
+  background: color-mix(in srgb, var(--ui-surface-sunken) 58%, transparent);
+  padding: 0;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] > div:first-child:has([title="复制表格"]) {
+  position: absolute;
+  top: 0.45rem;
+  right: 0.45rem;
+  z-index: 2;
+  border: 1px solid var(--ui-border-subtle);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ui-surface-overlay) 90%, transparent);
+  padding: 0.15rem;
+  box-shadow: var(--ui-shadow-elevated);
+  opacity: 0.72;
+  transition: opacity 140ms ease;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"]:hover > div:first-child,
+.sf-markdown [data-streamdown="table-wrapper"]:focus-within > div:first-child {
+  opacity: 1;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] [title="复制表格"] {
+  display: inline-flex;
+  width: 1.75rem;
+  height: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] > div:last-child {
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+}
+
+.sf-markdown [data-streamdown="table-wrapper"] [data-streamdown="table-header-cell"]:last-child {
+  padding-right: 3.25rem;
 }
 
 .sf-markdown-document {

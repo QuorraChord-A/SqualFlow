@@ -8,18 +8,21 @@ import type { SquadFlow } from '../types';
 
 const readyState: DesktopUpdateState = {
   enabled: true,
+  automaticUpdates: true,
   status: 'ready',
   currentVersion: '0.1.0',
   availableVersion: '0.2.0',
   notes: '修复若干问题',
   progress: 100,
   error: null,
+  lastCheckedAt: '2026-07-22T20:00:00.000Z',
 };
 
 function installBridge(state: DesktopUpdateState) {
   const bridge: DesktopUpdateBridge = {
     getState: vi.fn().mockResolvedValue(state),
     check: vi.fn().mockResolvedValue(state),
+    setAutomaticUpdates: vi.fn().mockResolvedValue(state),
     install: vi.fn().mockResolvedValue(true),
     onState: vi.fn().mockReturnValue(() => {}),
   };
@@ -46,17 +49,22 @@ afterEach(() => {
 });
 
 describe('AppUpdateButton', () => {
-  it('restarts immediately from the ready state when no flow is running', async () => {
+  it('asks for confirmation before restarting from the ready state', async () => {
     const user = userEvent.setup();
     const bridge = installBridge(readyState);
 
     render(<AppUpdateButton />);
 
     const button = await screen.findByRole('button', { name: '重启并更新 SquadFlow 到 0.2.0' });
-    expect(button).toHaveTextContent('更新');
+    expect(button).toHaveAttribute('title', '重启并安装 SquadFlow 到 0.2.0');
+    expect(button.querySelector('svg')).toBeInTheDocument();
     expect(button.className).toContain('bg-emerald-400');
 
     await user.click(button);
+    expect(bridge.install).not.toHaveBeenCalled();
+    expect(await screen.findByText('SquadFlow 将关闭、安装更新并重新打开。确定现在重启吗？')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '重启并更新' }));
     expect(bridge.install).toHaveBeenCalledTimes(1);
   });
 

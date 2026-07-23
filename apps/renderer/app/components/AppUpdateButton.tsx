@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Download } from 'lucide-react';
+import { Download, RefreshCw } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import {
   AlertDialog,
@@ -18,12 +18,14 @@ import { getDesktopUpdateBridge, type DesktopUpdateState } from '../lib/desktopU
 
 const INITIAL_STATE: DesktopUpdateState = {
   enabled: false,
+  automaticUpdates: true,
   status: 'idle',
   currentVersion: '',
   availableVersion: null,
   notes: null,
   progress: null,
   error: null,
+  lastCheckedAt: null,
 };
 
 export default function AppUpdateButton() {
@@ -74,28 +76,31 @@ export default function AppUpdateButton() {
           title={`重启并安装 SquadFlow${versionLabel}`}
           disabled={installing}
           onClick={() => {
-            if (runningFlowCount > 0) {
-              setConfirmOpen(true);
-            } else {
-              install();
-            }
+            setConfirmOpen(true);
           }}
-          className="flex h-9 shrink-0 items-center justify-center rounded-xl bg-emerald-400 px-3 text-xs font-extrabold text-emerald-950 shadow-lg shadow-emerald-500/20 transition-colors hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar disabled:cursor-wait disabled:opacity-70"
+          className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-emerald-400 text-emerald-950 shadow-lg shadow-emerald-500/20 transition-all hover:-translate-y-px hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar active:translate-y-0 disabled:cursor-wait disabled:opacity-70"
         >
-          {installing ? '重启中' : '更新'}
+          <RefreshCw className={`size-4 ${installing ? 'animate-spin' : ''}`} />
         </button>
         <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>重启并更新</AlertDialogTitle>
               <AlertDialogDescription>
-                当前有 <span className="font-medium text-foreground">{runningFlowCount}</span> 个正在运行的 Flow，重启会中断它们。确定现在重启并安装更新吗？
+                {runningFlowCount > 0 ? (
+                  <>
+                    当前有 <span className="font-medium text-foreground">{runningFlowCount}</span> 个正在运行的 Flow，
+                    重启会中断它们。确定现在重启并安装更新吗？
+                  </>
+                ) : (
+                  <>SquadFlow 将关闭、安装更新并重新打开。确定现在重启吗？</>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
               <AlertDialogCancel>取消</AlertDialogCancel>
-              <AlertDialogAction variant="destructive" onClick={install}>
-                中断并重启
+              <AlertDialogAction variant={runningFlowCount > 0 ? "destructive" : "default"} onClick={install}>
+                {runningFlowCount > 0 ? "中断并重启" : "重启并更新"}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>
