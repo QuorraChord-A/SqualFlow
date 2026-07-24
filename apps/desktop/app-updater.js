@@ -272,9 +272,12 @@ async function configurePrivateGitHubBlockMaps(updater) {
         `/repos/${provider.options.owner}/${provider.options.repo}/releases/tags/v${oldVersion}`,
         apiBase,
       );
+      const releaseHeaders = typeof provider.configureHeaders === "function"
+        ? provider.configureHeaders("application/vnd.github.v3+json")
+        : { ...provider.fileExtraDownloadHeaders, accept: "application/vnd.github.v3+json" };
       const rawRelease = await provider.httpRequest(
         releaseUrl,
-        provider.fileExtraDownloadHeaders,
+        releaseHeaders,
         new CancellationToken(),
       );
       const release = JSON.parse(rawRelease);

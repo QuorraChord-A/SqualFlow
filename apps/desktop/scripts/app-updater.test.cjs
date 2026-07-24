@@ -389,6 +389,7 @@ test("resolves private GitHub blockmaps from the matching release assets", async
   const newZipUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/201";
   const newBlockMapUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/202";
   const oldBlockMapUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/101";
+  let releaseRequestHeaders = null;
   const provider = {
     options: { private: true, owner: "QuorraChord-A", repo: "SqualFlow" },
     baseApiUrl: new URL("https://api.github.com/"),
@@ -396,9 +397,12 @@ test("resolves private GitHub blockmaps from the matching release assets", async
     getBlockMapFiles: () => {
       throw new Error("the inherited API-asset path must not be used");
     },
-    httpRequest: async () => JSON.stringify({ assets: [
-      { name: "SquadFlow-0.1.9-arm64-mac.zip.blockmap", url: oldBlockMapUrl },
-    ] }),
+    httpRequest: async (_url, headers) => {
+      releaseRequestHeaders = headers;
+      return JSON.stringify({ assets: [
+        { name: "SquadFlow-0.1.9-arm64-mac.zip.blockmap", url: oldBlockMapUrl },
+      ] });
+    },
   };
   const updater = {
     updateInfoAndProvider: {
@@ -417,6 +421,8 @@ test("resolves private GitHub blockmaps from the matching release assets", async
     await provider.getBlockMapFiles(new URL(newZipUrl), "0.1.9", "0.1.10"),
     [new URL(oldBlockMapUrl), new URL(newBlockMapUrl)],
   );
+  assert.equal(releaseRequestHeaders.accept, "application/vnd.github.v3+json");
+  assert.equal(releaseRequestHeaders.authorization, "token test");
 });
 
 test("uses native differential downloading when an update.zip cache exists", async () => {
