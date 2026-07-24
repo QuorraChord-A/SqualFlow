@@ -31,6 +31,14 @@ function sha512Matches(filePath, expected) {
   return expected === digest.toString("base64") || expected === digest.toString("hex");
 }
 
+function fileUrlText(file) {
+  const value = file?.url;
+  if (typeof value === "string") return value;
+  if (value?.pathname) return value.pathname;
+  if (value?.toString) return value.toString();
+  return String(file?.info?.url || file?.info?.path || "");
+}
+
 function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (redirectCount > 10) {
@@ -156,8 +164,8 @@ function findMacZipFileInfo(updater) {
   const updateInfoAndProvider = updater.updateInfoAndProvider;
   if (!updateInfoAndProvider) throw new Error("Please check for updates before downloading");
   const files = updateInfoAndProvider.provider.resolveFiles(updateInfoAndProvider.info);
-  const zipFiles = files.filter((file) => /\.zip$/i.test(file.url.pathname));
-  return zipFiles.find((file) => /arm64/i.test(file.url.pathname) || /arm64/i.test(file.info?.url || "")) || zipFiles[0];
+  const zipFiles = files.filter((file) => /\.zip(?:\?|$)/i.test(fileUrlText(file)));
+  return zipFiles.find((file) => /arm64/i.test(fileUrlText(file)) || /arm64/i.test(file.info?.url || "")) || zipFiles[0];
 }
 
 async function prepareResumableMacDownload(updater) {
@@ -265,7 +273,7 @@ function createDesktopUpdater({
       ? prepareResumableDownload(updater).then((download) => {
         partialDownload = download;
         return resumableDownload({
-          url: download.fileInfo.url.toString(),
+          url: fileUrlText(download.fileInfo),
           headers: download.headers,
           filePath: download.filePath,
           expectedSha512: download.fileInfo.info.sha512,

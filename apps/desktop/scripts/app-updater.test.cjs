@@ -245,7 +245,7 @@ test("uses the resumable downloader for packaged macOS updates", async () => {
     existsSync: () => true,
     schedule: () => 1,
     prepareResumableDownload: async () => ({
-      fileInfo: { url: new URL("http://127.0.0.1/update.zip"), info: {} },
+      fileInfo: { url: "http://127.0.0.1/update.zip", info: {} },
       fileName: "update-0.2.0.zip",
       filePath: "/tmp/update-0.2.0.zip",
       headers: {},
