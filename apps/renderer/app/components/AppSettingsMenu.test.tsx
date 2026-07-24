@@ -25,6 +25,16 @@ describe("AppSettingsMenu", () => {
     expect(toggle).toHaveAttribute("aria-checked", "false");
   });
 
+  it("shows the settings hint on hover", async () => {
+    const user = userEvent.setup();
+
+    render(<AppSettingsMenu />);
+
+    await user.hover(screen.getByLabelText("设置"));
+
+    expect(await screen.findByText("设置", { selector: '[data-slot="tooltip-content"]' })).toBeInTheDocument();
+  });
+
   it("opens the clear-all flows confirmation from settings", async () => {
     const user = userEvent.setup();
 

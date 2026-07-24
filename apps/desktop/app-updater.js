@@ -148,6 +148,11 @@ function createDesktopUpdater({
     updater.logger = logger;
     updater.autoDownload = true;
     updater.autoInstallOnAppQuit = true;
+    // GitHub's private asset endpoint can resolve the ZIP asset when the
+    // differential blockmap is requested, leaving macOS updates at 0% while
+    // the updater waits on the wrong response. Prefer the reliable full ZIP
+    // download so progress and failure events always reach the UI.
+    updater.disableDifferentialDownload = true;
 
     updater.on("checking-for-update", () => {
       publish({ status: "checking", progress: null, error: null });

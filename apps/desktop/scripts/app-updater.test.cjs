@@ -115,6 +115,7 @@ test("publishes download progress and installs only after the update is ready", 
   controller.initialize();
   assert.equal(updater.autoDownload, true);
   assert.equal(updater.autoInstallOnAppQuit, true);
+  assert.equal(updater.disableDifferentialDownload, true);
   assert.equal(typeof scheduledCheck, "function");
   assert.equal(controller.install(), false);
 
