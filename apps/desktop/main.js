@@ -161,6 +161,10 @@ const desktopUpdater = createDesktopUpdater({
 
 ipcMain.handle("desktop-update:get-state", () => desktopUpdater.getState());
 ipcMain.handle("desktop-update:check", () => desktopUpdater.checkForUpdates());
+ipcMain.handle("desktop-update:download", () => desktopUpdater.download());
+ipcMain.handle("desktop-update:pause", () => desktopUpdater.pause());
+ipcMain.handle("desktop-update:resume", () => desktopUpdater.resume());
+ipcMain.handle("desktop-update:cancel", () => desktopUpdater.cancel());
 ipcMain.handle("desktop-update:set-automatic", (_event, enabled) => desktopUpdater.setAutomaticUpdates(enabled));
 ipcMain.handle("desktop-update:install", () => desktopUpdater.install());
 

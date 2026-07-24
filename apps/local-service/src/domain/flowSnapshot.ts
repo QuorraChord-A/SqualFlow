@@ -57,6 +57,11 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
   );
   const userTurns = store.listUserTurns(flowId);
   const activeUserTurn = userTurns.find((turn) => turn.status === "active" || turn.status === "waiting_user") ?? null;
+  const hasActiveExecution = agentSessions.some((session) => session.status === "queued" || session.status === "streaming")
+    || (activeUserTurn?.status === "active"
+      && store.listUserTurnTasks(activeUserTurn.id).some((task) =>
+        ["queued_for_expert", "recovery_pending", "in_progress"].includes(task.status),
+      ));
 
   const latestSpecRow = store.listSpecRevisions(flowId).reduce<
     ReturnType<Store["listSpecRevisions"]>[number] | null
@@ -71,6 +76,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     name: flow.name,
     name_generation_status: flow.nameGenerationStatus,
     status: flow.status,
+    has_active_execution: hasActiveExecution,
     legacy_spec_flow: flow.legacySpecFlow === 1,
     risk_mode: store.getRiskMode(flow.id),
     plan_approval: store.getPlanApprovalMode(flow.id),

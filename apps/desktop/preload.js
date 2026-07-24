@@ -40,6 +40,10 @@ contextBridge.exposeInMainWorld("squadflowDesktopShell", {
 contextBridge.exposeInMainWorld("squadflowDesktopUpdate", {
   getState: () => ipcRenderer.invoke("desktop-update:get-state"),
   check: () => ipcRenderer.invoke("desktop-update:check"),
+  download: () => ipcRenderer.invoke("desktop-update:download"),
+  pause: () => ipcRenderer.invoke("desktop-update:pause"),
+  resume: () => ipcRenderer.invoke("desktop-update:resume"),
+  cancel: () => ipcRenderer.invoke("desktop-update:cancel"),
   setAutomaticUpdates: (enabled) => ipcRenderer.invoke("desktop-update:set-automatic", Boolean(enabled)),
   install: () => ipcRenderer.invoke("desktop-update:install"),
   onState: (listener) => subscribe("desktop-update:state", listener),

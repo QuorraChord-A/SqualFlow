@@ -33,6 +33,10 @@ function installUpdateBridge(state = updateState) {
   const bridge: DesktopUpdateBridge = {
     getState: vi.fn().mockResolvedValue(state),
     check: vi.fn().mockResolvedValue(state),
+    download: vi.fn().mockResolvedValue(true),
+    pause: vi.fn().mockResolvedValue(true),
+    resume: vi.fn().mockResolvedValue(true),
+    cancel: vi.fn().mockResolvedValue(true),
     setAutomaticUpdates: vi.fn().mockImplementation(async (enabled) => ({
       ...state,
       automaticUpdates: enabled,

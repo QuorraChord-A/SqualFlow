@@ -29,6 +29,7 @@ export interface SquadFlow {
   has_pending_decision?: boolean;
   has_unread_messages?: boolean;
   is_streaming?: boolean;
+  has_active_execution?: boolean;
   leader_runtime_sdk?: string | null;
   leader_runtime_config_id?: string | null;
   leader_runtime_model_id?: string | null;

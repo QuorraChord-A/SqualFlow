@@ -1,15 +1,21 @@
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const { createHash } = require("node:crypto");
+const { createServer } = require("node:http");
+const { mkdtemp, readFile, rm, stat } = require("node:fs/promises");
+const { tmpdir } = require("node:os");
+const { join } = require("node:path");
 const { readFileSync } = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createDesktopUpdater } = require("../app-updater");
+const { createDesktopUpdater, downloadFileWithResume } = require("../app-updater");
 const releaseConfig = require("../electron-builder.release.cjs");
 const privateTestConfig = require("../electron-builder.private-test.cjs");
 
 function createUpdater() {
   const updater = new EventEmitter();
   updater.checkForUpdates = async () => null;
+  updater.downloadUpdate = async () => [];
   updater.quitAndInstall = () => {};
   return updater;
 }
@@ -113,13 +119,14 @@ test("publishes download progress and installs only after the update is ready", 
   });
 
   controller.initialize();
-  assert.equal(updater.autoDownload, true);
-  assert.equal(updater.autoInstallOnAppQuit, true);
+  assert.equal(updater.autoDownload, false);
+  assert.equal(updater.autoInstallOnAppQuit, false);
   assert.equal(updater.disableDifferentialDownload, true);
   assert.equal(typeof scheduledCheck, "function");
   assert.equal(controller.install(), false);
 
   updater.emit("update-available", { version: "0.2.0", releaseNotes: "修复若干问题" });
+  assert.equal(controller.getState().status, "downloading");
   updater.emit("download-progress", { percent: 43.6 });
   assert.equal(controller.getState().status, "downloading");
   assert.equal(controller.getState().progress, 44);
@@ -140,6 +147,151 @@ test("publishes download progress and installs only after the update is ready", 
   assert.equal(sentStates.at(-1).status, "ready");
   assert.equal(controller.install(), true);
   assert.equal(installCalls, 1);
+});
+
+test("supports pausing, resuming, and cancelling a download", async () => {
+  const updater = createUpdater();
+  let token = null;
+  updater.downloadUpdate = async (nextToken) => {
+    token = nextToken;
+    await new Promise((resolve) => nextToken.once("cancel", resolve));
+    throw new (require("builder-util-runtime").CancellationError)();
+  };
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+  });
+
+  controller.initialize();
+  updater.emit("update-available", { version: "0.2.0" });
+  assert.equal(controller.getState().status, "downloading");
+  assert.ok(token);
+  assert.equal(controller.pause(), true);
+  assert.equal(controller.getState().status, "paused");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(controller.resume(), true);
+  assert.equal(controller.cancel(), true);
+  assert.equal(controller.getState().status, "available");
+});
+
+test("resumes a partial ZIP download with an HTTP range request", async () => {
+  const payload = Buffer.alloc(256 * 1024, 7);
+  const sha512 = createHash("sha512").update(payload).digest("base64");
+  const ranges = [];
+  let interrupted = false;
+  const server = createServer((request, response) => {
+    const range = request.headers.range || null;
+    ranges.push(range);
+    const start = range ? Number(range.match(/bytes=(\d+)-/)?.[1] || 0) : 0;
+    response.statusCode = range ? 206 : 200;
+    response.setHeader("Content-Length", payload.length - start);
+    if (range) response.setHeader("Content-Range", `bytes ${start}-${payload.length - 1}/${payload.length}`);
+    response.write(payload.subarray(start, interrupted ? Math.min(start + 32 * 1024, payload.length) : payload.length));
+    if (!interrupted) {
+      response.end();
+    } else {
+      interrupted = false;
+      setTimeout(() => response.destroy(), 10);
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const url = `http://127.0.0.1:${address.port}/update.zip`;
+  const tempRoot = await mkdtemp(join(tmpdir(), "squadflow-update-"));
+  const filePath = join(tempRoot, "update.zip");
+  try {
+    interrupted = true;
+    await assert.rejects(downloadFileWithResume({
+      url,
+      filePath,
+      expectedSize: payload.length,
+      expectedSha512: sha512,
+      cancellationToken: new (require("builder-util-runtime").CancellationToken)(),
+    }));
+    assert.ok((await stat(filePath)).size > 0);
+
+    await downloadFileWithResume({
+      url,
+      filePath,
+      expectedSize: payload.length,
+      expectedSha512: sha512,
+      cancellationToken: new (require("builder-util-runtime").CancellationToken)(),
+    });
+    assert.equal(ranges.length, 2);
+    assert.match(ranges[1], /^bytes=\d+\-/);
+    assert.deepEqual(await readFile(filePath), payload);
+  } finally {
+    server.close();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("uses the resumable downloader for packaged macOS updates", async () => {
+  const updater = createUpdater();
+  let resumableCalls = 0;
+  updater.updateDownloaded = async () => {};
+  updater.getOrCreateDownloadHelper = async () => ({});
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+    prepareResumableDownload: async () => ({
+      fileInfo: { url: new URL("http://127.0.0.1/update.zip"), info: {} },
+      fileName: "update-0.2.0.zip",
+      filePath: "/tmp/update-0.2.0.zip",
+      headers: {},
+      helper: {},
+      updateInfo: { version: "0.2.0" },
+    }),
+    resumableDownload: async ({ onProgress }) => {
+      resumableCalls += 1;
+      onProgress(42);
+    },
+    completeResumableDownload: async () => updater.emit("update-downloaded", { version: "0.2.0" }),
+  });
+
+  controller.initialize();
+  updater.emit("update-available", { version: "0.2.0" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resumableCalls, 1);
+  assert.equal(controller.getState().status, "ready");
+  assert.equal(controller.getState().progress, 100);
+});
+
+test("keeps a discovered update available when automatic downloads are disabled", async () => {
+  const updater = createUpdater();
+  let downloadCalls = 0;
+  updater.downloadUpdate = async () => {
+    downloadCalls += 1;
+    return [];
+  };
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+  });
+
+  controller.initialize();
+  controller.setAutomaticUpdates(false);
+  updater.emit("update-available", { version: "0.2.0" });
+  assert.equal(controller.getState().status, "available");
+  assert.equal(downloadCalls, 0);
+  assert.equal(controller.download(), true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(downloadCalls, 1);
 });
 
 test("persists the automatic-update preference while keeping manual checks available", async () => {

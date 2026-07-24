@@ -22,6 +22,10 @@ function installBridge(state: DesktopUpdateState) {
   const bridge: DesktopUpdateBridge = {
     getState: vi.fn().mockResolvedValue(state),
     check: vi.fn().mockResolvedValue(state),
+    download: vi.fn().mockResolvedValue(true),
+    pause: vi.fn().mockResolvedValue(true),
+    resume: vi.fn().mockResolvedValue(true),
+    cancel: vi.fn().mockResolvedValue(true),
     setAutomaticUpdates: vi.fn().mockResolvedValue(state),
     install: vi.fn().mockResolvedValue(true),
     onState: vi.fn().mockReturnValue(() => {}),
@@ -37,6 +41,7 @@ function activeFlow(id: string): SquadFlow {
     description: '',
     type: 'full',
     status: 'active',
+    has_active_execution: true,
     current_stage: null,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
@@ -64,9 +69,9 @@ describe('AppUpdateButton', () => {
 
     await user.click(button);
     expect(bridge.install).not.toHaveBeenCalled();
-    expect(await screen.findByText('SquadFlow 将关闭、安装更新并重新打开。确定现在重启吗？')).toBeInTheDocument();
+    expect(await screen.findByText('SquadFlow 将安装更新并重新打开。')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: '重启并更新' }));
+    await user.click(screen.getByRole('button', { name: '重启' }));
     expect(bridge.install).toHaveBeenCalledTimes(1);
   });
 
@@ -85,9 +90,22 @@ describe('AppUpdateButton', () => {
     expect(bridge.install).toHaveBeenCalledTimes(1);
   });
 
+  it('does not warn for an active flow that is waiting for user input', async () => {
+    const user = userEvent.setup();
+    const bridge = installBridge(readyState);
+    useFlowStore.setState({ flows: [{ ...activeFlow('f1'), has_active_execution: false, is_streaming: false }] });
+
+    render(<AppUpdateButton />);
+
+    await user.click(await screen.findByRole('button', { name: '重启并更新 SquadFlow 到 0.2.0' }));
+    expect(await screen.findByText('SquadFlow 将安装更新并重新打开。')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '中断并重启' })).not.toBeInTheDocument();
+    expect(bridge.install).not.toHaveBeenCalled();
+  });
+
   it('shows download progress and opens details with release notes on click', async () => {
     const user = userEvent.setup();
-    installBridge({ ...readyState, status: 'downloading', progress: 42 });
+    const bridge = installBridge({ ...readyState, status: 'downloading', progress: 42 });
 
     render(<AppUpdateButton />);
 
@@ -95,8 +113,10 @@ describe('AppUpdateButton', () => {
     expect(trigger).not.toHaveTextContent('42%');
 
     await user.click(trigger);
-    expect(await screen.findByText('正在下载 0.2.0，42%')).toBeInTheDocument();
+    expect(await screen.findByText('正在下载 0.2.0 · 42%')).toBeInTheDocument();
     expect(screen.getByText('修复若干问题')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '暂停' }));
+    expect(bridge.pause).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a retry action visible after a download error', async () => {
@@ -111,9 +131,9 @@ describe('AppUpdateButton', () => {
 
     render(<AppUpdateButton />);
 
-    const retryButton = await screen.findByRole('button', { name: '下载失败，重试' });
+    const retryButton = await screen.findByRole('button', { name: '下载失败，重新下载' });
     await user.click(retryButton);
-    expect(bridge.check).toHaveBeenCalledTimes(1);
+    expect(bridge.resume).toHaveBeenCalledTimes(1);
   });
 
   it('stays hidden when automatic updates are unavailable', async () => {

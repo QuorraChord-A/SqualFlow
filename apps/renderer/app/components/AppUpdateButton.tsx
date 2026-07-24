@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import { Download, RefreshCw, RotateCcw } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Download, Pause, Play, RefreshCw, RotateCcw, X } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
@@ -15,7 +15,7 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { useFlowStore } from '../stores/useFlowStore';
-import { getDesktopUpdateBridge, type DesktopUpdateState } from '../lib/desktopUpdate';
+import { getDesktopUpdateBridge, type DesktopUpdateBridge, type DesktopUpdateState } from '../lib/desktopUpdate';
 
 const INITIAL_STATE: DesktopUpdateState = {
   enabled: false,
@@ -29,14 +29,22 @@ const INITIAL_STATE: DesktopUpdateState = {
   lastCheckedAt: null,
 };
 
+type ConfirmationMode = 'download' | 'install' | null;
+
+function refreshBridgeState(bridge: DesktopUpdateBridge, setState: (state: DesktopUpdateState) => void) {
+  void bridge.getState().then(setState).catch(() => {});
+}
+
 export default function AppUpdateButton() {
   const [state, setState] = useState<DesktopUpdateState>(INITIAL_STATE);
   const [hasBridge, setHasBridge] = useState(false);
   const [installing, setInstalling] = useState(false);
-  const [retrying, setRetrying] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmationMode, setConfirmationMode] = useState<ConfirmationMode>(null);
+  const [popoverOpen, setPopoverOpen] = useState(false);
   const flows = useFlowStore((s) => s.flows);
-  const runningFlowCount = flows.filter((flow) => flow.status === 'active' || flow.is_streaming).length;
+  const runningFlowCount = flows.filter((flow) => flow.has_active_execution === true || flow.is_streaming === true).length;
+  const autoInstallVersion = useRef<string | null>(null);
 
   useEffect(() => {
     const bridge = getDesktopUpdateBridge();
@@ -47,9 +55,9 @@ export default function AppUpdateButton() {
     const unsubscribe = bridge.onState((nextState) => {
       if (active) setState(nextState);
     });
-    void bridge.getState().then((nextState) => {
+    refreshBridgeState(bridge, (nextState) => {
       if (active) setState(nextState);
-    }).catch(() => {});
+    });
 
     return () => {
       active = false;
@@ -57,145 +65,189 @@ export default function AppUpdateButton() {
     };
   }, []);
 
+  useEffect(() => {
+    if (state.status !== 'ready' || state.automaticUpdates || !state.availableVersion) return;
+    if (autoInstallVersion.current === state.availableVersion) return;
+    autoInstallVersion.current = state.availableVersion;
+    if (runningFlowCount > 0) {
+      setConfirmationMode('install');
+      setConfirmOpen(true);
+      return;
+    }
+    const bridge = getDesktopUpdateBridge();
+    if (bridge) {
+      setInstalling(true);
+      void bridge.install().then((accepted) => {
+        if (!accepted) setInstalling(false);
+      }).catch(() => setInstalling(false));
+    }
+  }, [runningFlowCount, state.availableVersion, state.automaticUpdates, state.status]);
+
   if (!hasBridge) return null;
 
+  const bridge = getDesktopUpdateBridge();
+  if (!bridge) return null;
+
+  const openConfirmation = (mode: ConfirmationMode) => {
+    setConfirmationMode(mode);
+    setConfirmOpen(true);
+  };
+
   const install = () => {
-    const bridge = getDesktopUpdateBridge();
-    if (!bridge) return;
     setInstalling(true);
     void bridge.install().then((accepted) => {
       if (!accepted) setInstalling(false);
     }).catch(() => setInstalling(false));
   };
 
-  const retry = () => {
-    const bridge = getDesktopUpdateBridge();
-    if (!bridge) return;
-    setRetrying(true);
-    void bridge.check()
-      .then((nextState) => setState(nextState))
-      .catch(() => {})
-      .finally(() => setRetrying(false));
+  const startDownload = () => {
+    setPopoverOpen(false);
+    void bridge.download().then(() => refreshBridgeState(bridge, setState)).catch(() => {});
   };
 
-  if (state.status === 'ready') {
-    const versionLabel = state.availableVersion ? ` 到 ${state.availableVersion}` : '';
-    return (
-      <>
-        <Tooltip>
-          <TooltipTrigger
-            render={(
-              <button
-                type="button"
-                aria-label={`重启并更新 SquadFlow${versionLabel}`}
-                disabled={installing}
-                onClick={() => {
-                  setConfirmOpen(true);
-                }}
-                className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-sidebar-accent px-2.5 text-xs font-semibold text-sidebar-accent-foreground transition-colors hover:bg-sidebar-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring disabled:cursor-wait disabled:opacity-70"
-              />
-            )}
-          >
-            <RefreshCw className={`size-3.5 ${installing ? 'animate-spin' : ''}`} />
-            <span>重启</span>
-          </TooltipTrigger>
-          <TooltipContent side="top">重启并更新</TooltipContent>
-        </Tooltip>
-        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>重启并更新</AlertDialogTitle>
-              <AlertDialogDescription>
-                {runningFlowCount > 0 ? (
-                  <>
-                    当前有 <span className="font-medium text-foreground">{runningFlowCount}</span> 个正在运行的 Flow，
-                    重启会中断它们。确定现在重启并安装更新吗？
-                  </>
-                ) : (
-                  <>SquadFlow 将关闭、安装更新并重新打开。确定现在重启吗？</>
-                )}
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>取消</AlertDialogCancel>
-              <AlertDialogAction variant={runningFlowCount > 0 ? "destructive" : "default"} onClick={install}>
-                {runningFlowCount > 0 ? "中断并重启" : "重启并更新"}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
-      </>
+  const pauseDownload = () => {
+    void bridge.pause().then(() => refreshBridgeState(bridge, setState)).catch(() => {});
+  };
+
+  const resumeDownload = () => {
+    void bridge.resume().then(() => refreshBridgeState(bridge, setState)).catch(() => {});
+  };
+
+  const cancelDownload = () => {
+    setPopoverOpen(false);
+    void bridge.cancel().then(() => refreshBridgeState(bridge, setState)).catch(() => {});
+  };
+
+  const downloadAction = state.automaticUpdates ? (
+    <AlertDialogAction onClick={startDownload}>开始下载</AlertDialogAction>
+  ) : (
+    <AlertDialogAction onClick={startDownload}>开始下载</AlertDialogAction>
+  );
+
+  const installDescription = runningFlowCount > 0
+    ? `当前有 ${runningFlowCount} 个正在执行的 Flow，重启会中断它们。`
+    : 'SquadFlow 将安装更新并重新打开。';
+
+  const confirmDialog = (
+    <AlertDialog open={confirmOpen} onOpenChange={(open) => {
+      setConfirmOpen(open);
+      if (!open) setConfirmationMode(null);
+    }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{confirmationMode === 'download' ? '下载更新' : '重启并更新'}</AlertDialogTitle>
+          <AlertDialogDescription>
+            {confirmationMode === 'download'
+              ? `将下载 SquadFlow ${state.availableVersion ?? '新版本'}。下载完成后会自动重启。`
+              : installDescription}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>取消</AlertDialogCancel>
+          {confirmationMode === 'download' ? downloadAction : (
+            <AlertDialogAction variant={runningFlowCount > 0 ? 'destructive' : 'default'} onClick={install}>
+              {runningFlowCount > 0 ? '中断并重启' : '重启'}
+            </AlertDialogAction>
+          )}
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+
+  if (state.status === 'available') {
+    const trigger = (
+      <button
+        type="button"
+        aria-label={`下载 SquadFlow 更新${state.availableVersion ? ` 到 ${state.availableVersion}` : ''}`}
+        onClick={() => state.automaticUpdates ? startDownload() : openConfirmation('download')}
+        className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-sidebar-accent px-2.5 text-xs font-semibold text-sidebar-accent-foreground transition-colors hover:bg-sidebar-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+      >
+        <Download className="size-3.5" />
+        <span>下载</span>
+      </button>
     );
+    return <><Tooltip><TooltipTrigger render={trigger} /><TooltipContent side="top">有新版本，点击下载</TooltipContent></Tooltip>{confirmDialog}</>;
   }
 
-  if (state.status === 'error') {
-    return (
+  if (state.status === 'ready') {
+    return <>
       <Tooltip>
         <TooltipTrigger
           render={(
             <button
               type="button"
-              aria-label="下载失败，重试"
-              disabled={retrying}
-              onClick={retry}
-              className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring disabled:cursor-wait disabled:opacity-70"
+              aria-label={`重启并更新 SquadFlow${state.availableVersion ? ` 到 ${state.availableVersion}` : ''}`}
+              disabled={installing}
+              onClick={() => openConfirmation('install')}
+              className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-sidebar-accent px-2.5 text-xs font-semibold text-sidebar-accent-foreground transition-colors hover:bg-sidebar-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring disabled:cursor-wait disabled:opacity-70"
             />
           )}
         >
-          <RotateCcw className={`size-3.5 ${retrying ? 'animate-spin' : ''}`} />
-          <span>重试</span>
+          <RefreshCw className={`size-3.5 ${installing ? 'animate-spin' : ''}`} />
+          <span>重启</span>
         </TooltipTrigger>
-        <TooltipContent side="top">下载失败，点击重试</TooltipContent>
+        <TooltipContent side="top">重启并更新</TooltipContent>
       </Tooltip>
-    );
+      {confirmDialog}
+    </>;
   }
 
-  if (state.status !== 'downloading') return null;
+  if (state.status === 'error') {
+    return <Tooltip>
+      <TooltipTrigger
+        render={(
+          <button
+            type="button"
+            aria-label="下载失败，重新下载"
+            onClick={resumeDownload}
+            className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          />
+        )}
+      >
+        <RotateCcw className="size-3.5" />
+        <span>重试</span>
+      </TooltipTrigger>
+      <TooltipContent side="top">下载失败，点击重新下载</TooltipContent>
+    </Tooltip>;
+  }
 
-  return (
+  if (state.status !== 'downloading' && state.status !== 'paused') return null;
+
+  const paused = state.status === 'paused';
+  const tooltipText = paused
+    ? `已暂停${state.progress === null ? '' : ` · ${state.progress}%`} · 点击继续`
+    : `正在下载更新${state.progress === null ? '' : ` · ${state.progress}%`} · 点击管理`;
+  return <>
     <Tooltip>
       <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
-        <Popover>
+        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
           <PopoverTrigger
-            aria-label={`正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`}
+            aria-label={paused
+              ? `已暂停 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`
+              : `正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`}
             className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-sidebar-border bg-sidebar-accent/60 text-sidebar-foreground transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
           >
-            <span
-              aria-hidden="true"
-              className="absolute inset-x-0 bottom-0 bg-sidebar-primary/20 transition-[height]"
-              style={{ height: `${state.progress ?? 0}%` }}
-            />
-            <Download className="relative z-10 size-3.5" />
+            <span aria-hidden="true" className="absolute inset-x-0 bottom-0 bg-sidebar-primary/20 transition-[height]" style={{ height: `${state.progress ?? 0}%` }} />
+            {paused ? <Play className="relative z-10 size-3.5" /> : <Download className="relative z-10 size-3.5" />}
           </PopoverTrigger>
           <PopoverContent align="start" side="top" className="w-72 p-4">
             <div className="space-y-3 text-sm">
               <div className="font-medium text-foreground">应用更新</div>
-              <div className="text-xs text-muted-foreground">
-                当前版本 {state.currentVersion || '未知'}
-              </div>
+              <div className="text-xs text-muted-foreground">当前版本 {state.currentVersion || '未知'}</div>
               <div className="text-xs text-muted-foreground" role="status">
-                正在下载 {state.availableVersion ?? '新版本'}{state.progress === null ? '' : `，${state.progress}%`}
+                {paused ? '已暂停' : '正在下载'} {state.availableVersion ?? '新版本'}{state.progress === null ? '' : ` · ${state.progress}%`}
               </div>
-              {state.progress !== null && (
-                <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full bg-sidebar-primary transition-[width]"
-                    style={{ width: `${state.progress}%` }}
-                  />
-                </div>
-              )}
-              {state.notes && (
-                <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">
-                  {state.notes}
-                </div>
-              )}
+              <div className="h-1 w-full overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-sidebar-primary transition-[width]" style={{ width: `${state.progress ?? 0}%` }} /></div>
+              {state.notes && <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">{state.notes}</div>}
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={cancelDownload} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted"><X className="size-3" />中止</button>
+                <button type="button" onClick={paused ? resumeDownload : pauseDownload} className="inline-flex items-center gap-1 rounded-md bg-sidebar-accent px-2 py-1 text-xs text-sidebar-accent-foreground hover:bg-sidebar-accent/80">{paused ? <Play className="size-3" /> : <Pause className="size-3" />}{paused ? '继续' : '暂停'}</button>
+              </div>
             </div>
           </PopoverContent>
         </Popover>
       </TooltipTrigger>
-      <TooltipContent side="top">
-        正在下载更新{state.progress === null ? '' : ` · ${state.progress}%`}
-      </TooltipContent>
+      <TooltipContent side="top">{tooltipText}</TooltipContent>
     </Tooltip>
-  );
+  </>;
 }

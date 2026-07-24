@@ -37,6 +37,20 @@ describe("Execution protocol removal", () => {
     expect(snapshot).not.toHaveProperty("executions");
   });
 
+  it("does not treat a user-waiting Flow as active execution", () => {
+    const store = createStore(":memory:");
+    stores.push(store);
+    store.migrate();
+    const flow = store.createFlow({ name: "Flow", description: "", projectId: null });
+    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    store.pauseUserTurnForUserAction(userTurn.id);
+
+    expect(buildFlowSnapshot(store, flow.id)).toEqual(expect.objectContaining({
+      status: "active",
+      has_active_execution: false,
+    }));
+  });
+
   it("returns 404 for the removed executions REST endpoint", async () => {
     const store = createStore(":memory:");
     stores.push(store);
