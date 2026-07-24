@@ -1,8 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Download, RefreshCw } from 'lucide-react';
+import { Download, RefreshCw, RotateCcw } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -32,6 +33,7 @@ export default function AppUpdateButton() {
   const [state, setState] = useState<DesktopUpdateState>(INITIAL_STATE);
   const [hasBridge, setHasBridge] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const flows = useFlowStore((s) => s.flows);
   const runningFlowCount = flows.filter((flow) => flow.status === 'active' || flow.is_streaming).length;
@@ -66,22 +68,39 @@ export default function AppUpdateButton() {
     }).catch(() => setInstalling(false));
   };
 
+  const retry = () => {
+    const bridge = getDesktopUpdateBridge();
+    if (!bridge) return;
+    setRetrying(true);
+    void bridge.check()
+      .then((nextState) => setState(nextState))
+      .catch(() => {})
+      .finally(() => setRetrying(false));
+  };
+
   if (state.status === 'ready') {
     const versionLabel = state.availableVersion ? ` 到 ${state.availableVersion}` : '';
     return (
       <>
-        <button
-          type="button"
-          aria-label={`重启并更新 SquadFlow${versionLabel}`}
-          title={`重启并安装 SquadFlow${versionLabel}`}
-          disabled={installing}
-          onClick={() => {
-            setConfirmOpen(true);
-          }}
-          className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-emerald-400 text-emerald-950 shadow-lg shadow-emerald-500/20 transition-all hover:-translate-y-px hover:bg-emerald-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300 focus-visible:ring-offset-2 focus-visible:ring-offset-sidebar active:translate-y-0 disabled:cursor-wait disabled:opacity-70"
-        >
-          <RefreshCw className={`size-4 ${installing ? 'animate-spin' : ''}`} />
-        </button>
+        <Tooltip>
+          <TooltipTrigger
+            render={(
+              <button
+                type="button"
+                aria-label={`重启并更新 SquadFlow${versionLabel}`}
+                disabled={installing}
+                onClick={() => {
+                  setConfirmOpen(true);
+                }}
+                className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg bg-sidebar-accent px-2.5 text-xs font-semibold text-sidebar-accent-foreground transition-colors hover:bg-sidebar-accent/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring disabled:cursor-wait disabled:opacity-70"
+              />
+            )}
+          >
+            <RefreshCw className={`size-3.5 ${installing ? 'animate-spin' : ''}`} />
+            <span>重启</span>
+          </TooltipTrigger>
+          <TooltipContent side="top">重启并更新</TooltipContent>
+        </Tooltip>
         <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
           <AlertDialogContent>
             <AlertDialogHeader>
@@ -109,42 +128,74 @@ export default function AppUpdateButton() {
     );
   }
 
+  if (state.status === 'error') {
+    return (
+      <Tooltip>
+        <TooltipTrigger
+          render={(
+            <button
+              type="button"
+              aria-label="下载失败，重试"
+              disabled={retrying}
+              onClick={retry}
+              className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring disabled:cursor-wait disabled:opacity-70"
+            />
+          )}
+        >
+          <RotateCcw className={`size-3.5 ${retrying ? 'animate-spin' : ''}`} />
+          <span>重试</span>
+        </TooltipTrigger>
+        <TooltipContent side="top">下载失败，点击重试</TooltipContent>
+      </Tooltip>
+    );
+  }
+
   if (state.status !== 'downloading') return null;
 
   return (
-    <Popover>
-      <PopoverTrigger
-        aria-label={`正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`}
-        title="正在下载更新"
-        className="flex h-9 min-w-14 shrink-0 items-center justify-center gap-1.5 rounded-xl border border-emerald-400/35 bg-emerald-400/15 px-2.5 text-xs font-bold tabular-nums text-emerald-500 transition-colors hover:bg-emerald-400/25"
-      >
-        <Download className="size-3.5" />
-        {state.progress === null ? '下载中' : `${state.progress}%`}
-      </PopoverTrigger>
-      <PopoverContent align="start" side="top" className="w-72 p-4">
-        <div className="space-y-3 text-sm">
-          <div className="font-medium text-foreground">应用更新</div>
-          <div className="text-xs text-muted-foreground">
-            当前版本 {state.currentVersion || '未知'}
-          </div>
-          <div className="text-xs text-muted-foreground" role="status">
-            正在下载 {state.availableVersion ?? '新版本'}{state.progress === null ? '' : `，${state.progress}%`}
-          </div>
-          {state.progress !== null && (
-            <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-emerald-400 transition-[width]"
-                style={{ width: `${state.progress}%` }}
-              />
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex shrink-0" />}>
+        <Popover>
+          <PopoverTrigger
+            aria-label={`正在下载 SquadFlow 更新${state.progress === null ? '' : `，${state.progress}%`}`}
+            className="relative flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-sidebar-border bg-sidebar-accent/60 text-sidebar-foreground transition-colors hover:bg-sidebar-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          >
+            <span
+              aria-hidden="true"
+              className="absolute inset-x-0 bottom-0 bg-sidebar-primary/20 transition-[height]"
+              style={{ height: `${state.progress ?? 0}%` }}
+            />
+            <Download className="relative z-10 size-3.5" />
+          </PopoverTrigger>
+          <PopoverContent align="start" side="top" className="w-72 p-4">
+            <div className="space-y-3 text-sm">
+              <div className="font-medium text-foreground">应用更新</div>
+              <div className="text-xs text-muted-foreground">
+                当前版本 {state.currentVersion || '未知'}
+              </div>
+              <div className="text-xs text-muted-foreground" role="status">
+                正在下载 {state.availableVersion ?? '新版本'}{state.progress === null ? '' : `，${state.progress}%`}
+              </div>
+              {state.progress !== null && (
+                <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-sidebar-primary transition-[width]"
+                    style={{ width: `${state.progress}%` }}
+                  />
+                </div>
+              )}
+              {state.notes && (
+                <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">
+                  {state.notes}
+                </div>
+              )}
             </div>
-          )}
-          {state.notes && (
-            <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">
-              {state.notes}
-            </div>
-          )}
-        </div>
-      </PopoverContent>
-    </Popover>
+          </PopoverContent>
+        </Popover>
+      </TooltipTrigger>
+      <TooltipContent side="top">
+        正在下载更新{state.progress === null ? '' : ` · ${state.progress}%`}
+      </TooltipContent>
+    </Tooltip>
   );
 }

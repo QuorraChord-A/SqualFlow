@@ -56,9 +56,11 @@ describe('AppUpdateButton', () => {
     render(<AppUpdateButton />);
 
     const button = await screen.findByRole('button', { name: '重启并更新 SquadFlow 到 0.2.0' });
-    expect(button).toHaveAttribute('title', '重启并安装 SquadFlow 到 0.2.0');
     expect(button.querySelector('svg')).toBeInTheDocument();
-    expect(button.className).toContain('bg-emerald-400');
+    expect(button.className).toContain('bg-sidebar-accent');
+    expect(button).toHaveTextContent('重启');
+    await user.hover(button);
+    expect(await screen.findByText('重启并更新')).toBeInTheDocument();
 
     await user.click(button);
     expect(bridge.install).not.toHaveBeenCalled();
@@ -90,11 +92,28 @@ describe('AppUpdateButton', () => {
     render(<AppUpdateButton />);
 
     const trigger = await screen.findByRole('button', { name: '正在下载 SquadFlow 更新，42%' });
-    expect(trigger).toHaveTextContent('42%');
+    expect(trigger).not.toHaveTextContent('42%');
 
     await user.click(trigger);
     expect(await screen.findByText('正在下载 0.2.0，42%')).toBeInTheDocument();
     expect(screen.getByText('修复若干问题')).toBeInTheDocument();
+  });
+
+  it('keeps a retry action visible after a download error', async () => {
+    const user = userEvent.setup();
+    const bridge = installBridge({
+      ...readyState,
+      status: 'error',
+      availableVersion: '0.2.0',
+      error: '网络连接中断',
+      progress: null,
+    });
+
+    render(<AppUpdateButton />);
+
+    const retryButton = await screen.findByRole('button', { name: '下载失败，重试' });
+    await user.click(retryButton);
+    expect(bridge.check).toHaveBeenCalledTimes(1);
   });
 
   it('stays hidden when automatic updates are unavailable', async () => {

@@ -111,7 +111,7 @@ describe("AppSettingsDialog", () => {
     expect(themeSelect).not.toHaveTextContent("system");
   });
 
-  it("controls background updates and supports a manual update check", async () => {
+  it("controls background updates and keeps the version row concise", async () => {
     const user = userEvent.setup();
     const bridge = installUpdateBridge();
 
@@ -119,14 +119,12 @@ describe("AppSettingsDialog", () => {
 
     const automaticUpdates = await screen.findByRole("switch", { name: "自动更新" });
     expect(automaticUpdates).toBeChecked();
-    expect(screen.getByText(/不会自动重启/)).toBeInTheDocument();
+    expect(screen.queryByText(/不会自动重启/)).not.toBeInTheDocument();
     expect(screen.getByText("版本 0.1.0")).toBeInTheDocument();
 
     await user.click(automaticUpdates);
     expect(bridge.setAutomaticUpdates).toHaveBeenCalledWith(false);
-
-    await user.click(screen.getByRole("button", { name: "检查更新" }));
-    expect(bridge.check).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "检查更新" })).not.toBeInTheDocument();
   });
 
   it("does not render role switches with initial defaults while agent settings are loading", async () => {

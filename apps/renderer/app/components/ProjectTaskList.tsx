@@ -12,6 +12,7 @@ import {
   Maximize2,
   Minimize2,
   MoreHorizontal,
+  Plus,
   RefreshCw,
   Trash2,
 } from 'lucide-react';
@@ -315,8 +316,9 @@ export default function ProjectTaskList({
         <button
           type="button"
           onClick={onNewTask}
-          className="flex h-10 w-full items-center justify-center gap-2 rounded-xl border border-sidebar-foreground/35 bg-sidebar px-3 text-sm font-semibold text-sidebar-foreground shadow-sm ring-1 ring-inset ring-sidebar-foreground/5 transition-[background-color,border-color,transform,box-shadow] hover:-translate-y-px hover:border-sidebar-foreground/55 hover:bg-sidebar-accent hover:shadow-md active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
+          className="flex h-9 w-full items-center justify-start gap-2 rounded-lg border-0 bg-transparent px-3 text-sm font-medium text-sidebar-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sidebar-ring"
         >
+          <Plus className="size-4" />
           新建流程
         </button>
       </div>

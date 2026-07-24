@@ -172,10 +172,10 @@ export default function Sidebar({
             <div className="pointer-events-auto relative flex min-h-10 items-center rounded-lg border border-sidebar-border/80 bg-sidebar/95 px-2 py-2 shadow-lg backdrop-blur">
               <div
                 data-testid="sidebar-brand"
-                className="pointer-events-none absolute left-1/2 flex min-w-0 -translate-x-1/2 items-center justify-center overflow-hidden"
-                style={{ maxWidth: `calc(100% - ${Math.ceil(bottomActionsWidth * 2 + 16)}px)` }}
+                className="pointer-events-none absolute left-8 flex min-w-0 items-center justify-start overflow-hidden"
+                style={{ maxWidth: `calc(100% - ${Math.ceil(bottomActionsWidth + 48)}px)` }}
               >
-                <span className="truncate text-sm font-bold text-sidebar-foreground">SquadFlow</span>
+                <span className="truncate text-sm font-semibold text-sidebar-foreground">SquadFlow</span>
               </div>
               <div
                 ref={bottomActionsRef}

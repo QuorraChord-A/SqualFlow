@@ -113,8 +113,9 @@ describe("Sidebar", () => {
 
     expect(bottomOverlay).toHaveClass("bottom-0");
     expect(settingsButton.closest(".absolute")).toBe(bottomOverlay);
-    expect(brandContainer).toHaveClass("left-1/2", "-translate-x-1/2");
-    expect(brandContainer).toHaveStyle({ maxWidth: "calc(100% - 16px)" });
+    expect(brandContainer).toHaveClass("left-8");
+    expect(brandContainer).not.toHaveClass("-translate-x-1/2");
+    expect(brandContainer).toHaveStyle({ maxWidth: "calc(100% - 48px)" });
     expect(brandContainer.querySelector("svg")).toBeNull();
     expect(bottomActions.children[0]).toBe(updateButton);
     expect(bottomActions.children[1]).toBe(settingsButton);
