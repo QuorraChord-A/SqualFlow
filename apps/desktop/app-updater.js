@@ -164,9 +164,36 @@ async function downloadFileWithResume({ url, headers = {}, filePath, expectedSha
 function findMacZipFileInfo(updater) {
   const updateInfoAndProvider = updater.updateInfoAndProvider;
   if (!updateInfoAndProvider) throw new Error("Please check for updates before downloading");
-  const files = updateInfoAndProvider.provider.resolveFiles(updateInfoAndProvider.info);
+  const { provider, info } = updateInfoAndProvider;
+  let files = [];
+  try {
+    files = provider.resolveFiles(info) || [];
+  } catch {
+    files = [];
+  }
   const zipFiles = files.filter((file) => /\.zip(?:\?|$)/i.test(fileUrlText(file)));
-  return zipFiles.find((file) => /arm64/i.test(fileUrlText(file)) || /arm64/i.test(file.info?.url || "")) || zipFiles[0];
+  const resolved = zipFiles.find((file) => /arm64/i.test(fileUrlText(file)) || /arm64/i.test(file.info?.url || "")) || zipFiles[0];
+  if (resolved) return resolved;
+
+  const rawFiles = Array.isArray(info.files) ? info.files : (info.path ? [{
+    url: info.path,
+    sha512: info.sha512,
+    sha2: info.sha2,
+    size: info.size,
+  }] : []);
+  const rawZip = rawFiles.find((file) => /\.zip(?:\?|$)/i.test(String(file?.url || "")) && /arm64/i.test(String(file?.url || "")))
+    || rawFiles.find((file) => /\.zip(?:\?|$)/i.test(String(file?.url || "")));
+  if (!rawZip) return null;
+
+  let assetPath = String(rawZip.url).replace(/ /g, "-");
+  if (typeof provider.getBaseDownloadPath === "function" && info.tag) {
+    assetPath = provider.getBaseDownloadPath(info.tag, assetPath);
+  }
+  const baseUrl = provider.baseUrl || provider.configuration?.url;
+  return {
+    url: baseUrl ? new URL(assetPath, baseUrl) : new URL(assetPath),
+    info: rawZip,
+  };
 }
 
 async function prepareResumableMacDownload(updater) {

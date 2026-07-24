@@ -301,6 +301,43 @@ test("keeps the absolute URL when the provider returns a URL object", async () =
   assert.equal(preparedUrl, "https://updates.example.test/SquadFlow-0.2.0-arm64-mac.zip");
 });
 
+test("falls back to update info files when a provider returns no resolved files", async () => {
+  const updater = createUpdater();
+  updater.updateDownloaded = async () => {};
+  updater.getOrCreateDownloadHelper = async () => ({ cacheDirForPendingUpdate: "/tmp" });
+  updater.updateInfoAndProvider = {
+    info: {
+      version: "0.2.0",
+      tag: "v0.2.0",
+      files: [{ url: "SquadFlow-0.2.0-arm64-mac.zip", sha512: "", size: 1 }],
+    },
+    provider: {
+      baseUrl: new URL("https://github.com/"),
+      getBaseDownloadPath: (tag, file) => `QuorraChord-A/SqualFlow/releases/download/${tag}/${file}`,
+      resolveFiles: () => [],
+    },
+  };
+  let preparedUrl = null;
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+    resumableDownload: async ({ url }) => {
+      preparedUrl = url;
+      throw new (require("builder-util-runtime").CancellationError)();
+    },
+  });
+
+  controller.initialize();
+  updater.emit("update-available", { version: "0.2.0" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(preparedUrl, "https://github.com/QuorraChord-A/SqualFlow/releases/download/v0.2.0/SquadFlow-0.2.0-arm64-mac.zip");
+});
+
 test("keeps a discovered update available when automatic downloads are disabled", async () => {
   const updater = createUpdater();
   let downloadCalls = 0;
