@@ -2,13 +2,15 @@ const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { createHash } = require("node:crypto");
 const { createServer } = require("node:http");
-const { mkdtemp, readFile, rm, stat } = require("node:fs/promises");
+const { PassThrough } = require("node:stream");
+const { mkdtemp, readFile, rm, stat, writeFile } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 const { readFileSync } = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
-const { createDesktopUpdater, downloadFileWithResume } = require("../app-updater");
+const { createDesktopUpdater, downloadFileWithResume, configurePrivateGitHubBlockMaps } = require("../app-updater");
+const { MacUpdater } = require("electron-updater/out/MacUpdater");
 const releaseConfig = require("../electron-builder.release.cjs");
 const privateTestConfig = require("../electron-builder.private-test.cjs");
 
@@ -121,7 +123,7 @@ test("publishes download progress and installs only after the update is ready", 
   controller.initialize();
   assert.equal(updater.autoDownload, false);
   assert.equal(updater.autoInstallOnAppQuit, false);
-  assert.equal(updater.disableDifferentialDownload, true);
+  assert.equal(updater.disableDifferentialDownload, false);
   assert.equal(typeof scheduledCheck, "function");
   assert.equal(controller.install(), false);
 
@@ -170,6 +172,7 @@ test("supports pausing, resuming, and cancelling a download", async () => {
   controller.initialize();
   updater.emit("update-available", { version: "0.2.0" });
   assert.equal(controller.getState().status, "downloading");
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(token);
   assert.equal(controller.pause(), true);
   assert.equal(controller.getState().status, "paused");
@@ -380,6 +383,191 @@ test("uses the private GitHub release asset URL when provider resolution fails",
   updater.emit("update-available", { version: "0.2.0" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(preparedUrl, "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/123");
+});
+
+test("resolves private GitHub blockmaps from the matching release assets", async () => {
+  const newZipUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/201";
+  const newBlockMapUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/202";
+  const oldBlockMapUrl = "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/101";
+  const provider = {
+    options: { private: true, owner: "QuorraChord-A", repo: "SqualFlow" },
+    baseApiUrl: new URL("https://api.github.com/"),
+    fileExtraDownloadHeaders: { accept: "application/octet-stream", authorization: "token test" },
+    getBlockMapFiles: () => {
+      throw new Error("the inherited API-asset path must not be used");
+    },
+    httpRequest: async () => JSON.stringify({ assets: [
+      { name: "SquadFlow-0.1.9-arm64-mac.zip.blockmap", url: oldBlockMapUrl },
+    ] }),
+  };
+  const updater = {
+    updateInfoAndProvider: {
+      info: {
+        assets: [
+          { name: "SquadFlow-0.1.10-arm64-mac.zip", url: newZipUrl },
+          { name: "SquadFlow-0.1.10-arm64-mac.zip.blockmap", url: newBlockMapUrl },
+        ],
+      },
+      provider,
+    },
+  };
+
+  await configurePrivateGitHubBlockMaps(updater);
+  assert.deepEqual(
+    await provider.getBlockMapFiles(new URL(newZipUrl), "0.1.9", "0.1.10"),
+    [new URL(oldBlockMapUrl), new URL(newBlockMapUrl)],
+  );
+});
+
+test("uses native differential downloading when an update.zip cache exists", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "squadflow-differential-"));
+  await writeFile(join(tempRoot, "update.zip"), "cached");
+  const updater = createUpdater();
+  let nativeDownloadCalls = 0;
+  let helperCalls = 0;
+  updater.getOrCreateDownloadHelper = async () => {
+    helperCalls += 1;
+    const helper = { cacheDir: tempRoot };
+    updater.downloadedUpdateHelper = helper;
+    return helper;
+  };
+  updater.downloadUpdate = async () => {
+    nativeDownloadCalls += 1;
+    updater.emit("update-downloaded", { version: "0.3.0" });
+  };
+  try {
+    const controller = createDesktopUpdater({
+      app: { isPackaged: true, getVersion: () => "0.2.0" },
+      updater,
+      logger: createLogger(),
+      getWindow: () => null,
+      resourcesPath: "/resources",
+      existsSync: () => true,
+      schedule: () => 1,
+    });
+
+    controller.initialize();
+    updater.emit("update-available", { version: "0.3.0" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(helperCalls, 1);
+    assert.equal(nativeDownloadCalls, 1);
+    assert.equal(controller.getState().status, "ready");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("pauses and resumes one native differential request without restarting it", async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), "squadflow-differential-pause-"));
+  await writeFile(join(tempRoot, "update.zip"), "cached");
+  const updater = createUpdater();
+  let nativeDownloadCalls = 0;
+  let nativeToken = null;
+  let response = null;
+  let received = "";
+  updater.getOrCreateDownloadHelper = async () => {
+    const helper = { cacheDir: tempRoot };
+    updater.downloadedUpdateHelper = helper;
+    return helper;
+  };
+  updater.httpExecutor = {
+    createRequest(_options, callback) {
+      response = new PassThrough();
+      setImmediate(() => callback(response));
+      return new EventEmitter();
+    },
+  };
+  updater.downloadUpdate = (token) => {
+    nativeDownloadCalls += 1;
+    nativeToken = token;
+    return new Promise((resolve) => {
+      updater.httpExecutor.createRequest({}, (incoming) => {
+        incoming.on("data", (chunk) => {
+          received += chunk.toString();
+        });
+        incoming.on("end", () => {
+          updater.emit("update-downloaded", { version: "0.3.0" });
+          resolve([]);
+        });
+      });
+    });
+  };
+  try {
+    const controller = createDesktopUpdater({
+      app: { isPackaged: true, getVersion: () => "0.2.0" },
+      updater,
+      logger: createLogger(),
+      getWindow: () => null,
+      resourcesPath: "/resources",
+      existsSync: () => true,
+      schedule: () => 1,
+    });
+
+    controller.initialize();
+    updater.emit("update-available", { version: "0.3.0" });
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(nativeDownloadCalls, 1);
+    response.write("before");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(received, "before");
+    assert.equal(controller.pause(), true);
+    assert.equal(controller.getState().status, "paused");
+    assert.equal(nativeToken.cancelled, false);
+    response.write("-after");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(received, "before");
+    assert.equal(controller.resume(), true);
+    assert.equal(controller.getState().status, "downloading");
+    assert.equal(nativeDownloadCalls, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(received, "before-after");
+    response.end();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(controller.getState().status, "ready");
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("falls back to a full download when a differential blockmap is invalid", async () => {
+  const errors = [];
+  const fallbackRequired = await MacUpdater.prototype.differentialDownloadInstaller.call({
+    _testOnlyOptions: null,
+    app: { version: "0.2.0" },
+    downloadedUpdateHelper: { cacheDir: "/cache", cacheDirForPendingUpdate: "/pending" },
+    previousBlockmapBaseUrlOverride: null,
+    _logger: {
+      info() {},
+      warn() {},
+      error(message) {
+        errors.push(String(message));
+      },
+    },
+    httpExecutor: {
+      downloadToBuffer: async () => Buffer.from("not a gzip blockmap"),
+    },
+    listenerCount: () => 0,
+  }, {
+    url: new URL("https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/3"),
+    info: { size: 1, sha512: "" },
+  }, {
+    updateInfoAndProvider: {
+      info: { version: "0.3.0" },
+      provider: {
+        getBlockMapFiles: async () => [
+          new URL("https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/1"),
+          new URL("https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/2"),
+        ],
+      },
+    },
+    requestHeaders: {},
+    cancellationToken: new (require("builder-util-runtime").CancellationToken)(),
+  }, "/pending/update.zip", null, "update.zip");
+
+  assert.equal(fallbackRequired, true);
+  assert.match(errors[0], /fallback to full download/);
 });
 
 test("keeps a discovered update available when automatic downloads are disabled", async () => {

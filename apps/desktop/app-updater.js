@@ -230,6 +230,107 @@ async function prepareResumableMacDownload(updater) {
   };
 }
 
+async function hasCachedDifferentialUpdate(updater) {
+  const helper = updater.downloadedUpdateHelper
+    || (typeof updater.getOrCreateDownloadHelper === "function"
+      ? await updater.getOrCreateDownloadHelper()
+      : null);
+  const cacheDir = helper?.cacheDir;
+  return Boolean(cacheDir && fs.existsSync(path.join(cacheDir, "update.zip")));
+}
+
+async function configurePrivateGitHubBlockMaps(updater) {
+  const provider = updater.updateInfoAndProvider?.provider;
+  if (
+    !provider
+    || provider.__squadflowBlockMapProviderConfigured
+    || provider.options?.private !== true
+    || provider.options?.owner == null
+    || provider.options?.repo == null
+    || typeof provider.getBlockMapFiles !== "function"
+    || typeof provider.httpRequest !== "function"
+  ) return;
+
+  const originalGetBlockMapFiles = provider.getBlockMapFiles.bind(provider);
+  const releaseAssetsCache = new Map();
+  provider.getBlockMapFiles = async (baseUrl, oldVersion, newVersion, oldBlockMapBaseUrl) => {
+    const info = updater.updateInfoAndProvider?.info;
+    const assets = Array.isArray(info?.assets) ? info.assets : [];
+    const newZipAsset = assets.find((asset) => asset?.url === baseUrl.href)
+      || assets.find((asset) => asset?.name === path.posix.basename(baseUrl.pathname));
+    const newBlockMapAsset = newZipAsset
+      ? assets.find((asset) => asset?.name === `${newZipAsset.name}.blockmap`)
+      : null;
+    if (!newBlockMapAsset?.url) {
+      return originalGetBlockMapFiles(baseUrl, oldVersion, newVersion, oldBlockMapBaseUrl);
+    }
+
+    let oldAssets = releaseAssetsCache.get(oldVersion);
+    if (!oldAssets) {
+      const apiBase = provider.baseApiUrl || new URL("https://api.github.com/");
+      const releaseUrl = new URL(
+        `/repos/${provider.options.owner}/${provider.options.repo}/releases/tags/v${oldVersion}`,
+        apiBase,
+      );
+      const rawRelease = await provider.httpRequest(
+        releaseUrl,
+        provider.fileExtraDownloadHeaders,
+        new CancellationToken(),
+      );
+      const release = JSON.parse(rawRelease);
+      oldAssets = Array.isArray(release?.assets) ? release.assets : [];
+      releaseAssetsCache.set(oldVersion, oldAssets);
+    }
+
+    const oldZipName = newZipAsset.name.replace(newVersion, oldVersion);
+    const oldBlockMapAsset = oldAssets.find((asset) => asset?.name === `${oldZipName}.blockmap`);
+    if (!oldBlockMapAsset?.url) {
+      return originalGetBlockMapFiles(baseUrl, oldVersion, newVersion, oldBlockMapBaseUrl);
+    }
+
+    return [new URL(oldBlockMapAsset.url), new URL(newBlockMapAsset.url)];
+  };
+  provider.__squadflowBlockMapProviderConfigured = true;
+}
+
+function createNativeDownloadPauseGate(updater) {
+  const executor = updater.httpExecutor;
+  if (!executor || typeof executor.createRequest !== "function") return null;
+
+  const originalCreateRequest = executor.createRequest;
+  const activeResponses = new Set();
+  let paused = false;
+
+  executor.createRequest = function createPausableRequest(options, callback) {
+    return originalCreateRequest.call(executor, options, (response) => {
+      activeResponses.add(response);
+      const removeResponse = () => activeResponses.delete(response);
+      response.once?.("end", removeResponse);
+      response.once?.("close", removeResponse);
+      response.once?.("error", removeResponse);
+      callback(response);
+      if (paused && typeof response.pause === "function") response.pause();
+    });
+  };
+
+  return {
+    pause() {
+      paused = true;
+      for (const response of activeResponses) response.pause?.();
+    },
+    resume() {
+      paused = false;
+      for (const response of activeResponses) response.resume?.();
+    },
+    restore() {
+      paused = false;
+      for (const response of activeResponses) response.resume?.();
+      activeResponses.clear();
+      executor.createRequest = originalCreateRequest;
+    },
+  };
+}
+
 async function completeResumableMacDownload(updater, download) {
   await download.helper.setDownloadedFile(
     download.filePath,
@@ -239,6 +340,16 @@ async function completeResumableMacDownload(updater, download) {
     download.fileName,
     true,
   );
+  if (download.helper.cacheDir) {
+    try {
+      await fs.promises.copyFile(
+        download.filePath,
+        path.join(download.helper.cacheDir, "update.zip"),
+      );
+    } catch (error) {
+      updater.logger?.warn?.(`Unable to cache update.zip for differential downloads: ${errorMessage(error)}`);
+    }
+  }
   await updater.updateDownloaded(download.fileInfo, {
     ...download.updateInfo,
     downloadedFile: download.filePath,
@@ -272,6 +383,7 @@ function createDesktopUpdater({
   let downloadCancellationToken = null;
   let downloadAction = null;
   let partialDownload = null;
+  let nativePauseGate = null;
   let state = {
     enabled: false,
     automaticUpdates: true,
@@ -308,23 +420,32 @@ function createDesktopUpdater({
     downloadAction = null;
     downloadCancellationToken = new CancellationToken();
     publish({ status: "downloading", progress: state.progress ?? 0, error: null });
-    const resumable = typeof updater.updateDownloaded === "function"
-      && typeof updater.getOrCreateDownloadHelper === "function"
-      && typeof resumableDownload === "function";
-    downloadPromise = (resumable
-      ? prepareResumableDownload(updater).then((download) => {
-        partialDownload = download;
-        return resumableDownload({
-          url: fileUrlText(download.fileInfo),
-          headers: download.headers,
-          filePath: download.filePath,
-          expectedSha512: download.fileInfo.info.sha512,
-          expectedSize: download.fileInfo.info.size,
-          cancellationToken: downloadCancellationToken,
-          onProgress: (percent) => publish({ status: "downloading", progress: Math.round(percent), error: null }),
-        }).then(() => completeResumableDownload(updater, download));
+    downloadPromise = configurePrivateGitHubBlockMaps(updater)
+      .then(async () => {
+        const useNativeDifferential = updater.disableDifferentialDownload === false
+          && await hasCachedDifferentialUpdate(updater)
+          && typeof updater.downloadUpdate === "function";
+        const resumable = !useNativeDifferential && typeof updater.updateDownloaded === "function"
+          && typeof updater.getOrCreateDownloadHelper === "function"
+          && typeof resumableDownload === "function";
+        if (useNativeDifferential) {
+          nativePauseGate = createNativeDownloadPauseGate(updater);
+          return updater.downloadUpdate(downloadCancellationToken);
+        }
+        if (!resumable) return updater.downloadUpdate(downloadCancellationToken);
+        return prepareResumableDownload(updater).then((download) => {
+          partialDownload = download;
+          return resumableDownload({
+            url: fileUrlText(download.fileInfo),
+            headers: download.headers,
+            filePath: download.filePath,
+            expectedSha512: download.fileInfo.info.sha512,
+            expectedSize: download.fileInfo.info.size,
+            cancellationToken: downloadCancellationToken,
+            onProgress: (percent) => publish({ status: "downloading", progress: Math.round(percent), error: null }),
+          }).then(() => completeResumableDownload(updater, download));
+        });
       })
-      : updater.downloadUpdate(downloadCancellationToken))
       .catch((error) => {
         if (!(error instanceof CancellationError) && downloadAction !== "pause" && downloadAction !== "cancel") {
           fail(error);
@@ -332,6 +453,8 @@ function createDesktopUpdater({
         return null;
       })
       .finally(() => {
+        nativePauseGate?.restore();
+        nativePauseGate = null;
         downloadPromise = null;
         downloadCancellationToken = null;
         if (downloadAction === "cancel" && partialDownload) {
@@ -346,6 +469,11 @@ function createDesktopUpdater({
   function pauseDownload() {
     if (state.status !== "downloading" || !downloadCancellationToken) return false;
     downloadAction = "pause";
+    if (nativePauseGate) {
+      nativePauseGate.pause();
+      publish({ status: "paused", error: null });
+      return true;
+    }
     downloadCancellationToken.cancel();
     publish({ status: "paused", error: null });
     return true;
@@ -354,6 +482,7 @@ function createDesktopUpdater({
   function cancelDownload() {
     if (state.status !== "downloading" || !downloadCancellationToken) return false;
     downloadAction = "cancel";
+    nativePauseGate?.resume();
     downloadCancellationToken.cancel();
     publish({ status: "available", progress: null, error: null });
     return true;
@@ -437,11 +566,7 @@ function createDesktopUpdater({
     updater.logger = logger;
     updater.autoDownload = false;
     updater.autoInstallOnAppQuit = false;
-    // GitHub's private asset endpoint can resolve the ZIP asset when the
-    // differential blockmap is requested, leaving macOS updates at 0% while
-    // the updater waits on the wrong response. Prefer the reliable full ZIP
-    // download so progress and failure events always reach the UI.
-    updater.disableDifferentialDownload = true;
+    updater.disableDifferentialDownload = false;
 
     updater.on("checking-for-update", () => {
       publish({ status: "checking", progress: null, error: null });
@@ -498,6 +623,12 @@ function createDesktopUpdater({
 
   function resume() {
     if (state.status !== "paused" && state.status !== "error") return false;
+    if (state.status === "paused" && nativePauseGate && downloadPromise) {
+      downloadAction = null;
+      nativePauseGate.resume();
+      publish({ status: "downloading", error: null });
+      return true;
+    }
     return startDownload();
   }
 
@@ -518,4 +649,5 @@ module.exports = {
   UPDATE_STATE_CHANNEL,
   createDesktopUpdater,
   downloadFileWithResume,
+  configurePrivateGitHubBlockMaps,
 };
