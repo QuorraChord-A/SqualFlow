@@ -34,6 +34,7 @@ function sha512Matches(filePath, expected) {
 function fileUrlText(file) {
   const value = file?.url;
   if (typeof value === "string") return value;
+  if (value?.href) return value.href;
   if (value?.pathname) return value.pathname;
   if (value?.toString) return value.toString();
   return String(file?.info?.url || file?.info?.path || "");

@@ -267,6 +267,40 @@ test("uses the resumable downloader for packaged macOS updates", async () => {
   assert.equal(controller.getState().progress, 100);
 });
 
+test("keeps the absolute URL when the provider returns a URL object", async () => {
+  const updater = createUpdater();
+  updater.updateDownloaded = async () => {};
+  updater.getOrCreateDownloadHelper = async () => ({ cacheDirForPendingUpdate: "/tmp" });
+  updater.updateInfoAndProvider = {
+    info: { version: "0.2.0" },
+    provider: {
+      resolveFiles: () => [{
+        url: new URL("https://updates.example.test/SquadFlow-0.2.0-arm64-mac.zip"),
+        info: { url: "SquadFlow-0.2.0-arm64-mac.zip", sha512: "", size: 1 },
+      }],
+    },
+  };
+  let preparedUrl = null;
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+    resumableDownload: async ({ url }) => {
+      preparedUrl = url;
+      throw new (require("builder-util-runtime").CancellationError)();
+    },
+  });
+
+  controller.initialize();
+  updater.emit("update-available", { version: "0.2.0" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(preparedUrl, "https://updates.example.test/SquadFlow-0.2.0-arm64-mac.zip");
+});
+
 test("keeps a discovered update available when automatic downloads are disabled", async () => {
   const updater = createUpdater();
   let downloadCalls = 0;
