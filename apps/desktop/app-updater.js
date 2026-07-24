@@ -47,7 +47,10 @@ function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
       return;
     }
     const parsed = new URL(url);
-    const requestHeaders = { ...headers };
+    const hasUserAgent = Object.keys(headers).some((name) => name.toLowerCase() === "user-agent");
+    const requestHeaders = hasUserAgent
+      ? { ...headers }
+      : { "user-agent": "SquadFlow-Updater", ...headers };
     const request = (parsed.protocol === "http:" ? http : https).request(parsed, { headers: requestHeaders }, (response) => {
       const status = response.statusCode || 0;
       const location = response.headers.location;
@@ -184,6 +187,17 @@ function findMacZipFileInfo(updater) {
   const rawZip = rawFiles.find((file) => /\.zip(?:\?|$)/i.test(String(file?.url || "")) && /arm64/i.test(String(file?.url || "")))
     || rawFiles.find((file) => /\.zip(?:\?|$)/i.test(String(file?.url || "")));
   if (!rawZip) return null;
+
+  const assetName = path.posix.basename(String(rawZip.url)).replace(/ /g, "-");
+  const releaseAsset = Array.isArray(info.assets)
+    ? info.assets.find((asset) => asset?.name === assetName)
+    : null;
+  if (releaseAsset?.url) {
+    return {
+      url: new URL(releaseAsset.url),
+      info: rawZip,
+    };
+  }
 
   let assetPath = String(rawZip.url).replace(/ /g, "-");
   if (typeof provider.getBaseDownloadPath === "function" && info.tag) {

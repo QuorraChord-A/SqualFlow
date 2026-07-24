@@ -183,10 +183,12 @@ test("resumes a partial ZIP download with an HTTP range request", async () => {
   const payload = Buffer.alloc(256 * 1024, 7);
   const sha512 = createHash("sha512").update(payload).digest("base64");
   const ranges = [];
+  const userAgents = [];
   let interrupted = false;
   const server = createServer((request, response) => {
     const range = request.headers.range || null;
     ranges.push(range);
+    userAgents.push(request.headers["user-agent"] || null);
     const start = range ? Number(range.match(/bytes=(\d+)-/)?.[1] || 0) : 0;
     response.statusCode = range ? 206 : 200;
     response.setHeader("Content-Length", payload.length - start);
@@ -224,6 +226,7 @@ test("resumes a partial ZIP download with an HTTP range request", async () => {
     });
     assert.equal(ranges.length, 2);
     assert.match(ranges[1], /^bytes=\d+\-/);
+    assert.deepEqual(userAgents, ["SquadFlow-Updater", "SquadFlow-Updater"]);
     assert.deepEqual(await readFile(filePath), payload);
   } finally {
     server.close();
@@ -336,6 +339,47 @@ test("falls back to update info files when a provider returns no resolved files"
   updater.emit("update-available", { version: "0.2.0" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(preparedUrl, "https://github.com/QuorraChord-A/SqualFlow/releases/download/v0.2.0/SquadFlow-0.2.0-arm64-mac.zip");
+});
+
+test("uses the private GitHub release asset URL when provider resolution fails", async () => {
+  const updater = createUpdater();
+  updater.updateDownloaded = async () => {};
+  updater.getOrCreateDownloadHelper = async () => ({ cacheDirForPendingUpdate: "/tmp" });
+  updater.updateInfoAndProvider = {
+    info: {
+      version: "0.2.0",
+      files: [{ url: "SquadFlow-0.2.0-arm64-mac.zip", sha512: "", size: 1 }],
+      assets: [{
+        name: "SquadFlow-0.2.0-arm64-mac.zip",
+        url: "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/123",
+      }],
+    },
+    provider: {
+      baseUrl: new URL("https://api.github.com/"),
+      resolveFiles: () => {
+        throw new Error("private provider asset list was incomplete");
+      },
+    },
+  };
+  let preparedUrl = null;
+  const controller = createDesktopUpdater({
+    app: { isPackaged: true, getVersion: () => "0.1.0" },
+    updater,
+    logger: createLogger(),
+    getWindow: () => null,
+    resourcesPath: "/resources",
+    existsSync: () => true,
+    schedule: () => 1,
+    resumableDownload: async ({ url }) => {
+      preparedUrl = url;
+      throw new (require("builder-util-runtime").CancellationError)();
+    },
+  });
+
+  controller.initialize();
+  updater.emit("update-available", { version: "0.2.0" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(preparedUrl, "https://api.github.com/repos/QuorraChord-A/SqualFlow/releases/assets/123");
 });
 
 test("keeps a discovered update available when automatic downloads are disabled", async () => {
