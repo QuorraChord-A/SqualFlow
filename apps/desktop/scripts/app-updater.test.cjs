@@ -239,6 +239,8 @@ test("resumes a partial ZIP download with an HTTP range request", async () => {
 test("uses the resumable downloader for packaged macOS updates", async () => {
   const updater = createUpdater();
   let resumableCalls = 0;
+  const requestFactory = () => {};
+  let receivedRequestFactory = null;
   updater.updateDownloaded = async () => {};
   updater.getOrCreateDownloadHelper = async () => ({});
   const controller = createDesktopUpdater({
@@ -249,6 +251,7 @@ test("uses the resumable downloader for packaged macOS updates", async () => {
     resourcesPath: "/resources",
     existsSync: () => true,
     schedule: () => 1,
+    requestFactory,
     prepareResumableDownload: async () => ({
       fileInfo: { url: "http://127.0.0.1/update.zip", info: {} },
       fileName: "update-0.2.0.zip",
@@ -257,8 +260,9 @@ test("uses the resumable downloader for packaged macOS updates", async () => {
       helper: {},
       updateInfo: { version: "0.2.0" },
     }),
-    resumableDownload: async ({ onProgress }) => {
+    resumableDownload: async ({ onProgress, requestFactory: nextRequestFactory }) => {
       resumableCalls += 1;
+      receivedRequestFactory = nextRequestFactory;
       onProgress(42);
     },
     completeResumableDownload: async () => updater.emit("update-downloaded", { version: "0.2.0" }),
@@ -268,6 +272,7 @@ test("uses the resumable downloader for packaged macOS updates", async () => {
   updater.emit("update-available", { version: "0.2.0" });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(resumableCalls, 1);
+  assert.equal(receivedRequestFactory, requestFactory);
   assert.equal(controller.getState().status, "ready");
   assert.equal(controller.getState().progress, 100);
 });

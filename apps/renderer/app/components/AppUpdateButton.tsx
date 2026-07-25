@@ -238,7 +238,6 @@ export default function AppUpdateButton() {
                 {paused ? '已暂停' : '正在下载'} {state.availableVersion ?? '新版本'}{state.progress === null ? '' : ` · ${state.progress}%`}
               </div>
               <div className="h-1 w-full overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-sidebar-primary transition-[width]" style={{ width: `${state.progress ?? 0}%` }} /></div>
-              {state.notes && <div className="max-h-40 overflow-y-auto whitespace-pre-wrap rounded-lg border border-border/70 bg-card/60 p-2 text-xs text-muted-foreground">{state.notes}</div>}
               <div className="flex justify-end gap-2">
                 <button type="button" onClick={cancelDownload} className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground hover:bg-muted"><X className="size-3" />中止</button>
                 <button type="button" onClick={paused ? resumeDownload : pauseDownload} className="inline-flex items-center gap-1 rounded-md bg-sidebar-accent px-2 py-1 text-xs text-sidebar-accent-foreground hover:bg-sidebar-accent/80">{paused ? <Play className="size-3" /> : <Pause className="size-3" />}{paused ? '继续' : '暂停'}</button>

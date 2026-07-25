@@ -103,7 +103,7 @@ describe('AppUpdateButton', () => {
     expect(bridge.install).not.toHaveBeenCalled();
   });
 
-  it('shows download progress and opens details with release notes on click', async () => {
+  it('shows download progress and opens controls without release notes', async () => {
     const user = userEvent.setup();
     const bridge = installBridge({ ...readyState, status: 'downloading', progress: 42 });
 
@@ -114,7 +114,7 @@ describe('AppUpdateButton', () => {
 
     await user.click(trigger);
     expect(await screen.findByText('正在下载 0.2.0 · 42%')).toBeInTheDocument();
-    expect(screen.getByText('修复若干问题')).toBeInTheDocument();
+    expect(screen.queryByText('修复若干问题')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '暂停' }));
     expect(bridge.pause).toHaveBeenCalledTimes(1);
   });

@@ -40,7 +40,11 @@ function fileUrlText(file) {
   return String(file?.info?.url || file?.info?.path || "");
 }
 
-function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
+function defaultRequestFactory(parsed, options, callback) {
+  return (parsed.protocol === "http:" ? http : https).request(parsed, options, callback);
+}
+
+function requestDownload(url, headers, cancellationToken, requestFactory = defaultRequestFactory, redirectCount = 0) {
   return new Promise((resolve, reject) => {
     if (redirectCount > 10) {
       reject(new Error("Too many redirects while downloading update"));
@@ -51,7 +55,7 @@ function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
     const requestHeaders = hasUserAgent
       ? { ...headers }
       : { "user-agent": "SquadFlow-Updater", ...headers };
-    const request = (parsed.protocol === "http:" ? http : https).request(parsed, { headers: requestHeaders }, (response) => {
+    const request = requestFactory(parsed, { headers: requestHeaders }, (response) => {
       const status = response.statusCode || 0;
       const location = response.headers.location;
       if (status >= 300 && status < 400 && location) {
@@ -60,12 +64,15 @@ function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
         const nextHeaders = nextUrl.origin === parsed.origin ? requestHeaders : Object.fromEntries(
           Object.entries(requestHeaders).filter(([name]) => !/^(authorization|cookie|private-token)$/i.test(name)),
         );
-        requestDownload(nextUrl.toString(), nextHeaders, cancellationToken, redirectCount + 1).then(resolve, reject);
+        requestDownload(nextUrl.toString(), nextHeaders, cancellationToken, requestFactory, redirectCount + 1).then(resolve, reject);
         return;
       }
       resolve({ response, url: parsed.toString() });
     });
-    const cancel = () => request.destroy(new CancellationError());
+    const cancel = () => {
+      if (typeof request.destroy === "function") request.destroy(new CancellationError());
+      else request.abort?.();
+    };
     cancellationToken.onCancel(cancel);
     request.once("error", (error) => {
       cancellationToken.removeListener("cancel", cancel);
@@ -75,7 +82,16 @@ function requestDownload(url, headers, cancellationToken, redirectCount = 0) {
   });
 }
 
-async function downloadFileWithResume({ url, headers = {}, filePath, expectedSha512, expectedSize, cancellationToken, onProgress }) {
+async function downloadFileWithResume({
+  url,
+  headers = {},
+  filePath,
+  expectedSha512,
+  expectedSize,
+  cancellationToken,
+  onProgress,
+  requestFactory = defaultRequestFactory,
+}) {
   await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
 
   while (true) {
@@ -87,7 +103,7 @@ async function downloadFileWithResume({ url, headers = {}, filePath, expectedSha
     if (expectedSize && existingSize === expectedSize && sha512Matches(filePath, expectedSha512)) return filePath;
     if (existingSize > 0 && expectedSize) onProgress?.((existingSize / expectedSize) * 100);
     const rangeHeaders = existingSize > 0 ? { ...headers, Range: `bytes=${existingSize}-` } : headers;
-    const { response } = await requestDownload(url, rangeHeaders, cancellationToken);
+    const { response } = await requestDownload(url, rangeHeaders, cancellationToken, requestFactory);
     const status = response.statusCode || 0;
 
     if (status >= 400) {
@@ -373,6 +389,7 @@ function createDesktopUpdater({
   resumableDownload = downloadFileWithResume,
   prepareResumableDownload = prepareResumableMacDownload,
   completeResumableDownload = completeResumableMacDownload,
+  requestFactory = defaultRequestFactory,
   schedule = setTimeout,
   startupDelayMs = 30_000,
   periodicCheckMs = 6 * 60 * 60 * 1_000,
@@ -446,6 +463,7 @@ function createDesktopUpdater({
             expectedSize: download.fileInfo.info.size,
             cancellationToken: downloadCancellationToken,
             onProgress: (percent) => publish({ status: "downloading", progress: Math.round(percent), error: null }),
+            requestFactory,
           }).then(() => completeResumableDownload(updater, download));
         });
       })

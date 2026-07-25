@@ -3,7 +3,7 @@ const https = require("node:https");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const { app, BrowserWindow, WebContentsView, clipboard, ipcMain, nativeTheme, shell, utilityProcess } = require("electron");
+const { app, BrowserWindow, WebContentsView, clipboard, ipcMain, nativeTheme, net, session, shell, utilityProcess } = require("electron");
 const electronLog = require("electron-log/main");
 const { autoUpdater } = require("electron-updater");
 const { createDesktopUpdater } = require("./app-updater");
@@ -53,6 +53,21 @@ const minimumWindowSize = { width: 1024, height: 720 };
 const maximumWindowSize = { width: 3200, height: 2200 };
 const serviceLogMaxBytes = 5 * 1024 * 1024;
 const desktopLogger = electronLog.create({ logId: "squadflow-desktop" });
+let updaterNetSession = null;
+
+function createUpdaterRequest(parsed, options, callback) {
+  if (!updaterNetSession) {
+    updaterNetSession = session.fromPartition("electron-updater", { cache: false });
+  }
+  const request = net.request({
+    url: parsed.toString(),
+    headers: options.headers,
+    redirect: "follow",
+    session: updaterNetSession,
+  });
+  request.on("response", callback);
+  return request;
+}
 
 function windowStatePath() {
   return path.join(app.getPath("userData"), "window-state.json");
@@ -157,6 +172,7 @@ const desktopUpdater = createDesktopUpdater({
   logger: desktopLogger,
   getWindow: () => mainWindow,
   preferencesPath: path.join(app.getPath("userData"), "update-preferences.json"),
+  requestFactory: createUpdaterRequest,
 });
 
 ipcMain.handle("desktop-update:get-state", () => desktopUpdater.getState());
