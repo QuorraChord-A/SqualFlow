@@ -391,7 +391,6 @@ function createDesktopUpdater({
   completeResumableDownload = completeResumableMacDownload,
   requestFactory = defaultRequestFactory,
   schedule = setTimeout,
-  startupDelayMs = 30_000,
   periodicCheckMs = 6 * 60 * 60 * 1_000,
   now = () => new Date().toISOString(),
 }) {
@@ -627,7 +626,7 @@ function createDesktopUpdater({
     });
     updater.on("error", fail);
 
-    if (state.automaticUpdates) scheduleAutomaticCheck(startupDelayMs);
+    if (state.automaticUpdates) scheduleAutomaticCheck(0);
     return snapshot();
   }
 

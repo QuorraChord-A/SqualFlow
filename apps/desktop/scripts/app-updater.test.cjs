@@ -667,7 +667,7 @@ test("loads a disabled preference without scheduling a background check", () => 
   assert.equal(scheduleCalls, 0);
 });
 
-test("checks again on the configured background interval", async () => {
+test("checks immediately at startup and again on the configured background interval", async () => {
   const updater = createUpdater();
   const scheduled = [];
   let checkCalls = 0;
@@ -685,12 +685,11 @@ test("checks again on the configured background interval", async () => {
       scheduled.push({ callback, delay });
       return scheduled.length;
     },
-    startupDelayMs: 30_000,
     periodicCheckMs: 60_000,
   });
 
   controller.initialize();
-  assert.equal(scheduled[0].delay, 30_000);
+  assert.equal(scheduled[0].delay, 0);
   await scheduled[0].callback();
   assert.equal(checkCalls, 1);
   assert.equal(scheduled[1].delay, 60_000);

@@ -16,23 +16,55 @@
   <a href="#running-from-source"><img src="https://img.shields.io/badge/node-22.x-brightgreen.svg" alt="Node.js 22"></a>
 </p>
 
-SquadFlow is a multi-agent collaboration workspace that runs on your computer. A Leader agent coordinates specialist agents through a structured workflow: clarification, architecture, implementation, verification, review, and diagnosis.
+SquadFlow is a multi-agent collaboration workspace that runs on your computer. You describe a goal, the Leader clarifies the request and organizes a plan, and specialist agents take on architecture, implementation, verification, review, and diagnosis while you retain control of important decisions.
 
-Application state, conversations, and project configuration are stored locally in SQLite. When you use a cloud model, requests are sent directly to the OpenAI, Anthropic, or compatible provider you configure. They are not relayed through a server operated by SqualFlow.
+## How it works
 
-## Features
+1. **Create a Flow** — Choose a project directory and describe the outcome you want.
+2. **Approve the plan** — The Leader breaks down the work, assigns specialists, and asks you to review the execution plan.
+3. **Run the collaboration** — Specialist agents work within the same Flow and continuously report progress and results.
+4. **Review and adjust** — Use decision cards, feedback, and follow-up messages to refine the direction until the work is complete.
 
-- **Multi-agent orchestration** — The Leader breaks work into tasks and coordinates specialist agents through an approval-ready execution plan.
-- **Plan approval and decision cards** — Keep important decisions under human control and provide item-level feedback before execution continues.
-- **Two agent runtimes** — Includes an OpenAI Codex runtime and supports the Anthropic Claude Agent SDK, plus compatible custom API endpoints.
-- **Local-first storage** — Project files, conversations, and databases remain on your machine; model credentials and requests are handled by the provider you choose.
-- **Desktop workflow** — Includes browser preview, element picking, live transcripts, and application updates.
+## Core capabilities
+
+- **Leader and specialist collaboration** — Turn complex goals into clearly owned, traceable agent tasks.
+- **Plan approval and human decisions** — Review plans before execution and respond at important checkpoints.
+- **Multiple runtimes** — Use Codex, Claude, or a compatible custom model endpoint.
+- **Integrated workbench** — Inspect files, runtime activity, browser previews, and web elements inside the desktop app.
+- **Recoverable Flows** — Return to conversations, task state, and execution records after restarting the app.
+- **Desktop updates** — Check, download, pause, resume, and install new releases from the app.
+
+## Data and privacy
+
+Workspace information, conversations, and application settings are stored on your computer by default.
+
+When you connect a cloud model, requests are sent directly to the model provider you configure; SquadFlow does not operate a model-request relay. Data sent to a provider remains subject to that provider's terms and data policies.
 
 ## Installation
 
-Download the latest DMG from [Releases](../../releases). The current build target is Apple Silicon Mac; other platforms are not officially supported yet.
+Download the latest DMG from [Releases](../../releases), then drag SquadFlow into Applications. The current production build targets Apple Silicon Mac; other platforms are not officially supported yet.
+
+## First-time setup
 
 No model provider is created automatically on first launch. Click **Not configured** in the Leader area, then add Codex, Claude, or a compatible endpoint under **Agent Settings → Provider Management**.
+
+## Technical architecture
+
+This section is for readers who want to understand or contribute to the implementation:
+
+- **Desktop shell** — Electron
+- **Interface** — Next.js + React
+- **Local service** — TypeScript + Fastify
+- **Local persistence** — SQLite
+- **Agent runtimes** — Bundled Codex with Claude Agent SDK support
+
+Mutable data for the installed app is stored at:
+
+```text
+~/Library/Application Support/SquadFlow/
+```
+
+Updating or replacing the `.app` does not overwrite this directory, and deleting the `.app` does not remove it automatically.
 
 ## Running from source
 
@@ -43,12 +75,16 @@ npm run setup   # Install each package from its lockfile
 npm run dev     # Start the local service, renderer, and Electron shell
 ```
 
+Common commands:
+
 | Command | Purpose |
 | --- | --- |
 | `npm run check` | Run type checks, lint, and all tests |
 | `npm run build` | Build the production service and renderer |
 | `npm run desktop:package` | Build and verify an unsigned local App and DMG |
-| `npm run desktop:smoke` | Launch the packaged app with isolated test data |
+| `npm run desktop:smoke` | Launch the packaged app with isolated data for smoke testing |
+
+Development data and installed-application data are isolated. Source development writes application-owned mutable data to the ignored root `output/` directory.
 
 ## Repository layout
 
@@ -61,15 +97,7 @@ tests/acceptance/ Natural-language desktop acceptance cases
 scripts/         Repository-level setup and development orchestration
 ```
 
-Development data and installed-application data are isolated. Source development writes application-owned mutable data to the ignored root `output/` directory. The installed app writes mutable data to the system application-data directory named `SquadFlow`, so updating or reinstalling the app does not overwrite it.
-
-On macOS, installed-application data is stored at:
-
-```text
-~/Library/Application Support/SquadFlow/
-```
-
-Deleting the `.app` does not automatically delete this directory. When using cloud models, you must also follow the terms and data policies of the corresponding model provider.
+Run `npm run check` before submitting changes. Changes to the desktop shell, startup flow, or packaging should also run the desktop package and smoke checks.
 
 ## Security
 
