@@ -528,7 +528,7 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
     {
       title: "submit_orchestration_plan",
       description:
-        "Submit a multi-expert orchestration plan. Requires 2+ distinct enabled expert roles; single-role work must use create_task + dispatch_agent instead. node expert_id may be person_name, role_title, or template expert_id. After success, stop; platform handles approval and execution.",
+        "Submit a multi-expert orchestration plan. Requires 2+ distinct enabled expert roles; single-role work must use create_task + dispatch_agent instead. node expert_id may be person_name, role_title, or template expert_id. If approval is pending, stop and wait. If auto_approved, dispatch ready returned tasks; after plan_approved, the Leader dispatches approved tasks by dependency.",
       inputSchema: SubmitOrchestrationPlanInput,
     },
     async (input) => ({ content: [{ type: "text", text: await handlers.submitOrchestrationPlan(input) }] }),
@@ -560,7 +560,7 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "dispatch_agent",
-    { title: "dispatch_agent", description: "Start or resume a task-bound Expert (single-expert path). expert_id must be an enabled template id from get_context.experts.", inputSchema: DispatchAgentInput },
+    { title: "dispatch_agent", description: "Start or resume a task-bound Expert for a single-expert task or a materialized plan node. expert_id must be an enabled template id from get_context.experts.", inputSchema: DispatchAgentInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.dispatchAgent(input) }] }),
   );
 

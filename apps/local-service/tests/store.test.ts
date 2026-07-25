@@ -788,6 +788,19 @@ describe("store", () => {
     ]);
   });
 
+  it("refreshes an existing built-in leader prompt when experts are reseeded", () => {
+    const store = tempStore();
+    store.migrate();
+    store.seedExperts();
+    store.sqlite
+      .prepare("UPDATE experts SET system_prompt = ? WHERE id = ?")
+      .run("# Leader 系统提示词 legacy", "exp-leader");
+
+    store.seedExperts();
+
+    expect(store.getExpert("exp-leader")?.systemPrompt).toBe(DEFAULT_LEADER_SYSTEM_PROMPT);
+  });
+
   it("seeds non-leader experts without artifact/spec save instructions", () => {
     const store = tempStore();
     store.migrate();

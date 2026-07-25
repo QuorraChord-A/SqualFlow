@@ -152,7 +152,8 @@ describe("verify: on-demand team + dual expert path", () => {
       const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
       try {
         await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
-        const tools = (await client.listTools()).tools.map((t) => t.name).sort();
+        const listedTools = (await client.listTools()).tools;
+        const tools = listedTools.map((t) => t.name).sort();
         expect(tools).toEqual([
           "ask_user",
           "cancel_agent",
@@ -169,6 +170,12 @@ describe("verify: on-demand team + dual expert path", () => {
           "update_flow_name",
           "update_task",
         ]);
+        const submitDescription = listedTools.find((tool) => tool.name === "submit_orchestration_plan")?.description;
+        expect(submitDescription).toContain("If approval is pending, stop and wait");
+        expect(submitDescription).toContain("the Leader dispatches approved tasks by dependency");
+        expect(submitDescription).not.toContain("platform handles approval and execution");
+        expect(listedTools.find((tool) => tool.name === "dispatch_agent")?.description)
+          .toContain("single-expert task or a materialized plan node");
       } finally {
         await client.close();
         await server.close();
@@ -178,21 +185,28 @@ describe("verify: on-demand team + dual expert path", () => {
     }
   });
 
-  it("Leader prompt v12 dual path, enabled switches and leader-driven dispatch", () => {
+  it("Leader prompt v13.0.5 keeps autonomous triage and leader-driven dispatch", () => {
     const p = DEFAULT_LEADER_SYSTEM_PROMPT;
-    expect(p).toContain("系统提示词 v12");
-    expect(p).toContain("至少 2 种不同专家角色");
+    expect(p).toContain("系统提示词 v13.0.5");
+    expect(p).toContain("本提示词不撤销本轮已经提供给你的任何工具能力");
+    expect(p).toContain("你的默认职责是编排");
+    expect(p).toContain("判断重点不是固定工具次数或文件数量");
+    expect(p).toContain("Research 返回后，不要只转发结果");
+    expect(p).toContain("Leader 自己使用当前工具完成");
+    expect(p).not.toContain("一次自查合计 ≤5 次工具调用");
+    expect(p).toContain("至少两种不同 Expert 角色");
     expect(p).toContain("当前未启用");
     expect(p).toContain("create_task");
     expect(p).toContain("dispatch_agent");
     expect(p).toContain("submit_orchestration_plan");
     expect(p).toContain("enabled=true");
-    expect(p).toContain("2 种及以上");
+    expect(p).toContain("两种及以上");
     expect(p).not.toContain("Scheduler");
     // L2：派发权归 Leader，服务端不再自动推进
-    expect(p).toContain("计划的执行由你派发");
+    expect(p).toContain("由 Leader 逐节点 `dispatch_agent`");
     expect(p).toContain("plan_approved");
     expect(p).toContain("auto_approved");
+    expect(p).toContain("服务端只负责计划物化");
     expect(p).not.toContain("由系统执行");
   });
 });

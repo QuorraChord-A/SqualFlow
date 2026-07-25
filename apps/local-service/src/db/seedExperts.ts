@@ -8,7 +8,7 @@ import { DEFAULT_LEADER_SYSTEM_PROMPT } from "./defaultLeaderSystemPrompt.js";
 /**
  * Leader tools:
  * - single expert: create_task + dispatch_agent (+ update_task / save_execution_plan as needed)
- * - multi expert (2+): submit_orchestration_plan; system schedules after approval
+ * - multi expert (2+): submit_orchestration_plan; Leader dispatches materialized tasks after approval
  */
 const leaderMcpTools = [
   "get_context",

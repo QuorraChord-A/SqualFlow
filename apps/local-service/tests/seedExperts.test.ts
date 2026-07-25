@@ -97,10 +97,10 @@ describe("seedExperts browser tool authorization", () => {
     const store = tempStore();
     const leader = store.getExpert("exp-leader");
     expect(leader!.systemPrompt).toContain("用户明确要求暂停、停止或等待下一步");
-    expect(leader!.systemPrompt).toContain("不要调用 `resolve_plan_feedback`");
-    expect(leader!.systemPrompt).toContain("无需修改计划且用户要求继续执行，调用 `resolve_plan_feedback`");
-    expect(leader!.systemPrompt).toContain("实际调用且返回成功后，才能声称计划已提交");
-    expect(leader!.systemPrompt).toContain("不得用文字假装已创建计划、Task 或 AgentSession");
+    expect(leader!.systemPrompt).toContain("不调用 `resolve_plan_feedback`");
+    expect(leader!.systemPrompt).toContain("结构无需修改且用户要求继续时，调用 `resolve_plan_feedback`");
+    expect(leader!.systemPrompt).toContain("实际调用成功后才能声称计划、Task 或 AgentSession 已创建");
+    expect(leader!.systemPrompt).toContain("不得用文字假装完成平台动作");
   });
 
   it("does not grant full browser tools to experts other than Coder and Verify", () => {
