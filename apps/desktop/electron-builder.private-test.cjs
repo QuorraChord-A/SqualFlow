@@ -2,10 +2,7 @@ const release = require("./electron-builder.release.cjs");
 
 module.exports = {
   ...release,
-  publish: release.publish.map((provider) => ({
-    ...provider,
-    private: true,
-  })),
+  publish: release.publish,
   mac: {
     ...release.mac,
     identity: process.env.CSC_NAME,

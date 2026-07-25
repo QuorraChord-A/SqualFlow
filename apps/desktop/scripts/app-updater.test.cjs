@@ -39,12 +39,11 @@ test("publishes release updates through the public SquadFlow GitHub repository",
   assert.ok(releaseConfig.mac.binaries.includes(`Contents/Resources/codex-runtime/darwin-${process.arch}/codex`));
 });
 
-test("keeps private self-signed update testing separate from the notarized release", () => {
+test("keeps self-signed public update testing separate from the notarized release", () => {
   assert.deepEqual(privateTestConfig.publish, [{
     provider: "github",
     owner: "QuorraChord-A",
     repo: "SqualFlow",
-    private: true,
   }]);
   assert.equal(privateTestConfig.mac.notarize, false);
   assert.equal(releaseConfig.mac.notarize, true);

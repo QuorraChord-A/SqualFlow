@@ -132,7 +132,7 @@ run_private_test_package() {
   desktop_prepare_codex_runtime required
   desktop_clean_output
 
-  echo "Building self-signed private GitHub update test artifacts..."
+  echo "Building self-signed public GitHub update test artifacts..."
   (
     cd "$ELECTRON_DIR"
     ./node_modules/.bin/electron-builder --mac --config electron-builder.private-test.cjs
@@ -143,7 +143,7 @@ run_private_test_package() {
 }
 
 run_private_test_publish() {
-  [[ -n "${GH_TOKEN:-}" ]] || release_fail "GH_TOKEN is required to publish a private GitHub Release."
+  [[ -n "${GH_TOKEN:-}" ]] || release_fail "GH_TOKEN is required to publish a GitHub Release."
   private_test_preflight
   desktop_initialize_paths "$ROOT" "$ROOT/dist"
   desktop_require_packaging_dependencies
@@ -151,7 +151,7 @@ run_private_test_publish() {
   desktop_prepare_codex_runtime required
   desktop_clean_output
 
-  echo "Building and publishing self-signed private GitHub update test artifacts..."
+  echo "Building and publishing self-signed public GitHub update test artifacts..."
   (
     cd "$ELECTRON_DIR"
     ./node_modules/.bin/electron-builder --mac --config electron-builder.private-test.cjs --publish always
