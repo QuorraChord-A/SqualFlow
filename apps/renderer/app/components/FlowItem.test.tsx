@@ -180,6 +180,29 @@ describe("FlowItem", () => {
     });
   });
 
+  it("hides the stage row when the flow has not entered a stage", async () => {
+    render(
+      <FlowItem
+        flow={{
+          ...flow,
+          status: "idle",
+          current_stage: null,
+          has_pending_decision: false,
+        }}
+        projectName="ccdev"
+        selected={false}
+        onClick={vi.fn()}
+      />,
+    );
+
+    fireEvent.mouseEnter(screen.getByRole("button", { name: "打开流程：等待确认的 Flow" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("空闲")).toBeInTheDocument();
+      expect(screen.queryByText("阶段")).not.toBeInTheDocument();
+    });
+  });
+
   it("suppresses the details card and keeps the action icon while the action menu is open", async () => {
     const user = userEvent.setup();
     render(

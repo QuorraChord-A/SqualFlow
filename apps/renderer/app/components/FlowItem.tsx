@@ -271,10 +271,12 @@ export default function FlowItem({
       <HoverCardContent side="right" align="start" sideOffset={8} className="w-60 p-3">
         <p className="truncate text-sm font-semibold text-foreground">{displayName}</p>
         <div className="mt-2.5 space-y-1.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
-          <div className="flex items-center justify-between gap-3">
-            <span>阶段</span>
-            <span className="truncate text-foreground">{flow.current_stage ?? '未开始'}</span>
-          </div>
+          {flow.current_stage && (
+            <div className="flex items-center justify-between gap-3">
+              <span>阶段</span>
+              <span className="truncate text-foreground">{flow.current_stage}</span>
+            </div>
+          )}
           <div className="flex items-center justify-between gap-3">
             <span>状态</span>
             <span className="truncate text-foreground">
