@@ -1,6 +1,6 @@
 {
   "name": "squadflow",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "description": "SquadFlow: a local-first AI agent orchestration desktop app.",
   "license": "Apache-2.0",
