@@ -8,6 +8,7 @@ export type CreateAgentRuntimeAdapterInput = {
   sdk: RuntimeSdk;
   role?: AgentRuntimeRole;
   runtimeConfig?: RuntimeConfig;
+  ephemeral?: boolean;
   codexClientFactory?: CodexClientFactory;
 };
 

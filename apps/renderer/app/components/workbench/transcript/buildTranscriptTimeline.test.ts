@@ -760,6 +760,38 @@ describe("buildTranscriptTimeline", () => {
     const card = blocks.find((block) => block.type === "spec-card");
     expect(card).toMatchObject({ specApprovalId: "sca-1", toolCallId: "plan-1" });
   });
+
+  it("keeps the normalized MCP envelope for generic result rendering", () => {
+    const output = {
+      content: "Detailed Results",
+      is_error: false,
+      mcp: {
+        content: [{ type: "text", text: "Detailed Results" }],
+        structuredContent: { sourceCount: 1 },
+        isError: false,
+      },
+    };
+    const message: TimelineInputMessage = {
+      id: "msg-mcp-result",
+      role: "assistant",
+      parts: [{
+        type: "tool-mcp__tavily__tavily_search",
+        toolCallId: "mcp-1",
+        toolName: "mcp__tavily__tavily_search",
+        mcp: { server: "tavily", tool: "tavily_search" },
+        state: "output-available",
+        input: { query: "MCP" },
+        output,
+      }],
+    };
+
+    const toolGroup = buildTranscriptTimeline({ message, activity: "finished" })
+      .find((block) => block.type === "tool-group");
+    expect(toolGroup?.type).toBe("tool-group");
+    if (toolGroup?.type === "tool-group") {
+      expect(toolGroup.tools[0]?.output).toEqual(output);
+    }
+  });
 });
 
 describe("deriveActivity", () => {

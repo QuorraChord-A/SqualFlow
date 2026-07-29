@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type CSS
 import type { UIMessage } from "ai";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { ConversationEmptyState } from "@/components/ai-elements-official/conversation";
+import { PromptInlineContent } from "@/components/ai-elements-official/prompt-inline-entity";
 import { CheckIcon, CopyIcon, FileText, MessageSquareIcon } from "lucide-react";
 import { wsClient } from "../../lib/ws";
 import type { HistorySessionBoundary, WsInMessage } from "../../lib/ws";
@@ -599,7 +600,11 @@ function UserMessage({
             ) : null}
           </div>
         ) : null}
-        {text ? <div className={styles.userBubble}>{text}</div> : null}
+        {text ? (
+          <div className={styles.userBubble}>
+            <PromptInlineContent value={text} />
+          </div>
+        ) : null}
         {statusLabel ? (
           <div className={styles.userGuideStatus}>{statusLabel}</div>
         ) : null}

@@ -1,5 +1,51 @@
+const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
+
+function parseNullSeparatedEnv(output) {
+  const markerIndex = output.indexOf("\0");
+  if (markerIndex < 0) return {};
+  const env = {};
+  for (const entry of output.slice(markerIndex + 1).split("\0")) {
+    const separatorIndex = entry.indexOf("=");
+    if (separatorIndex <= 0) continue;
+    env[entry.slice(0, separatorIndex)] = entry.slice(separatorIndex + 1);
+  }
+  return env;
+}
+
+function resolveLoginShellEnv({
+  baseEnv = process.env,
+  platform = process.platform,
+  execFileImpl = execFile,
+} = {}) {
+  if (platform === "win32") return Promise.resolve({ ...baseEnv });
+  const shell = baseEnv.SHELL?.trim();
+  if (!shell) return Promise.resolve({ ...baseEnv });
+
+  return new Promise((resolve) => {
+    execFileImpl(
+      shell,
+      ["-ilc", "printf '\\0'; /usr/bin/env -0"],
+      {
+        env: baseEnv,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 5_000,
+      },
+      (error, stdout) => {
+        if (error) {
+          resolve({ ...baseEnv });
+          return;
+        }
+        resolve({
+          ...baseEnv,
+          ...parseNullSeparatedEnv(stdout),
+        });
+      },
+    );
+  });
+}
 
 function platformDirectory(platform, arch) {
   return `${platform === "darwin" ? "darwin" : platform}-${arch}`;
@@ -114,6 +160,7 @@ function stopPackagedServices(children) {
 
 module.exports = {
   createPackagedServiceSpecs,
+  resolveLoginShellEnv,
   startPackagedServices,
   stopPackagedServices,
 };

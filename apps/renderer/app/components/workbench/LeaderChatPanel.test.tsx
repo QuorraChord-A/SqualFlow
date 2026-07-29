@@ -1,5 +1,4 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { within } from "@testing-library/react";
@@ -10,16 +9,25 @@ import { useFlowStore } from "../../stores/useFlowStore";
 import { resetRunningMessageQueueStoreForTests, useRunningMessageQueueStore } from "../../stores/useRunningMessageQueueStore";
 import { usePlanFeedbackStore } from "../../stores/usePlanFeedbackStore";
 import LeaderChatPanel from "./LeaderChatPanel";
+import {
+  deleteRichEditorTrailingCharacter,
+  pressRichEditorBackspace,
+  setupRichEditorUser,
+} from "../../../test/rich-editor-user";
+
+const userEvent = { setup: setupRichEditorUser };
 
 const wsMessageHandlers = vi.hoisted(() => new Set<(message: WsInMessage) => void>());
 const leaderSelectorMock = vi.hoisted(() => ({
   configured: true,
+  onSelectionChange: undefined as ((selection: { configId: string; modelId: string }) => void) | undefined,
   onUpdatingChange: undefined as ((updating: boolean) => void) | undefined,
 }));
 const apiMocks = vi.hoisted(() => ({
   compactFlowContext: vi.fn(),
   fetchAgentRuntimeConfig: vi.fn(),
   fetchFlowContextState: vi.fn(),
+  fetchNativeContext: vi.fn(),
   updateAgentRuntimeConfig: vi.fn(),
   updateAgentRuntimeRole: vi.fn(),
   updateFlowLeaderRuntimeSelection: vi.fn(),
@@ -30,14 +38,22 @@ vi.mock("../LeaderModelSelector", async () => {
   return {
     default: ({
       onConfiguredChange,
+      onSelectionChange,
       onUpdatingChange,
     }: {
       onConfiguredChange?: (configured: boolean) => void;
+      onSelectionChange?: (selection: { configId: string; modelId: string }) => void;
       onUpdatingChange?: (updating: boolean) => void;
     }) => {
       React.useEffect(() => {
         onConfiguredChange?.(leaderSelectorMock.configured);
       }, [onConfiguredChange]);
+      React.useEffect(() => {
+        leaderSelectorMock.onSelectionChange = onSelectionChange;
+        return () => {
+          leaderSelectorMock.onSelectionChange = undefined;
+        };
+      }, [onSelectionChange]);
       React.useEffect(() => {
         leaderSelectorMock.onUpdatingChange = onUpdatingChange;
         return () => {
@@ -87,6 +103,7 @@ vi.mock("../../lib/api", () => ({
   compactFlowContext: apiMocks.compactFlowContext,
   fetchAgentRuntimeConfig: apiMocks.fetchAgentRuntimeConfig,
   fetchFlowContextState: apiMocks.fetchFlowContextState,
+  fetchNativeContext: apiMocks.fetchNativeContext,
   updateAgentRuntimeConfig: apiMocks.updateAgentRuntimeConfig,
   updateAgentRuntimeRole: apiMocks.updateAgentRuntimeRole,
   updateFlowLeaderRuntimeSelection: apiMocks.updateFlowLeaderRuntimeSelection,
@@ -156,6 +173,7 @@ describe("LeaderChatPanel", () => {
     vi.mocked(wsClient.sendFlowGuide).mockClear();
     vi.mocked(wsClient.onMessage).mockClear();
     leaderSelectorMock.configured = true;
+    leaderSelectorMock.onSelectionChange = undefined;
     leaderSelectorMock.onUpdatingChange = undefined;
     apiMocks.compactFlowContext.mockReset();
     apiMocks.compactFlowContext.mockResolvedValue(null);
@@ -163,6 +181,19 @@ describe("LeaderChatPanel", () => {
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
     apiMocks.fetchFlowContextState.mockReset();
     apiMocks.fetchFlowContextState.mockResolvedValue({ context_usage: { leader: null, experts: [] }, context_compactions: [] });
+    apiMocks.fetchNativeContext.mockReset();
+    apiMocks.fetchNativeContext.mockResolvedValue({
+      sdk: "claudecode",
+      scope: "project",
+      skills: [
+        { name: "project-skill", description: "工程技能", scope: "project", path: "/repo/.claude/skills/project-skill/SKILL.md" },
+        { name: "global-skill", description: "全局技能", scope: "global", path: "/home/.claude/skills/global-skill/SKILL.md" },
+      ],
+      mcpServers: [
+        { name: "project-mcp", description: "", scope: "project", path: "/repo/.mcp.json" },
+        { name: "global-mcp", description: "", scope: "global", path: "/home/.claude.json" },
+      ],
+    });
     apiMocks.updateAgentRuntimeConfig.mockReset();
     apiMocks.updateAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot.configs[0]);
     apiMocks.updateAgentRuntimeRole.mockReset();
@@ -202,7 +233,9 @@ describe("LeaderChatPanel", () => {
 
     renderPanel();
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "hello leader");
+    const input = screen.getByRole("textbox", { name: "输入消息..." });
+    await user.type(input, "hello leader");
+    expect(input).toHaveTextContent("hello leader");
     await user.click(screen.getByRole("textbox"));
     await user.keyboard("{Enter}");
 
@@ -241,7 +274,7 @@ describe("LeaderChatPanel", () => {
     const { wsClient } = await import("../../lib/ws");
 
     renderPanel();
-    const input = screen.getByPlaceholderText("输入消息...");
+    const input = screen.getByRole("textbox", { name: "输入消息..." });
     await user.type(input, "switch then send");
     await waitFor(() => expect(leaderSelectorMock.onUpdatingChange).toBeTypeOf("function"));
 
@@ -249,7 +282,7 @@ describe("LeaderChatPanel", () => {
     await user.keyboard("{Enter}");
 
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "flow:message" }));
-    expect(input).toHaveValue("switch then send");
+    expect(input).toHaveTextContent("switch then send");
 
     act(() => leaderSelectorMock.onUpdatingChange?.(false));
     await user.keyboard("{Enter}");
@@ -348,8 +381,8 @@ describe("LeaderChatPanel", () => {
 
     renderPanel();
 
-    const input = await screen.findByPlaceholderText("请先选择模型");
-    expect(input).toBeDisabled();
+    const input = await screen.findByRole("textbox", { name: "请先选择模型" });
+    expect(input).toHaveAttribute("contenteditable", "false");
     await user.keyboard("{Enter}");
 
     expect(wsClient.send).not.toHaveBeenCalled();
@@ -365,7 +398,7 @@ describe("LeaderChatPanel", () => {
     const composer = screen.getByTestId("leader-chat-composer");
     expect(composer.className).toContain("pointer-events-auto");
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "compact hello");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "compact hello");
     await user.keyboard("{Enter}");
 
     expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
@@ -390,7 +423,7 @@ describe("LeaderChatPanel", () => {
 
     renderPanel({ userTurns: [activeTurn] });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "不要继续了");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "不要继续了");
     await user.click(screen.getByRole("button", { name: "停止本轮" }));
 
     expect(wsClient.sendUserTurnCancel).toHaveBeenCalledWith("flow-1", activeTurn.id);
@@ -438,13 +471,13 @@ describe("LeaderChatPanel", () => {
     expect(stopButton).toBeVisible();
     expect(stopButton).toHaveClass("size-9", "rounded-full", "dark:bg-foreground", "dark:text-background");
     expect(stopButton.querySelector("span")).toHaveClass("size-3");
-    expect(screen.getByPlaceholderText("继续输入以排队后续修改")).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "继续输入以排队后续修改" })).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "settle flow" }));
 
     await waitFor(() => {
       expect(screen.queryByRole("button", { name: "停止本轮" })).not.toBeInTheDocument();
-      expect(screen.getByPlaceholderText("输入消息开始新的讨论...")).toBeVisible();
+      expect(screen.getByRole("textbox", { name: "输入消息开始新的讨论..." })).toBeVisible();
     });
     expect(useRunningMessageQueueStore.getState().knownRunningByFlow["flow-1"]).toBe(false);
   });
@@ -465,10 +498,10 @@ describe("LeaderChatPanel", () => {
     });
 
     expect(screen.queryByRole("button", { name: "停止本轮" })).not.toBeInTheDocument();
-    expect(screen.getByPlaceholderText("输入消息...")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "发送消息" })).toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "继续执行");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "继续执行");
     await user.click(screen.getByRole("button", { name: "发送消息" }));
 
     expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
@@ -537,13 +570,13 @@ describe("LeaderChatPanel", () => {
 
     render(<Harness />);
 
-    expect(screen.getByPlaceholderText("输入消息...")).toHaveValue("打开 AGENTS.md");
-    await user.type(screen.getByPlaceholderText("输入消息..."), " 继续");
-    expect(screen.getByPlaceholderText("输入消息...")).toHaveValue("打开 AGENTS.md 继续");
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveTextContent("打开 AGENTS.md");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), " 继续");
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveTextContent("打开 AGENTS.md 继续");
 
     await user.click(screen.getByRole("button", { name: "compact" }));
 
-    expect(screen.getByPlaceholderText("输入消息...")).toHaveValue("打开 AGENTS.md 继续");
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveTextContent("打开 AGENTS.md 继续");
   });
 
   it("preserves controlled composer drafts by flow", async () => {
@@ -573,23 +606,24 @@ describe("LeaderChatPanel", () => {
 
     render(<Harness />);
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "flow one draft");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "flow one draft");
     await user.click(screen.getByRole("button", { name: "flow 2" }));
-    expect(screen.getByPlaceholderText("输入消息...")).toHaveValue("");
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveTextContent("");
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "flow two draft");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "flow two draft");
     await user.click(screen.getByRole("button", { name: "flow 1" }));
 
-    expect(screen.getByPlaceholderText("输入消息...")).toHaveValue("flow one draft");
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveTextContent("flow one draft");
   });
 
   it("does not send while IME composition is confirming text", async () => {
+    const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
 
     renderPanel();
 
-    const input = screen.getByPlaceholderText("输入消息...");
-    fireEvent.change(input, { target: { value: "他" } });
+    const input = screen.getByRole("textbox", { name: "输入消息..." });
+    await user.type(input, "他");
     fireEvent.compositionStart(input);
     fireEvent.keyDown(input, { key: "Enter", code: "Enter", keyCode: 13 });
 
@@ -626,7 +660,7 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "排队消息 1");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "排队消息 1");
     await user.keyboard("{Enter}");
 
     expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
@@ -639,9 +673,9 @@ describe("LeaderChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "编辑消息 1" }));
 
-    const composerInput = screen.getByPlaceholderText("继续输入以排队后续修改");
+    const composerInput = screen.getByRole("textbox", { name: "继续输入以排队后续修改" });
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
-    expect(composerInput).toHaveValue("排队消息 1");
+    expect(composerInput).toHaveTextContent("排队消息 1");
 
     await user.clear(composerInput);
     await user.type(composerInput, "排队消息 33");
@@ -770,7 +804,7 @@ describe("LeaderChatPanel", () => {
 
     const { rerender } = renderPanel({ userTurns: [activeTurn] });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "切换后还在的排队消息");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "切换后还在的排队消息");
     await user.keyboard("{Enter}");
 
     expect(screen.getByTestId("running-message-queue")).toHaveTextContent("切换后还在的排队消息");
@@ -841,7 +875,7 @@ describe("LeaderChatPanel", () => {
 
     renderPanel({ userTurns: [activeTurn] });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "那这也发出来吧");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "那这也发出来吧");
     await user.keyboard("{Enter}");
 
     const queue = screen.getByTestId("running-message-queue");
@@ -958,7 +992,7 @@ describe("LeaderChatPanel", () => {
 
     renderPanel();
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "这个呢");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "这个呢");
     await user.keyboard("{Enter}");
 
     expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
@@ -1024,7 +1058,7 @@ describe("LeaderChatPanel", () => {
 
     renderPanel({ userTurns: [activeTurn] });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "排队带注释");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "排队带注释");
     await user.keyboard("{Enter}");
 
     expect(screen.getByTestId("running-message-queue")).toHaveTextContent("排队带注释");
@@ -1035,7 +1069,7 @@ describe("LeaderChatPanel", () => {
     await user.click(screen.getByRole("button", { name: "编辑消息 1" }));
 
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox")).toHaveValue("排队带注释");
+    expect(screen.getByRole("textbox")).toHaveTextContent("排队带注释");
     expect(screen.getByText("1 条注释")).toBeInTheDocument();
     expect(reset).not.toHaveBeenCalled();
     await waitFor(() => expect(setConfirmedMarkers).toHaveBeenLastCalledWith([
@@ -1095,14 +1129,14 @@ describe("LeaderChatPanel", () => {
 
     renderPanel({ userTurns: [activeTurn] });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "跨页排队消息");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "跨页排队消息");
     await user.keyboard("{Enter}");
     expect(screen.getByTestId("running-message-queue")).toHaveTextContent("跨页排队消息");
     expect(screen.queryByText("1 条注释")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "编辑消息 1" }));
 
-    expect(screen.getByRole("textbox")).toHaveValue("跨页排队消息");
+    expect(screen.getByRole("textbox")).toHaveTextContent("跨页排队消息");
     expect(screen.getByText("1 条注释")).toBeInTheDocument();
     await waitFor(() => expect(setConfirmedMarkers).toHaveBeenLastCalledWith([]));
     expect(startElementPicker).toHaveBeenLastCalledWith(2);
@@ -1218,7 +1252,7 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "这个是什么");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "这个是什么");
     await user.keyboard("{Enter}");
     await user.click(screen.getByRole("button", { name: "引导消息 1" }));
 
@@ -1326,7 +1360,7 @@ describe("LeaderChatPanel", () => {
       </>,
     );
 
-    await user.type(within(screen.getByTestId("compact-panel")).getByPlaceholderText("继续输入以排队后续修改"), "共享排队消息");
+    await user.type(within(screen.getByTestId("compact-panel")).getByRole("textbox", { name: "继续输入以排队后续修改" }), "共享排队消息");
     await user.keyboard("{Enter}");
 
     expect(within(screen.getByTestId("compact-panel")).getByText("共享排队消息")).toBeInTheDocument();
@@ -1354,7 +1388,7 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    await user.type(screen.getByPlaceholderText("输入消息..."), "你好");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "你好");
     await user.keyboard("{Enter}");
 
     expect(await screen.findByText("你好")).toBeInTheDocument();
@@ -1390,7 +1424,7 @@ describe("LeaderChatPanel", () => {
 
     const { rerender } = renderPanel({ leaderAgentSessionId: null, flowStatus: "idle" });
 
-    await user.type(screen.getByPlaceholderText("输入消息开始新的讨论..."), "新 flow 首条消息");
+    await user.type(screen.getByRole("textbox", { name: "输入消息开始新的讨论..." }), "新 flow 首条消息");
     await user.keyboard("{Enter}");
 
     expect(await screen.findByText("新 flow 首条消息")).toBeInTheDocument();
@@ -1431,6 +1465,190 @@ describe("LeaderChatPanel", () => {
     expect(screen.getByRole("button", { name: "执行模式：自动编辑" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "添加消息选项" }));
     expect(screen.getByRole("button", { name: "编排审批设置，当前：需要批准" })).toHaveTextContent("需要批准");
+    expect(screen.queryByText("原生上下文")).not.toBeInTheDocument();
+    expect(screen.queryByText("项目说明")).not.toBeInTheDocument();
+    expect(screen.getByTestId("composer-add-menu")).toHaveClass("w-[var(--anchor-width)]");
+  });
+
+  it("opens the scoped Skills and MCP menu only for slash tokens", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "xxxx/");
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, "/");
+    expect(screen.getByTestId("prompt-slash-menu")).toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, "xxx /");
+    expect(screen.getByTestId("prompt-slash-menu")).toBeInTheDocument();
+    const skills = screen.getByRole("region", { name: "技能" });
+    expect(within(skills).getAllByRole("option").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("project-skill"),
+      expect.stringContaining("global-skill"),
+    ]);
+    const mcp = screen.getByRole("region", { name: "MCP" });
+    expect(within(mcp).getAllByRole("option").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("project-mcp"),
+      expect.stringContaining("global-mcp"),
+    ]);
+  });
+
+  it("reloads Skills and MCP after the Flow runtime selection changes", async () => {
+    renderPanel();
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      leaderSelectorMock.onSelectionChange?.({ configId: "mimo", modelId: "mimo-v2.5" });
+    });
+
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledTimes(2));
+    expect(apiMocks.fetchNativeContext).toHaveBeenLastCalledWith({ flowId: "flow-1" });
+  });
+
+  it("opens each slash occurrence only once until that slash is deleted", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "/");
+    expect(screen.getByTestId("prompt-slash-menu")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+
+    await user.click(input);
+    await user.keyboard("{ArrowLeft}{ArrowRight}");
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+
+    await user.clear(input);
+    await user.type(input, "/");
+    expect(screen.getByTestId("prompt-slash-menu")).toBeInTheDocument();
+    await user.click(screen.getByRole("option", { name: /project-skill/ }));
+    expect(input).toHaveTextContent("Project Skill");
+    expect(screen.getByTestId(/prompt-inline-token-skill-project/)).toHaveTextContent("Project Skill");
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+
+    await user.click(input);
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+  });
+
+  it("filters native context by the slash query and renders selected items inline", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "/skill");
+    const skills = screen.getByRole("region", { name: "技能" });
+    expect(within(skills).getAllByRole("option").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("project-skill"),
+      expect.stringContaining("global-skill"),
+    ]);
+    await waitFor(() => {
+      expect(within(screen.getByRole("region", { name: "MCP" })).queryAllByRole("option")).toHaveLength(0);
+    });
+
+    await user.click(within(skills).getByRole("option", { name: /project-skill/ }));
+    expect(input).toHaveTextContent("Project Skill");
+    expect(screen.getByTestId(/prompt-inline-token-skill-project/)).toHaveTextContent("Project Skill");
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+
+    const sentMessage = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:message");
+    expect(sentMessage?.content).toBe("[$project-skill](/repo/.claude/skills/project-skill/SKILL.md)");
+  });
+
+  it("keeps one slash option active and uses Enter to insert it instead of sending", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "/skill");
+    const options = within(screen.getByRole("region", { name: "技能" })).getAllByRole("option");
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([
+      options[0],
+    ]);
+
+    fireEvent.mouseEnter(options[1]);
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([
+      options[1],
+    ]);
+
+    await user.keyboard("{ArrowUp}");
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([
+      options[0],
+    ]);
+
+    await user.keyboard("{Enter}");
+
+    expect(screen.getByTestId(/prompt-inline-token-skill-project/)).toHaveTextContent("Project Skill");
+    expect(screen.queryByTestId("prompt-slash-menu")).not.toBeInTheDocument();
+    expect(vi.mocked(wsClient.send).mock.calls.some(([message]) => message.type === "flow:message")).toBe(false);
+  });
+
+  it("deletes a selected inline context token as one atomic unit", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "/skill");
+    await user.click(screen.getByRole("option", { name: /project-skill/ }));
+    const token = screen.getByTestId(/prompt-inline-token-skill-project/);
+    expect(token).toHaveTextContent("Project Skill");
+
+    await user.click(token);
+    await user.keyboard("{Backspace}");
+
+    expect(screen.queryByTestId(/prompt-inline-token-skill-project/)).not.toBeInTheDocument();
+  });
+
+  it("deletes an adjacent inline context token instead of converting it to plain text", async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "/skill");
+    await user.click(screen.getByRole("option", { name: /project-skill/ }));
+    expect(screen.getByTestId(/prompt-inline-token-skill-project/)).toBeInTheDocument();
+
+    await deleteRichEditorTrailingCharacter(input);
+    expect(screen.getByTestId(/prompt-inline-token-skill-project/)).toBeInTheDocument();
+
+    await pressRichEditorBackspace(input);
+    expect(screen.queryByTestId(/prompt-inline-token-skill-project/)).not.toBeInTheDocument();
+    expect(input).not.toHaveTextContent("Project Skill");
+  });
+
+  it("highlights known MCP text and sends the canonical Markdown unchanged", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+    renderPanel();
+    const input = screen.getByRole("textbox");
+    await waitFor(() => expect(apiMocks.fetchNativeContext).toHaveBeenCalledWith({ flowId: "flow-1" }));
+
+    await user.type(input, "请使用 /project-mcp MCP 查询");
+
+    expect(input).toHaveTextContent("请使用 Project MCP 查询");
+    expect(screen.getByTestId(/prompt-inline-token-mcp-project/)).toHaveTextContent("Project MCP");
+    expect(screen.getByTestId(/prompt-inline-token-mcp-project/)).toHaveClass("text-sky-400");
+    expect(screen.queryByTestId("prompt-context-tokens")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "发送消息" }));
+    const sentMessage = vi.mocked(wsClient.send).mock.calls
+      .map(([message]) => message)
+      .find((message) => message.type === "flow:message");
+    expect(sentMessage?.content).toBe("请使用 [@project-mcp](/.squadflow/mcp/project-mcp) 查询");
   });
 
   it("keeps existing Flow settings isolated from new-Flow defaults and other Flows", async () => {
@@ -1826,7 +2044,7 @@ describe("LeaderChatPanel", () => {
     await user.click(screen.getByRole("button", { name: "执行模式：自动编辑" }));
     await user.click(screen.getByRole("button", { name: /计划模式：/ }));
     expect(screen.getByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
-    await user.type(screen.getByPlaceholderText("输入消息..."), "先生成计划");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "先生成计划");
     await user.keyboard("{Enter}");
     expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
       type: "flow:message",
@@ -1935,7 +2153,7 @@ describe("LeaderChatPanel", () => {
     renderPanel({ riskMode: "full_access" });
     await user.click(screen.getByRole("button", { name: "执行模式：完全访问" }));
     await user.click(screen.getByRole("button", { name: /计划模式：/ }));
-    await user.type(screen.getByPlaceholderText("输入消息..."), "保留原档位");
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "保留原档位");
     await user.keyboard("{Enter}");
 
     act(() => {
@@ -1978,7 +2196,7 @@ describe("LeaderChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "执行模式：自动编辑" }));
     await user.click(screen.getByRole("button", { name: /计划模式：/ }));
-    await user.type(screen.getByPlaceholderText("继续输入以排队后续修改"), "下一轮先写 Spec");
+    await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "下一轮先写 Spec");
     await user.keyboard("{Enter}");
 
     const waitButton = screen.getByRole("button", { name: "Spec 消息 1 需等待当前任务结束" });
@@ -2478,7 +2696,7 @@ describe("LeaderChatPanel", () => {
   it("disables the composer when no flow is selected", () => {
     renderPanel({ flowId: null });
 
-    expect(screen.getByPlaceholderText("输入消息...")).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toHaveAttribute("contenteditable", "false");
   });
 
   it("does not render a project selector inside an existing task", () => {

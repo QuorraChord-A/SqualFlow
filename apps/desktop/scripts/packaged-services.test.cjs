@@ -3,9 +3,49 @@ const { EventEmitter } = require("node:events");
 const test = require("node:test");
 const {
   createPackagedServiceSpecs,
+  resolveLoginShellEnv,
   startPackagedServices,
   stopPackagedServices,
 } = require("../packaged-services");
+
+test("loads arbitrary CLI locations from the user's login shell environment", async () => {
+  const baseEnv = {
+    PATH: "/usr/bin:/bin",
+    SHELL: "/bin/zsh",
+    DESKTOP_ONLY: "preserved",
+  };
+  const resolved = await resolveLoginShellEnv({
+    baseEnv,
+    platform: "darwin",
+    execFileImpl(shell, args, options, callback) {
+      assert.equal(shell, "/bin/zsh");
+      assert.deepEqual(args, ["-ilc", "printf '\\0'; /usr/bin/env -0"]);
+      assert.equal(options.env, baseEnv);
+      callback(
+        null,
+        "shell startup output\n\0PATH=/Users/test/.runtime/bin:/usr/bin:/bin\0ARBITRARY_MCP_HOME=/Users/test/.runtime\0",
+      );
+    },
+  });
+
+  assert.equal(resolved.PATH, "/Users/test/.runtime/bin:/usr/bin:/bin");
+  assert.equal(resolved.ARBITRARY_MCP_HOME, "/Users/test/.runtime");
+  assert.equal(resolved.DESKTOP_ONLY, "preserved");
+});
+
+test("falls back to the desktop environment when login shell discovery fails", async () => {
+  const baseEnv = { PATH: "/usr/bin:/bin", SHELL: "/bin/zsh" };
+  const resolved = await resolveLoginShellEnv({
+    baseEnv,
+    platform: "darwin",
+    execFileImpl(_shell, _args, _options, callback) {
+      callback(new Error("shell failed"), "");
+    },
+  });
+
+  assert.deepEqual(resolved, baseEnv);
+  assert.notEqual(resolved, baseEnv);
+});
 
 test("builds self-contained service paths and writable application data paths", () => {
   const specs = createPackagedServiceSpecs({

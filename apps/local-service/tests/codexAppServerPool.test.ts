@@ -123,6 +123,37 @@ describe("CodexAppServerPool", () => {
     expect(cores[0]!.close).toHaveBeenCalledTimes(1);
   });
 
+  it("drops late scoped notifications after their owning lease closes", async () => {
+    const { pool, cores } = createPool();
+    const factory = pool.clientFactory("official");
+    const namer = factory({ command: "codex", args: ["app-server"] });
+    const leader = factory({ command: "codex", args: ["app-server"] });
+
+    await Promise.all([namer.start(), leader.start()]);
+    const namerThread = await namer.request("thread/start", {}) as { thread: { id: string } };
+    const leaderThread = await leader.request("thread/start", {}) as { thread: { id: string } };
+    namer.close();
+
+    const leaderEvent = leader.notifications()[Symbol.asyncIterator]().next();
+    cores[0]!.push({
+      method: "turn/completed",
+      params: {
+        threadId: namerThread.thread.id,
+        turn: { id: "turn-namer", status: "interrupted" },
+      },
+    });
+    cores[0]!.push({
+      method: "item/agentMessage/delta",
+      params: { threadId: leaderThread.thread.id, delta: "leader" },
+    });
+
+    await expect(leaderEvent).resolves.toMatchObject({
+      value: { params: { threadId: leaderThread.thread.id, delta: "leader" } },
+    });
+    leader.close();
+    pool.close();
+  });
+
   it("keeps exactly one current process per official/custom pool", async () => {
     const { pool, cores } = createPool();
     const official = pool.clientFactory("official")({ command: "external-codex" });

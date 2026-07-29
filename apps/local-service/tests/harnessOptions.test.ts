@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildBaseOptions } from "../src/harness/baseHarness.js";
 import { buildExpertOptions } from "../src/harness/expertHarness.js";
 import { buildLeaderOptions } from "../src/harness/leaderHarness.js";
@@ -27,6 +27,18 @@ function withTimeout<T>(promise: Promise<T>, ms = 20): Promise<T> {
 }
 
 const settingsPath = withTempSettings();
+const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR;
+const isolatedClaudeConfigDir = fs.mkdtempSync(path.join(os.tmpdir(), "harness-claude-config-"));
+
+beforeAll(() => {
+  process.env.CLAUDE_CONFIG_DIR = isolatedClaudeConfigDir;
+});
+
+afterAll(() => {
+  if (originalClaudeConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+  else process.env.CLAUDE_CONFIG_DIR = originalClaudeConfigDir;
+  fs.rmSync(isolatedClaudeConfigDir, { recursive: true, force: true });
+});
 
 function runtimeConfig(patch: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
@@ -103,6 +115,8 @@ describe("harness base options", () => {
     expect(options.settings.env).toBeUndefined();
     expect(options.env).toMatchObject({ FOO: "bar" });
     expect(options.settingSources).toEqual([]);
+    expect(options.skills).toBe("all");
+    expect(options.strictMcpConfig).toBe(true);
     expect(options.includePartialMessages).toBe(true);
   });
 
@@ -251,11 +265,12 @@ describe("harness base options", () => {
 
 describe("expert harness options", () => {
   it("gates Write/Edit/Bash through permission callback for writable experts", () => {
+    const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "expert-native-context-"));
     const options = buildExpertOptions({
       role: "frontend",
       systemPrompt: "sys",
       cwd: "/repo",
-      scratchDir: "/managed/scratch",
+      scratchDir,
       capabilities: ["read", "write", "edit", "shell"],
       mcpTools: ["mcp__leader__finish_task"],
     });
@@ -272,11 +287,17 @@ describe("expert harness options", () => {
       sandbox: { enabled: false },
     });
     expect(options.env).toMatchObject({
-      CLAUDE_CODE_TMPDIR: "/managed/scratch",
-      TMPDIR: "/managed/scratch",
-      TMP: "/managed/scratch",
-      TEMP: "/managed/scratch",
+      CLAUDE_CODE_TMPDIR: scratchDir,
+      TMPDIR: scratchDir,
+      TMP: scratchDir,
+      TEMP: scratchDir,
+      CLAUDE_CONFIG_DIR: isolatedClaudeConfigDir,
     });
+    expect(options.settingSources).toEqual([]);
+    expect(options.plugins).toEqual([{
+      type: "local",
+      path: path.join(scratchDir, "claude-native-context-plugin"),
+    }]);
   });
 
   it("uses stable project cwd for read-only experts and only disallows unauthorized gated tools", () => {

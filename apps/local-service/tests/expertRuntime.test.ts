@@ -1494,8 +1494,8 @@ describe("ExpertRuntime", () => {
     await expect(
       captured?.options?.canUseTool?.("mcp__unknown__tool", {}, { signal: new AbortController().signal }),
     ).resolves.toEqual({
-      behavior: "deny",
-      message: "tool not allowed by expert: mcp__unknown__tool",
+      behavior: "allow",
+      updatedInput: {},
     });
   });
 

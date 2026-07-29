@@ -1901,7 +1901,27 @@ describe("SessionTranscriptPanel", () => {
 
     const userRow = await screen.findByTestId("chat-message-user");
     expect(userRow.className).toMatch(/userRow/);
-    expect(screen.getByText("你好").className).toMatch(/userBubble/);
+    expect(screen.getByText("你好").closest("div")?.className).toMatch(/userBubble/);
+  });
+
+  it("renders canonical Skill and MCP Markdown as inline tokens in user messages", async () => {
+    render(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-1"
+        readonly
+        optimisticMessages={[
+          userMessage(
+            "msg-user-1",
+            "请使用 [$grill-me](/Users/test/.claude/skills/grill-me/SKILL.md) 和 [@context7](/.squadflow/mcp/context7) 查询",
+          ),
+        ]}
+      />,
+    );
+
+    expect((await screen.findByText("Grill Me")).parentElement).toHaveClass("text-sky-400");
+    expect(screen.getByText("Context7 MCP").parentElement).toHaveClass("text-sky-400");
+    expect(screen.queryByText(/SKILL\.md|\\.squadflow/u)).not.toBeInTheDocument();
   });
 
   it("renders user message timestamp when createdAt is available", async () => {
@@ -1949,7 +1969,7 @@ describe("SessionTranscriptPanel", () => {
       ],
     });
 
-    expect((await screen.findByText("历史消息")).className).toMatch(/userBubble/);
+    expect((await screen.findByText("历史消息")).closest("div")?.className).toMatch(/userBubble/);
     expect(screen.getByText("23:10")).toBeInTheDocument();
   });
 

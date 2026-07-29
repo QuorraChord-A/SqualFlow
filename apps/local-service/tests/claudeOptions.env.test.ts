@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildClaudeBaseOptions } from "../src/runtime/adapters/claudeOptions.js";
+import {
+  buildClaudeBaseOptions,
+  buildClaudeExpertOptions,
+  buildClaudeLeaderOptions,
+} from "../src/runtime/adapters/claudeOptions.js";
 import type { RuntimeConfig } from "../src/config/agentRuntimeConfig.js";
 
 const POLLUTED = {
@@ -89,6 +93,65 @@ describe("claude options env isolation", () => {
       expect(options.env?.CLAUDE_OPTIONS_TEST_MARKER).toBe("keep-me");
     } finally {
       delete process.env.CLAUDE_OPTIONS_TEST_MARKER;
+    }
+  });
+
+  it("keeps raw Claude filesystem settings isolated while enabling SDK skills", () => {
+    const options = buildClaudeBaseOptions(baseOptionsInput());
+    expect(options.settingSources).toEqual([]);
+    expect(options.skills).toBe("all");
+    expect(options.strictMcpConfig).toBe(true);
+  });
+
+  it("loads and pre-authorizes every user-native MCP server", () => {
+    const configDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-native-mcp-options-"));
+    const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), "claude-native-mcp-scratch-"));
+    fs.writeFileSync(
+      path.join(configDir, ".claude.json"),
+      JSON.stringify({
+        mcpServers: {
+          "remote-reference": { type: "http", url: "https://mcp.example.test/mcp" },
+          "local-research": { command: "arbitrary-mcp-command", args: ["serve"] },
+        },
+      }),
+      "utf8",
+    );
+    const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = configDir;
+
+    try {
+      const leader = buildClaudeLeaderOptions({
+        role: "leader",
+        systemPrompt: "leader",
+        cwd: "/tmp",
+        scratchDir,
+        capabilities: ["read"],
+        mcpTools: ["mcp__squadflow-leader__get_context"],
+      });
+      const expert = buildClaudeExpertOptions({
+        role: "research",
+        systemPrompt: "expert",
+        cwd: "/tmp",
+        scratchDir,
+        capabilities: ["read"],
+        mcpTools: [],
+      });
+
+      expect(leader.allowedTools).toEqual(expect.arrayContaining([
+        "mcp__remote-reference__*",
+        "mcp__local-research__*",
+      ]));
+      expect(expert.allowedTools).toEqual(expect.arrayContaining([
+        "mcp__remote-reference__*",
+        "mcp__local-research__*",
+      ]));
+      expect(leader.env?.ENABLE_TOOL_SEARCH).toBe("false");
+      expect(expert.env?.ENABLE_TOOL_SEARCH).toBe("false");
+    } finally {
+      if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+      else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+      fs.rmSync(configDir, { recursive: true, force: true });
+      fs.rmSync(scratchDir, { recursive: true, force: true });
     }
   });
 

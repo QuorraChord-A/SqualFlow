@@ -261,7 +261,7 @@ describe("Codex runtime adapter", () => {
     expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
       type: "provider_transport_stage",
       stage: "first_notification",
-      method: "thread/tokenUsage/updated",
+      method: "turn/completed",
       transport: "stdio",
     }));
     clientOptions?.onStderrLine?.("authorization: secret-value");

@@ -2,6 +2,12 @@ import type { TimelineTool, ToolIcon, ToolPresentation } from "./types";
 
 export type { ToolPresentation } from "./types";
 
+export type McpResultViewModel = {
+  content: Array<Record<string, unknown> & { type: string }>;
+  structuredContent?: unknown;
+  isError: boolean;
+};
+
 const MCP_NAME_PREFIXES = [
   "mcp__squadflow-leader__",
   "mcp__squadflow_leader__",
@@ -9,7 +15,7 @@ const MCP_NAME_PREFIXES = [
 ];
 
 export function isMcpTool(toolName: string): boolean {
-  return MCP_NAME_PREFIXES.some((prefix) => toolName.startsWith(prefix));
+  return toolName.startsWith("mcp__");
 }
 
 export function mcpToolName(toolName: string): string {
@@ -18,7 +24,13 @@ export function mcpToolName(toolName: string): string {
       return toolName.slice(prefix.length);
     }
   }
-  return toolName;
+  const parts = parseMcpToolName(toolName);
+  return parts?.tool ?? toolName;
+}
+
+export function parseMcpToolName(toolName: string): { server: string; tool: string } | null {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(toolName);
+  return match ? { server: match[1], tool: match[2] } : null;
 }
 
 export function parseToolPayload(value: unknown, depth = 0): unknown {
@@ -31,8 +43,22 @@ export function parseToolPayload(value: unknown, depth = 0): unknown {
 }
 
 function unwrapContent(output: unknown): unknown {
-  if (output && typeof output === "object" && !Array.isArray(output) && "content" in output) {
-    return (output as Record<string, unknown>).content;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    const record = output as Record<string, unknown>;
+    const mcp = record.mcp;
+    if (mcp && typeof mcp === "object" && !Array.isArray(mcp)) {
+      const mcpRecord = mcp as Record<string, unknown>;
+      if (mcpRecord.structuredContent !== undefined) return mcpRecord.structuredContent;
+      if (Array.isArray(mcpRecord.content)) {
+        const text = mcpRecord.content
+          .filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text")
+          .map((item) => (item as Record<string, unknown>).text)
+          .filter((item): item is string => typeof item === "string")
+          .join("\n");
+        return text || mcpRecord.content;
+      }
+    }
+    if ("content" in record) return record.content;
   }
   return output;
 }
@@ -42,10 +68,56 @@ export function parseMcpOutput(output: unknown): unknown {
   return parseToolPayload(content, 0);
 }
 
+export function mcpResultForOutput(output: unknown): McpResultViewModel | null {
+  const record = output && typeof output === "object" && !Array.isArray(output)
+    ? output as Record<string, unknown>
+    : null;
+  const envelope = record?.mcp;
+  const mcpRecord = envelope && typeof envelope === "object" && !Array.isArray(envelope)
+    ? envelope as Record<string, unknown>
+    : record;
+  if (!mcpRecord) {
+    const parsed = parseToolPayload(output, 0);
+    if (parsed === output) {
+      return typeof output === "string"
+        ? { content: [{ type: "text", text: output }], isError: false }
+        : null;
+    }
+    return mcpResultForOutput(parsed);
+  }
+  const rawContent = mcpRecord.content;
+  const content = Array.isArray(rawContent)
+    ? rawContent.filter((item): item is Record<string, unknown> & { type: string } => (
+      Boolean(item)
+      && typeof item === "object"
+      && !Array.isArray(item)
+      && typeof (item as Record<string, unknown>).type === "string"
+    ))
+    : typeof rawContent === "string"
+      ? [{ type: "text", text: rawContent }]
+      : [];
+  const structuredContent = mcpRecord.structuredContent
+    ?? (record && record !== mcpRecord && !("content" in mcpRecord) ? record : undefined);
+  return {
+    content,
+    ...(structuredContent !== undefined ? { structuredContent } : {}),
+    isError: mcpRecord.isError === true
+      || mcpRecord.is_error === true
+      || record?.is_error === true,
+  };
+}
+
 function mcpFailure(output: unknown): { code?: string; message?: string } | null {
+  const mcpResult = mcpResultForOutput(output);
+  if (mcpResult?.isError) {
+    return { message: "MCP tool returned an error" };
+  }
   const parsed = parseMcpOutput(output);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const obj = parsed as Record<string, unknown>;
+  if (obj.isError === true || obj.is_error === true) {
+    return { message: typeof obj.message === "string" ? obj.message : undefined };
+  }
   if (obj.ok !== false) return null;
   const error = obj.error;
   if (error && typeof error === "object" && !Array.isArray(error)) {
@@ -300,6 +372,29 @@ function titleForMcp(kind: McpKind, input: Record<string, unknown> | null, outpu
   }
 }
 
+function humanizeToolName(value: string): string {
+  return value
+    .replace(/[_-]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim()
+    .replace(/\b\w/gu, (character) => character.toUpperCase());
+}
+
+function safeIconList(value: unknown): Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((icon) => {
+    if (!icon || typeof icon !== "object" || Array.isArray(icon)) return [];
+    const record = icon as Record<string, unknown>;
+    if (typeof record.src !== "string" || !record.src) return [];
+    return [{
+      src: record.src,
+      ...(typeof record.mimeType === "string" ? { mimeType: record.mimeType } : {}),
+      ...(Array.isArray(record.sizes) ? { sizes: record.sizes.filter((size): size is string => typeof size === "string") } : {}),
+      ...(record.theme === "light" || record.theme === "dark" ? { theme: record.theme } : {}),
+    }];
+  });
+}
+
 function joinStrings(values: unknown[], separator = ", "): string {
   const strings = values.filter((v): v is string => typeof v === "string" && v.length > 0);
   return strings.join(separator);
@@ -449,26 +544,39 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
 }
 
 export function presentMcpTool(tool: TimelineTool): ToolPresentation {
-  const name = mcpToolName(tool.toolName);
+  const parsed = parseMcpToolName(tool.toolName);
+  const name = parsed?.tool ?? mcpToolName(tool.toolName);
   const kind: McpKind | "unknown" = isMcpKind(name) ? name : "unknown";
   const status = tool.state === "failed" || mcpFailure(tool.output) ? "failed" : tool.state;
   const input = tool.input ?? null;
+  const mcp = parsed
+    ? {
+      server: tool.mcp?.server ?? parsed.server,
+      tool: tool.mcp?.tool ?? parsed.tool,
+      title: tool.mcp?.title ?? humanizeToolName(tool.mcp?.tool ?? parsed.tool),
+      icons: safeIconList(tool.mcp?.icons),
+      serverIcons: safeIconList(tool.mcp?.serverIcons),
+    }
+    : undefined;
 
   if (kind === "unknown") {
     return {
-      kind: "unknown",
+      kind: "mcp",
       icon: "unknown",
       status,
       statusLabel: status === "interrupted" ? "已中断" : status === "failed" ? "失败" : status === "running" ? "调用中" : "已完成",
-      title: tool.toolName,
-      operationLabel: "调用",
+      title: mcp?.title ?? (parsed ? humanizeToolName(parsed.tool) : tool.toolName),
+      operationLabel: mcp ? `MCP · ${mcp.server}` : "调用",
       file: undefined,
       command: undefined,
       query: undefined,
       diff: undefined,
-      detailRows: [],
+      detailRows: [
+        ...(mcp ? [{ label: "工具名", value: tool.toolName }] : []),
+      ],
       rawInput: input,
       rawOutput: tool.output,
+      ...(mcp ? { mcp } : {}),
     };
   }
 
@@ -486,5 +594,6 @@ export function presentMcpTool(tool: TimelineTool): ToolPresentation {
     detailRows: detailRowsForMcp(kind, input, tool.output),
     rawInput: input,
     rawOutput: tool.output,
+    ...(mcp ? { mcp } : {}),
   };
 }

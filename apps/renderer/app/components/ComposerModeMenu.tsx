@@ -1,6 +1,14 @@
 "use client";
 
-import { Check, ClipboardList, ImagePlus, PencilLine, Plus, Settings2, ShieldAlert } from "lucide-react";
+import {
+  Check,
+  ClipboardList,
+  ImagePlus,
+  PencilLine,
+  Plus,
+  Settings2,
+  ShieldAlert,
+} from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import {
@@ -74,6 +82,7 @@ export default function ComposerModeMenu({
   const [planApprovalDialogOpen, setPlanApprovalDialogOpen] = useState(false);
   const [rollDirection, setRollDirection] = useState(1);
   const openPlanApprovalDialogAfterMenuCloseRef = useRef(false);
+  const addMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const previousModeRef = useRef<(typeof modeOptions)[number]["value"] | null>(null);
   const reduceMotion = useReducedMotion();
@@ -132,6 +141,7 @@ export default function ComposerModeMenu({
         }}
       >
         <PopoverTrigger
+          ref={addMenuTriggerRef}
           type="button"
           aria-label="添加消息选项"
           disabled={disabled}
@@ -144,15 +154,19 @@ export default function ComposerModeMenu({
           <Plus className="size-[15px]" />
         </PopoverTrigger>
         <PopoverContent
+          anchor={() => addMenuTriggerRef.current?.closest("[data-prompt-input]") ?? addMenuTriggerRef.current}
           side="top"
           align="start"
           sideOffset={10}
           collisionAvoidance={{ side: "none", align: "shift", fallbackAxisSide: "none" }}
-          className="w-[min(360px,calc(100vw-40px))] gap-0 rounded-2xl border border-ui-border-strong bg-[color-mix(in_srgb,var(--ui-surface-raised)_94%,var(--background))] p-1.5 shadow-[var(--ui-shadow-dialog)] ring-0"
+          data-testid="composer-add-menu"
+          className="max-h-[min(520px,var(--available-height))] w-[var(--anchor-width)] max-w-[calc(100vw-24px)] gap-0 overflow-hidden rounded-[22px] border border-ui-border-strong bg-[color-mix(in_srgb,var(--ui-surface-raised)_96%,var(--background))] p-0 shadow-[var(--ui-shadow-dialog)] ring-0 backdrop-blur-2xl"
         >
-          {onAddImages ? (
-            <>
-              <div className="px-2.5 pb-1 pt-1 text-[11px] font-medium text-muted-foreground">添加</div>
+          <div className="shrink-0 border-b border-ui-border-subtle bg-[color-mix(in_srgb,var(--ui-surface-sunken)_38%,transparent)] px-4 py-3 text-[15px] font-semibold tracking-[-0.01em] text-muted-foreground">
+            添加
+          </div>
+          <div className="min-h-0 overflow-y-auto p-2">
+            {onAddImages ? (
               <button
                 type="button"
                 aria-label="添加图片"
@@ -160,44 +174,45 @@ export default function ComposerModeMenu({
                   setAddMenuOpen(false);
                   window.setTimeout(() => imageInputRef.current?.click(), 0);
                 }}
-                className="flex min-h-12 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-ui-control-hover"
+                className="flex min-h-11 w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors hover:bg-ui-control-hover focus-visible:bg-ui-control-hover focus-visible:outline-none"
               >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ui-control text-muted-foreground">
-                  <ImagePlus className="size-4" />
+                <span className="flex size-7 shrink-0 items-center justify-center text-muted-foreground">
+                  <ImagePlus className="size-[18px]" />
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="block text-[13px] font-semibold text-foreground">图片</span>
-                  <span className="mt-0.5 block text-[11px] leading-4 text-muted-foreground">PNG、JPEG、WebP 或 GIF</span>
+                  <span className="text-[14px] font-medium text-foreground">图片</span>
+                  <span className="ml-2 text-[13px] text-muted-foreground">PNG、JPEG、WebP 或 GIF</span>
                 </span>
               </button>
-              <div className="mx-2 my-1 h-px bg-ui-border-subtle" />
-            </>
-          ) : null}
-          <div className="px-2.5 pb-1 pt-1 text-[11px] font-medium text-muted-foreground">Flow 设置</div>
-          <button
-            type="button"
-            aria-label={`编排审批设置，当前：${selectedPlanApproval.label}`}
-            onClick={() => {
-              openPlanApprovalDialogAfterMenuCloseRef.current = true;
-              setAddMenuOpen(false);
-            }}
-            className="flex min-h-12 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors hover:bg-ui-control-hover"
-          >
-            <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ui-control text-muted-foreground">
-              <Settings2 className="size-4" />
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-2">
-                <span className="text-[13px] font-semibold text-foreground">编排审批设置</span>
-                <span className="rounded-md bg-ui-control px-1.5 py-0.5 text-[10px] font-semibold leading-none text-foreground">
-                  {selectedPlanApproval.label}
+            ) : null}
+
+            <div className="mx-1 my-2 h-px bg-ui-border-subtle" />
+            <div className="px-3 pb-1.5 pt-0.5 text-[12px] font-semibold text-muted-foreground">Flow</div>
+            <button
+              type="button"
+              aria-label={`编排审批设置，当前：${selectedPlanApproval.label}`}
+              onClick={() => {
+                openPlanApprovalDialogAfterMenuCloseRef.current = true;
+                setAddMenuOpen(false);
+              }}
+              className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors hover:bg-ui-control-hover focus-visible:bg-ui-control-hover focus-visible:outline-none"
+            >
+              <span className="flex size-7 shrink-0 items-center justify-center text-muted-foreground">
+                <Settings2 className="size-[18px]" />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-2">
+                  <span className="text-[14px] font-medium text-foreground">编排审批设置</span>
+                  <span className="rounded-md bg-ui-control px-1.5 py-0.5 text-[10px] font-semibold leading-none text-foreground">
+                    {selectedPlanApproval.label}
+                  </span>
+                </span>
+                <span className="mt-0.5 block truncate text-[12px] leading-4 text-muted-foreground">
+                  {selectedPlanApproval.description}
                 </span>
               </span>
-              <span className="mt-0.5 block truncate text-[11px] leading-4 text-muted-foreground">
-                {selectedPlanApproval.description}
-              </span>
-            </span>
-          </button>
+            </button>
+          </div>
         </PopoverContent>
       </Popover>
 

@@ -12,6 +12,13 @@ export type TimelineTool = {
   toolName: string;
   capability?: RuntimeCapability;
   providerToolName?: string;
+  mcp?: {
+    server: string;
+    tool: string;
+    title?: string;
+    icons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+    serverIcons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+  };
   state: TimelineToolState;
   input: Record<string, unknown> | null;
   output: unknown;
@@ -60,6 +67,7 @@ export type TimelineInputPart =
       toolName: string;
       capability?: RuntimeCapability;
       providerToolName?: string;
+      mcp?: TimelineTool["mcp"];
       state: "input-streaming" | "input-available" | "output-available";
       input?: Record<string, unknown> | null;
       output?: unknown;
@@ -128,4 +136,11 @@ export type ToolPresentation = {
   detailRows: Array<{ label: string; value: string }>;
   rawInput: unknown;
   rawOutput: unknown;
+  mcp?: {
+    server: string;
+    tool: string;
+    title: string;
+    icons: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+    serverIcons: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+  };
 };

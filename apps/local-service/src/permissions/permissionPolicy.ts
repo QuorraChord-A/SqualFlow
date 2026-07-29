@@ -958,10 +958,6 @@ export function checkPermission(args: CheckPermissionArgs): PermissionResult {
     ? hasAuthorizedCapability(args.authorizedCapabilities, authorizedTools, capability)
     : false;
 
-  if (isMcpTool && !isAuthorized) {
-    return { behavior: "deny", message: `tool not allowed by expert: ${toolName}` };
-  }
-
   if (!isMcpTool && !isInternalTool && !isAuthorized && !isCapabilityAuthorized) {
     return { behavior: "deny", message: `tool not allowed by expert: ${toolName}` };
   }

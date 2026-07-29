@@ -115,6 +115,32 @@ describe("LeaderModelSelector", () => {
     await waitFor(() => expect(onConfiguredChange).toHaveBeenLastCalledWith(false));
   });
 
+  it("does not reload model configuration when parent callbacks change identity", async () => {
+    const { rerender } = render(
+      <LeaderModelSelector
+        flowId="flow-1"
+        onSelectionChange={() => undefined}
+      />,
+    );
+
+    await waitFor(() => expect(apiMocks.fetchAgentRuntimeConfig).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <LeaderModelSelector
+        flowId="flow-1"
+        onSelectionChange={() => undefined}
+      />,
+    );
+    rerender(
+      <LeaderModelSelector
+        flowId="flow-1"
+        onSelectionChange={() => undefined}
+      />,
+    );
+
+    expect(apiMocks.fetchAgentRuntimeConfig).toHaveBeenCalledTimes(1);
+  });
+
   it("opens provider settings when no model configuration exists", async () => {
     const user = userEvent.setup();
     const onOpenModelSettings = vi.fn();
@@ -174,6 +200,7 @@ describe("LeaderModelSelector", () => {
 
   it("reports the provider selection as updating until the flow save completes", async () => {
     const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
     const onUpdatingChange = vi.fn();
     let finishUpdate: (() => void) | undefined;
     apiMocks.updateFlowLeaderRuntimeSelection.mockImplementation(() => new Promise((resolve) => {
@@ -184,7 +211,13 @@ describe("LeaderModelSelector", () => {
       });
     }));
 
-    render(<LeaderModelSelector flowId="flow-1" onUpdatingChange={onUpdatingChange} />);
+    render(
+      <LeaderModelSelector
+        flowId="flow-1"
+        onSelectionChange={onSelectionChange}
+        onUpdatingChange={onUpdatingChange}
+      />,
+    );
 
     await user.click(await screen.findByRole("button", { name: "切换模型" }));
     fireEvent.mouseEnter(screen.getByRole("button", { name: "百炼" }));
@@ -194,6 +227,10 @@ describe("LeaderModelSelector", () => {
     expect(finishUpdate).toBeTypeOf("function");
     finishUpdate?.();
     await waitFor(() => expect(onUpdatingChange).toHaveBeenLastCalledWith(false));
+    expect(onSelectionChange).toHaveBeenCalledWith({
+      configId: "bailian",
+      modelId: "qwen-a3b",
+    });
   });
 
   it("keeps another SDK visible but disables all of its models", async () => {

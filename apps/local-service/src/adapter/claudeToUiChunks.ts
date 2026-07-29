@@ -1,4 +1,4 @@
-import type { UiMessageChunk } from "../protocol/uiMessageChunks.js";
+import type { UiMcpContentBlock, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { UiMessageChunkBuilder } from "../protocol/uiMessageChunkBuilder.js";
 import { claudeCapabilityForTool } from "../runtime/adapters/claudeCapabilities.js";
 
@@ -40,6 +40,7 @@ export class ClaudeToUiChunkAdapter {
   private pendingStreamedText = "";
   private readonly streamedToolCallIds = new Set<string>();
   private readonly streamedToolCallsByIndex = new Map<number, { id: string; name: string }>();
+  private readonly toolNamesByCallId = new Map<string, string>();
   private _durationMs: number | null = null;
   private _resultCacheUsage: ClaudeResultCacheUsage | null = null;
 
@@ -113,9 +114,11 @@ export class ClaudeToUiChunkAdapter {
       const name = stringValue(block?.name, "unknown");
       this.streamedToolCallIds.add(id);
       this.streamedToolCallsByIndex.set(blockIndex, { id, name });
+      this.toolNamesByCallId.set(id, name);
       return this.builder.toolCallStart(name, id, {
         capability: claudeCapabilityForTool(name),
         providerToolName: name,
+        ...(mcpMetadataForToolName(name) ? { mcp: mcpMetadataForToolName(name)! } : {}),
       });
     }
 
@@ -159,17 +162,24 @@ export class ClaudeToUiChunkAdapter {
       } else if (blockType === "tool_use") {
         const toolName = stringValue(blockRecord.name, "unknown");
         const toolCallId = stringValue(blockRecord.id, "tool-unknown");
+        this.toolNamesByCallId.set(toolCallId, toolName);
         const metadata = { capability: claudeCapabilityForTool(toolName), providerToolName: toolName };
+        const mcp = mcpMetadataForToolName(toolName);
+        if (mcp) Object.assign(metadata, { mcp });
         if (this.streamedToolCallIds.has(toolCallId)) {
           chunks.push(this.builder.toolInputAvailable(toolName, toolCallId, recordValue(blockRecord.input), metadata));
         } else {
           chunks.push(...this.builder.toolCall(toolName, toolCallId, recordValue(blockRecord.input), metadata));
         }
       } else if (blockType === "tool_result") {
+        const toolUseId = stringValue(blockRecord.tool_use_id, "tool-unknown");
+        const toolName = this.toolNamesByCallId.get(toolUseId) ?? "";
+        const mcp = mcpMetadataForToolName(toolName);
         chunks.push(this.builder.toolResult(
-          stringValue(blockRecord.tool_use_id, "tool-unknown"),
+          toolUseId,
           contentToString(blockRecord.content),
           Boolean(blockRecord.is_error),
+          mcp ? mcpResultFromContent(blockRecord.content, Boolean(blockRecord.is_error)) : undefined,
         ));
       }
     }
@@ -195,10 +205,14 @@ export class ClaudeToUiChunkAdapter {
       const blockRecord = asRecord(block);
       if (!blockRecord || stringValue(blockRecord.type) !== "tool_result") continue;
       sawToolResult = true;
+      const toolUseId = stringValue(blockRecord.tool_use_id, "tool-unknown");
+      const toolName = this.toolNamesByCallId.get(toolUseId) ?? "";
+      const mcp = mcpMetadataForToolName(toolName);
       chunks.push(this.builder.toolResult(
-        stringValue(blockRecord.tool_use_id, "tool-unknown"),
+        toolUseId,
         contentToString(blockRecord.content),
         Boolean(blockRecord.is_error),
+        mcp ? mcpResultFromContent(blockRecord.content, Boolean(blockRecord.is_error)) : undefined,
       ));
     }
     if (sawToolResult) {
@@ -330,4 +344,28 @@ function contentToString(content: unknown): string {
   }
   if (content === undefined || content === null) return "";
   return JSON.stringify(content);
+}
+
+function mcpMetadataForToolName(toolName: string): {
+  server: string;
+  tool: string;
+} | null {
+  const match = /^mcp__(.+?)__(.+)$/u.exec(toolName);
+  return match ? { server: match[1], tool: match[2] } : null;
+}
+
+function mcpResultFromContent(content: unknown, isError: boolean): UiMcpResult {
+  const blocks = Array.isArray(content)
+    ? content.filter(isMcpContentBlock)
+    : typeof content === "string"
+      ? [{ type: "text", text: content }]
+      : [];
+  return {
+    content: blocks,
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
+function isMcpContentBlock(value: unknown): value is UiMcpContentBlock {
+  return asRecord(value) !== null && typeof (value as Record<string, unknown>).type === "string";
 }

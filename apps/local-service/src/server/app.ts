@@ -35,6 +35,7 @@ import {
   createCodexPoolProcessOptionsResolver,
 } from "../runtime/adapters/codexAppServerPool.js";
 import { readAgentRuntimeConfigSnapshotSync } from "../config/agentRuntimeConfig.js";
+import { migrateLegacyClaudeSessions } from "../runtime/nativeContextDiscovery.js";
 
 type CreateAppOptions = {
   databasePath?: string;
@@ -111,6 +112,15 @@ export function createApp(options: CreateAppOptions = {}) {
   const defaultProjectPath = path.join(config.defaultProjectRoot, DEFAULT_PROJECT_DIRECTORY_NAME);
   fs.mkdirSync(defaultProjectPath, { recursive: true });
   fs.mkdirSync(config.runtimeScratchRoot, { recursive: true });
+  const claudeSessionMigration = migrateLegacyClaudeSessions({
+    runtimeScratchRoot: config.runtimeScratchRoot,
+  });
+  if (claudeSessionMigration.filesCopied > 0) {
+    app.log.info({
+      event: "claude_sessions_migrated",
+      ...claudeSessionMigration,
+    }, "Migrated legacy isolated Claude sessions into the shared Claude config");
+  }
   const defaultProject = store.getProject(DEFAULT_PROJECT_ID)
     ?? store.createProject({
       id: DEFAULT_PROJECT_ID,
@@ -142,7 +152,7 @@ export function createApp(options: CreateAppOptions = {}) {
       });
   const runtimeAdapterFactory = options.runtimeAdapterFactory ?? ((input) => createAgentRuntimeAdapter({
     ...input,
-    codexClientFactory: input.sdk === "codex" && codexAppServerPool
+    codexClientFactory: input.sdk === "codex" && !input.ephemeral && codexAppServerPool
       ? codexAppServerPool.clientFactory(codexPoolKindForRuntimeConfig(input.runtimeConfig))
       : undefined,
   }));

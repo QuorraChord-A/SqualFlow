@@ -961,6 +961,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         sdk: runtimeConfig.config.sdk,
         role: "leader",
         runtimeConfig: runtimeConfig.config,
+        ephemeral: true,
       });
       const modelName = runtimeConfigModelName(runtimeConfig.config, runtimeConfig.modelId) ?? null;
       fs.mkdirSync(scratchDir, { recursive: true });

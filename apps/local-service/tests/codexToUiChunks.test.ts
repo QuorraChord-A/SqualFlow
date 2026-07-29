@@ -171,6 +171,58 @@ describe("Codex to UI chunk adapter", () => {
     expect(completedChunks.filter((chunk) => chunk.type === "tool-output-available")).toHaveLength(1);
   });
 
+  it("keeps external MCP identity, icons, and structured result content", () => {
+    const adapter = createCodexToUiChunkAdapter("msg-external-mcp");
+    const item = {
+      type: "mcpToolCall",
+      id: "mcp-search-1",
+      server: "tavily-mcp",
+      tool: "tavily_search",
+      title: "Tavily Search",
+      icons: [{ src: "https://example.com/tavily.png", mimeType: "image/png", sizes: ["18x18"] }],
+      arguments: { query: "MCP" },
+    };
+
+    const chunks = adapter.adapt({
+      method: "item/completed",
+      params: {
+        item: {
+          ...item,
+          result: {
+            content: [{ type: "text", text: "Detailed Results" }],
+            structuredContent: { results: [{ title: "MCP" }] },
+            isError: false,
+          },
+        },
+      },
+    });
+
+    expect(chunks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "tool-input-available",
+        toolName: "mcp__tavily-mcp__tavily_search",
+        mcp: {
+          server: "tavily-mcp",
+          tool: "tavily_search",
+          title: "Tavily Search",
+          icons: [{ src: "https://example.com/tavily.png", mimeType: "image/png", sizes: ["18x18"] }],
+        },
+      }),
+      expect.objectContaining({
+        type: "tool-output-available",
+        output: {
+          content: "Detailed Results",
+          is_error: false,
+          mcp: {
+            content: [{ type: "text", text: "Detailed Results" }],
+            structuredContent: { results: [{ title: "MCP" }] },
+            isError: false,
+          },
+        },
+      }),
+    ]));
+  });
+
   it("uses only the last agentMessage item's full text as finalAssistantText across multi-segment turns", () => {
     const adapter = createCodexToUiChunkAdapter("msg-1");
 

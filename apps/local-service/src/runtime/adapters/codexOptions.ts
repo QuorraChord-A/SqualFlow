@@ -96,7 +96,7 @@ function withCodexTransportDebug(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 function codexEnv(runtimeConfig: RuntimeConfig | undefined): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+  const env = withLocalhostNoProxy({ ...process.env });
   if (!runtimeConfig) return withCodexTransportDebug(env);
   if (runtimeConfig.authMode === "inherited") {
     delete env.CODEX_ACCESS_TOKEN;
@@ -112,6 +112,23 @@ function codexEnv(runtimeConfig: RuntimeConfig | undefined): NodeJS.ProcessEnv {
     if (accessToken) env.CODEX_ACCESS_TOKEN = accessToken;
   }
   return withCodexTransportDebug(env);
+}
+
+function withLocalhostNoProxy(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const existing = env.NO_PROXY?.trim() || env.no_proxy?.trim() || "";
+  if (existing === "*") {
+    env.NO_PROXY = existing;
+    env.no_proxy = existing;
+    return env;
+  }
+  const entries = existing.split(",").map((entry) => entry.trim()).filter(Boolean);
+  for (const localHost of ["127.0.0.1", "localhost", "::1"]) {
+    if (!entries.includes(localHost)) entries.push(localHost);
+  }
+  const value = entries.join(",");
+  env.NO_PROXY = value;
+  env.no_proxy = value;
+  return env;
 }
 
 export function codexApiKeyEnvName(runtimeConfig: RuntimeConfig): string {
@@ -201,6 +218,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
     config: {
       ...providerConfig(runtimeConfig),
       ...reasoningEffortConfig(runtimeConfig, "ephemeral" in input && input.ephemeral === true),
+      ...("ephemeral" in input && input.ephemeral === true ? { mcp_servers: {} } : {}),
       model,
       model_provider: modelProvider,
       web_search: "disabled",

@@ -1,9 +1,16 @@
-import type { UiMessageChunk } from "./uiMessageChunks.js";
+import type { UiMcpResult, UiMessageChunk, UiToolOutput } from "./uiMessageChunks.js";
 import type { RuntimeCapability } from "../domain/runtimeCapabilities.js";
 
 type ToolCallMetadata = {
   capability?: RuntimeCapability | null;
   providerToolName?: string | null;
+  mcp?: {
+    server: string;
+    tool: string;
+    title?: string;
+    icons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+    serverIcons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+  };
 };
 
 export class UiMessageChunkBuilder {
@@ -65,6 +72,7 @@ export class UiMessageChunkBuilder {
       toolName,
       ...(metadata.capability ? { capability: metadata.capability } : {}),
       ...(metadata.providerToolName ? { providerToolName: metadata.providerToolName } : {}),
+      ...(metadata.mcp ? { mcp: metadata.mcp } : {}),
     };
     chunks.push({ type: "tool-input-start", messageId: this.messageId, seq: this.nextEventSeq(), toolCallId, ...identity });
     return chunks;
@@ -84,17 +92,28 @@ export class UiMessageChunkBuilder {
       toolName,
       ...(metadata.capability ? { capability: metadata.capability } : {}),
       ...(metadata.providerToolName ? { providerToolName: metadata.providerToolName } : {}),
+      ...(metadata.mcp ? { mcp: metadata.mcp } : {}),
     };
     return { type: "tool-input-available", messageId: this.messageId, seq: this.nextEventSeq(), toolCallId, ...identity, input };
   }
 
-  toolResult(toolCallId: string, content: string, isError: boolean): UiMessageChunk {
+  toolResult(
+    toolCallId: string,
+    content: string,
+    isError: boolean,
+    mcp?: UiMcpResult,
+  ): UiMessageChunk {
+    const output: UiToolOutput = {
+      content,
+      is_error: isError,
+      ...(mcp ? { mcp } : {}),
+    };
     return {
       type: "tool-output-available",
       messageId: this.messageId,
       seq: this.nextEventSeq(),
       toolCallId,
-      output: { content, is_error: isError },
+      output,
     };
   }
 

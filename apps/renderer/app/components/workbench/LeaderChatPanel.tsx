@@ -45,6 +45,7 @@ import {
 } from "../../types/messageAttachments";
 import { usePlanFeedbackStore } from "../../stores/usePlanFeedbackStore";
 import type { OrchestrationPlanView, PlanFeedbackDraft } from "../../types/orchestration";
+import { useNativeContextSlashMenu } from "../../hooks/useNativeContextSlashMenu";
 
 export interface LeaderChatPanelProps {
   flowId: string | null;
@@ -535,6 +536,7 @@ export default function LeaderChatPanel({
   const [flowStateConfirmed, setFlowStateConfirmed] = useState(false);
   const [leaderModelConfigured, setLeaderModelConfigured] = useState(false);
   const [runtimeSelectionUpdating, setRuntimeSelectionUpdating] = useState(false);
+  const [nativeContextRefreshKey, setNativeContextRefreshKey] = useState(0);
   const [sessionRecoveryError, setSessionRecoveryError] = useState<{ message: string; category?: string } | null>(null);
   const [leaderRuntimeError, setLeaderRuntimeError] = useState<string | null>(null);
   const browserElementAttachments = useBrowserSelectionStore((state) => state.elements);
@@ -1392,6 +1394,10 @@ export default function LeaderChatPanel({
   }, [flowId, isStreaming, leaderModelConfigured, setKnownRunningFlow]);
 
   const composerDisabled = !flowId || !leaderModelConfigured || runtimeSelectionUpdating || hasPendingDecisionCards;
+  const nativeContextSlashMenu = useNativeContextSlashMenu({
+    flowId,
+    refreshKey: nativeContextRefreshKey,
+  });
   const placeholder = hasPendingDecisionCards
     ? "请先完成澄清卡片..."
     : !leaderModelConfigured
@@ -1405,12 +1411,16 @@ export default function LeaderChatPanel({
     if (!plan.approval || plan.approval.status !== "pending") return;
     wsClient.send({ type: "flow:plan_approve", flow_id: plan.flow_id, plan_approval_id: plan.approval.plan_approval_id, client_action_id: `plan-approve-${Date.now()}` });
   }, []);
+  const handleRuntimeSelectionChange = useCallback(() => {
+    setNativeContextRefreshKey((current) => current + 1);
+  }, []);
   const isCompactComposer = composerVariant === "compactFloating";
   const modelSelector = (
     <LeaderModelSelector
       flowId={flowId}
       onConfiguredChange={setLeaderModelConfigured}
       onUpdatingChange={setRuntimeSelectionUpdating}
+      onSelectionChange={handleRuntimeSelectionChange}
       onOpenModelSettings={onOpenModelSettings}
       reasoningEffortDisabled={isWaiting}
       className={isCompactComposer
@@ -1491,6 +1501,7 @@ export default function LeaderChatPanel({
                 value={effectiveComposerValue}
                 onValueChange={handleComposerValueChange}
                 onPasteImages={handlePasteImages}
+                slashMenu={nativeContextSlashMenu}
                 attachmentSlot={(
                   <>
                     <MessageImageAttachments />

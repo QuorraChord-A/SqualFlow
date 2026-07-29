@@ -774,41 +774,46 @@ describe("LeaderRuntime platform event protocol", () => {
     const namerOptions: Record<string, unknown>[] = [];
     const transcriptEvents: unknown[] = [];
     const nameUpdates: unknown[] = [];
+    const runtimeFactoryCalls: Array<{ ephemeral?: boolean }> = [];
     const eventBus = new EventBus();
     eventBus.subscribe(flow.id, "flow-name-test", (event) => {
       if (event.type === "session:transcript_event") transcriptEvents.push(event);
       if (event.type === "flow:name_updated") nameUpdates.push(event);
     });
+    const testAdapterFactory = createClaudeTestAdapterFactory({ leaderQuery: (input) => ({
+      async *[Symbol.asyncIterator]() {
+        const ephemeral = typeof input.options === "object"
+          && input.options !== null
+          && "persistSession" in input.options
+          && input.options.persistSession === false;
+        if (ephemeral) {
+          namerOptions.push(input.options as Record<string, unknown>);
+          const messages = input.prompt[Symbol.asyncIterator]();
+          const namingMessage = await messages.next();
+          const namingContent = Array.isArray(namingMessage.value?.message.content) ? namingMessage.value.message.content[0] : undefined;
+          prompts.push(namingContent?.type === "text" ? namingContent.text : "");
+          yield { type: "assistant", message: { content: [{ type: "text", text: "登录页面" }] } };
+          yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
+          return;
+        }
+        if (typeof input.prompt === "string") throw new Error("expected streaming input");
+        const messages = input.prompt[Symbol.asyncIterator]();
+        const first = await messages.next();
+        const firstContent = Array.isArray(first.value?.message.content) ? first.value.message.content[0] : undefined;
+        prompts.push(firstContent?.type === "text" ? firstContent.text : "");
+        yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
+      },
+      close() {},
+    }) });
     const runtime = createLeaderRuntime({
       store,
       eventBus,
       chatJournal: new ChatJournal(),
       agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
-      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: (input) => ({
-        async *[Symbol.asyncIterator]() {
-          const ephemeral = typeof input.options === "object"
-            && input.options !== null
-            && "persistSession" in input.options
-            && input.options.persistSession === false;
-          if (ephemeral) {
-            namerOptions.push(input.options as Record<string, unknown>);
-            const messages = input.prompt[Symbol.asyncIterator]();
-            const namingMessage = await messages.next();
-            const namingContent = Array.isArray(namingMessage.value?.message.content) ? namingMessage.value.message.content[0] : undefined;
-            prompts.push(namingContent?.type === "text" ? namingContent.text : "");
-            yield { type: "assistant", message: { content: [{ type: "text", text: "登录页面" }] } };
-            yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
-            return;
-          }
-          if (typeof input.prompt === "string") throw new Error("expected streaming input");
-          const messages = input.prompt[Symbol.asyncIterator]();
-          const first = await messages.next();
-          const firstContent = Array.isArray(first.value?.message.content) ? first.value.message.content[0] : undefined;
-          prompts.push(firstContent?.type === "text" ? firstContent.text : "");
-          yield { type: "result", subtype: "success", session_id: "sdk-flow-name", is_error: false };
-        },
-        close() {},
-      }) }),
+      runtimeAdapterFactory: (input) => {
+        runtimeFactoryCalls.push({ ephemeral: input.ephemeral });
+        return testAdapterFactory(input);
+      },
     });
 
     await runtime.runLeaderTurn({
@@ -827,6 +832,10 @@ describe("LeaderRuntime platform event protocol", () => {
       persistSession: false,
       thinking: { type: "disabled" },
     });
+    expect(runtimeFactoryCalls).toEqual([
+      { ephemeral: undefined },
+      { ephemeral: true },
+    ]);
     expect(nameUpdates).toHaveLength(1);
     expect(transcriptEvents.every((event) => JSON.stringify(event).includes("flow_name_request") === false)).toBe(true);
   });
@@ -2060,7 +2069,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
 
     const mcpServers = captured?.options?.mcpServers as Record<string, { name?: string }> | undefined;
-    expect(Object.keys(mcpServers ?? {})).toEqual(["squadflow-leader", "squadflow-browser"]);
+    expect(Object.keys(mcpServers ?? {})).toEqual(expect.arrayContaining(["squadflow-leader", "squadflow-browser"]));
     expect(mcpServers?.["squadflow-browser"]?.name).toBe("squadflow-browser");
   });
 
@@ -2090,7 +2099,8 @@ describe("LeaderRuntime platform event protocol", () => {
     });
 
     const mcpServers = captured?.options?.mcpServers as Record<string, unknown> | undefined;
-    expect(Object.keys(mcpServers ?? {})).toEqual(["squadflow-leader"]);
+    expect(Object.keys(mcpServers ?? {})).toContain("squadflow-leader");
+    expect(Object.keys(mcpServers ?? {})).not.toContain("squadflow-browser");
   });
 
   it("releases the browser lease held by the Leader AgentSession once its turn completes", async () => {

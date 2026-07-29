@@ -307,6 +307,11 @@ class CodexAppServerSlot {
       return;
     }
 
+    // A scoped notification without a live owner belongs to a lease that has
+    // already closed. Never broadcast late thread/turn events into another
+    // active runtime stream.
+    if (threadId || turnId) return;
+
     const activeLeases = [...this.leases].filter((lease) => !lease.closed);
     if (id !== null && typeof message.method === "string" && activeLeases.length === 1) {
       this.responseOwners.set(id, activeLeases[0]!);

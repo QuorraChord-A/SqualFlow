@@ -47,9 +47,9 @@ describe("checkPermission", () => {
     }
   });
 
-  it("requires MCP tools to be explicitly authorized", () => {
+  it("allows runtime-loaded MCP tools without duplicating them in the static authorization list", () => {
     const result = checkPermission({
-      toolName: "mcp__squadflow-leader__ask_user",
+      toolName: "mcp__user-context7__query_docs",
       input: {},
       cwd: "/repo",
       readableDirs: ["/repo"],
@@ -57,7 +57,7 @@ describe("checkPermission", () => {
       authorizedTools: writableTools,
     });
 
-    expect(result.behavior).toBe("deny");
+    expect(result.behavior).toBe("allow");
   });
 
   it("allows authorized MCP tools", () => {

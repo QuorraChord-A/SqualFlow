@@ -33,6 +33,8 @@ import { DeclarativeOrchestrationRuleSchema } from "../domain/orchestration.js";
 import type { LeaderRuntime } from "../runtime/leaderRuntime.js";
 import type { ContextCompactionSnapshot, ContextCompactionState } from "../runtime/contextCompactionState.js";
 import { createAgentRuntimeAdapter } from "../runtime/adapters/factory.js";
+import { resolveCodexRuntimeProfile } from "../runtime/adapters/codexRuntimeProfile.js";
+import { discoverNativeContext } from "../runtime/nativeContextDiscovery.js";
 import { runtimeSdkForPersistedAgentSession } from "./sessionRuntimeResolver.js";
 import { legacyAgentType } from "./legacyCompat.js";
 import {
@@ -535,6 +537,37 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
   app.get("/api/experts", async () => store.listExperts().map(expertToApi));
 
   app.get("/api/agent-runtime-config", async () => agentRuntimeConfigSnapshotToApi(await readAgentRuntimeConfigSnapshot()));
+
+  app.get("/api/native-context", async (request, reply) => {
+    const query = isRecord(request.query) ? request.query : {};
+    const flowId = typeof query.flow_id === "string" ? query.flow_id : null;
+    const requestedConfigId = typeof query.config_id === "string" ? query.config_id : null;
+    let includeProject = false;
+    let cwd: string | null = null;
+    let runtimeConfigId = requestedConfigId;
+
+    if (flowId) {
+      const flow = store.getFlow(flowId);
+      if (!flow) return reply.code(404).send({ detail: "Flow not found" });
+      const project = flow.projectId ? store.getProject(flow.projectId) : null;
+      includeProject = true;
+      cwd = project?.localPath ?? null;
+      runtimeConfigId = flow.leaderRuntimeConfigId;
+    }
+    if (!runtimeConfigId) return reply.code(400).send({ detail: "Runtime config is required" });
+    const runtimeConfig = await readRuntimeConfig(runtimeConfigId);
+    if (!runtimeConfig) return reply.code(404).send({ detail: "Runtime config not found" });
+
+    const codexHome = runtimeConfig.sdk === "codex" && runtimeConfig.authMode !== "inherited"
+      ? resolveCodexRuntimeProfile().codexHome
+      : undefined;
+    return discoverNativeContext({
+      sdk: runtimeConfig.sdk,
+      cwd,
+      includeProject,
+      codexHome,
+    });
+  });
 
   app.post("/api/agent-runtime-config/configs", async (request, reply) => {
     try {

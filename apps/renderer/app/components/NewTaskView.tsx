@@ -44,6 +44,7 @@ import {
   outgoingImageAttachment,
   type MessageImageAttachment,
 } from '../types/messageAttachments';
+import { useNativeContextSlashMenu } from '../hooks/useNativeContextSlashMenu';
 
 interface NewTaskViewProps {
   onTaskCreated?: (
@@ -188,6 +189,9 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+  const nativeContextSlashMenu = useNativeContextSlashMenu({
+    configId: leaderRuntimeSelection?.configId ?? null,
+  });
 
   const handleLeaderRuntimeSelectionChange = useCallback((selection: { configId: string; modelId: string }) => {
     setLeaderRuntimeSelection((current) => {
@@ -376,6 +380,7 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
             value={prompt}
             onValueChange={setPrompt}
             onPasteImages={handlePasteImages}
+            slashMenu={nativeContextSlashMenu}
             attachmentSlot={(
               <>
                 <MessageImageAttachments />

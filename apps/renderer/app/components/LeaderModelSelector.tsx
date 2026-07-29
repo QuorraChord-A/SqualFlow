@@ -163,6 +163,7 @@ export default function LeaderModelSelector({
   const [runtimePickerOpen, setRuntimePickerOpen] = useState(false);
   const [effortPickerOpen, setEffortPickerOpen] = useState(false);
   const [runtimeConfigs, setRuntimeConfigs] = useState<AgentRuntimeConfigDto[]>([]);
+  const [defaultLeaderRuntimeConfigId, setDefaultLeaderRuntimeConfigId] = useState<string | null>(null);
   const [selectedRuntimeConfigId, setSelectedRuntimeConfigId] = useState<string | null>(null);
   const [selectedRuntimeModelId, setSelectedRuntimeModelId] = useState<string | null>(null);
   const [flowRuntimeSdk, setFlowRuntimeSdk] = useState<AgentRuntimeConfigDto['sdk'] | null>(null);
@@ -185,6 +186,10 @@ export default function LeaderModelSelector({
   const flows = useFlowStore((state) => state.flows);
   const refreshFlowDetail = useFlowStore((state) => state.refreshFlowDetail);
   const refreshFlows = useFlowStore((state) => state.refreshFlows);
+  const onSelectionChangeRef = useRef(onSelectionChange);
+  const onSelectionReasoningEffortChangeRef = useRef(onSelectionReasoningEffortChange);
+  onSelectionChangeRef.current = onSelectionChange;
+  onSelectionReasoningEffortChangeRef.current = onSelectionReasoningEffortChange;
 
   useEffect(() => {
     let cancelled = false;
@@ -192,28 +197,9 @@ export default function LeaderModelSelector({
       .then((snapshot) => {
         if (cancelled) return;
         setRuntimeConfigs(snapshot.configs);
-        if (!flowId && defaultSelection) {
-          const leaderConfigId = snapshot.roles.find((role) => role.role === 'leader')?.configId ?? null;
-          const resolved = resolveDefaultSelection(snapshot.configs, leaderConfigId, selection);
-          const resolvedEffort = normalizeReasoningEffortForConfig(
-            resolved?.config,
-            resolved?.model,
-            selectionReasoningEffort,
-          );
-          setSelectedRuntimeConfigId(resolved?.config.id ?? null);
-          setSelectedRuntimeModelId(resolved?.model.id ?? null);
-          setSelectedReasoningEffort(resolvedEffort || null);
-          setActiveRuntimeConfigId(resolved?.config.id ?? null);
-          if (
-            resolved
-            && (selection?.configId !== resolved.config.id || selection?.modelId !== resolved.model.id)
-          ) {
-            onSelectionChange?.({ configId: resolved.config.id, modelId: resolved.model.id });
-          }
-          if ((resolvedEffort || null) !== selectionReasoningEffort) {
-            onSelectionReasoningEffortChange?.(resolvedEffort || null);
-          }
-        }
+        setDefaultLeaderRuntimeConfigId(
+          snapshot.roles.find((role) => role.role === 'leader')?.configId ?? null,
+        );
       })
       .catch((fetchError) => {
         if (!cancelled) setRuntimeError(fetchError instanceof Error ? fetchError.message : '加载模型配置失败');
@@ -221,12 +207,40 @@ export default function LeaderModelSelector({
     return () => {
       cancelled = true;
     };
+  }, [defaultSelection, flowId]);
+
+  useEffect(() => {
+    if (flowId || !defaultSelection || runtimeConfigs.length === 0) return;
+    const resolved = resolveDefaultSelection(
+      runtimeConfigs,
+      defaultLeaderRuntimeConfigId,
+      selection,
+    );
+    const resolvedEffort = normalizeReasoningEffortForConfig(
+      resolved?.config,
+      resolved?.model,
+      selectionReasoningEffort,
+    );
+    setSelectedRuntimeConfigId(resolved?.config.id ?? null);
+    setSelectedRuntimeModelId(resolved?.model.id ?? null);
+    setSelectedReasoningEffort(resolvedEffort || null);
+    setActiveRuntimeConfigId(resolved?.config.id ?? null);
+    if (
+      resolved
+      && (selection?.configId !== resolved.config.id || selection?.modelId !== resolved.model.id)
+    ) {
+      onSelectionChangeRef.current?.({ configId: resolved.config.id, modelId: resolved.model.id });
+    }
+    if ((resolvedEffort || null) !== selectionReasoningEffort) {
+      onSelectionReasoningEffortChangeRef.current?.(resolvedEffort || null);
+    }
   }, [
+    defaultLeaderRuntimeConfigId,
     defaultSelection,
     flowId,
-    onSelectionChange,
-    onSelectionReasoningEffortChange,
-    selection,
+    runtimeConfigs,
+    selection?.configId,
+    selection?.modelId,
     selectionReasoningEffort,
   ]);
 
@@ -478,6 +492,7 @@ export default function LeaderModelSelector({
         refreshFlowDetail(flowId),
         refreshFlows(),
       ]);
+      onSelectionChange?.({ configId: config.id, modelId: model.id });
     } catch (updateError) {
       setSelectedRuntimeConfigId(previousConfigId);
       setSelectedRuntimeModelId(previousModelId);

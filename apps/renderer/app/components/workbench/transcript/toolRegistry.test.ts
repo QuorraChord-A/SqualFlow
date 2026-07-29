@@ -331,6 +331,40 @@ describe("toolRegistry", () => {
       });
     });
 
+    it("presents any external MCP by server and exact tool name", () => {
+      const tool = makeTool(
+        "mcp__tavily-mcp__tavily_search",
+        "completed",
+        { query: "MCP" },
+        {
+          content: "Detailed Results",
+          is_error: false,
+          mcp: {
+            content: [{ type: "text", text: "Detailed Results" }],
+            structuredContent: { results: 1 },
+          },
+        },
+      );
+      tool.mcp = {
+        server: "tavily-mcp",
+        tool: "tavily_search",
+        title: "Tavily Search",
+        icons: [{ src: "https://example.com/tavily.png" }],
+      };
+
+      expect(presentTool(tool)).toMatchObject({
+        kind: "mcp",
+        title: "Tavily Search",
+        operationLabel: "MCP · tavily-mcp",
+        mcp: {
+          server: "tavily-mcp",
+          tool: "tavily_search",
+          icons: [{ src: "https://example.com/tavily.png" }],
+        },
+        detailRows: [{ label: "工具名", value: "mcp__tavily-mcp__tavily_search" }],
+      });
+    });
+
     it("marks interrupted tools with the interrupted status", () => {
       const tool = makeTool("Read", "interrupted", { file_path: "/repo/a.txt" });
 

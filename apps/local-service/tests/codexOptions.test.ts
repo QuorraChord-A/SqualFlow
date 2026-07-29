@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { buildCodexExpertOptions, buildCodexLeaderOptions } from "../src/runtime/adapters/codexOptions.js";
+import {
+  buildCodexExpertOptions,
+  buildCodexLeaderOptions,
+  codexAppServerArgs,
+} from "../src/runtime/adapters/codexOptions.js";
 import { BROWSER_MCP_TOOL_PREFIX } from "../src/mcp/browserServer.js";
 import type { BuildExpertRuntimeOptionsInput } from "../src/runtime/adapters/runtimeAdapter.js";
 
@@ -205,6 +209,14 @@ describe("buildCodexExpertOptions browser MCP config", () => {
 
     expect(options.ephemeral).toBe(true);
     expect(options.config.model_reasoning_effort).toBeUndefined();
+    expect(options.config.mcp_servers).toEqual({});
+    expect(options.env.NO_PROXY).toContain("127.0.0.1");
+    expect(options.env.NO_PROXY).toContain("localhost");
+    expect(options.env.no_proxy).toBe(options.env.NO_PROXY);
+    expect(codexAppServerArgs(options)).toEqual(expect.arrayContaining([
+      "-c",
+      "mcp_servers={}",
+    ]));
   });
 
   it.each(["gpt-5.6-sol", "gpt-5.5", "gpt-5.4-mini"])(

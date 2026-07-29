@@ -10,6 +10,7 @@ import {
 import { parseRuntimeReasoningEffort } from "../codexReasoningEffort.js";
 import type { RuntimeToolPermission } from "./runtimeAdapter.js";
 import type { RuntimeToolInput } from "../capabilities.js";
+import { prepareClaudeNativeContext } from "../nativeContextDiscovery.js";
 import { claudeCapabilityForTool, claudeToolsForCapabilities } from "./claudeCapabilities.js";
 import type { BuildExpertRuntimeOptionsInput, BuildLeaderRuntimeOptionsInput } from "./runtimeAdapter.js";
 
@@ -31,9 +32,15 @@ type BuildClaudeBaseOptionsInput = {
   runtimeConfig?: RuntimeConfig & { reasoningEffort?: string | null };
   modelName?: string;
   pathToClaudeCodeExecutable?: string;
+  nativeContextPluginDir?: string;
+  sessionConfigDir?: string;
 };
 
 const permissionGatedClaudeTools = new Set(["Write", "Edit", "Bash"]);
+
+function nativeMcpAllowedTools(mcpServers: Options["mcpServers"] | undefined): string[] {
+  return Object.keys(mcpServers ?? {}).map((serverName) => `mcp__${serverName}__*`);
+}
 
 function legacySettingsRoleForRuntimeRole(role: AgentRuntimeRole): AgentConfigRole {
   if (role === "leader" || role === "coder" || role === "research") return role;
@@ -162,9 +169,27 @@ export function buildClaudeBaseOptions(input: BuildClaudeBaseOptionsInput): Opti
     canUseTool: normalizeCanUseTool(input.canUseTool),
     mcpServers: input.mcpServers ?? {},
     settings: inlineSettings.settings,
-    env: inlineSettings.env,
+    env: {
+      ...inlineSettings.env,
+      ...(input.sessionConfigDir ? {
+        CLAUDE_CONFIG_DIR: input.sessionConfigDir,
+      } : {}),
+      ...(input.nativeContextPluginDir ? {
+        // Proxy models such as Mimo do not reliably support Claude's deferred
+        // tool_reference flow. User-native MCP tools must be present up front.
+        ENABLE_TOOL_SEARCH: "false",
+      } : {}),
+    },
     model: inlineSettings.model,
+    // Native Skills are loaded through an explicit local plugin and native MCP
+    // servers are passed programmatically. Loading user/project settings here
+    // would let their provider env override SquadFlow's selected model/endpoint.
     settingSources: [],
+    skills: "all",
+    plugins: input.nativeContextPluginDir
+      ? [{ type: "local", path: input.nativeContextPluginDir }]
+      : [],
+    strictMcpConfig: true,
     includePartialMessages: true,
     maxTurns: input.maxTurns,
     ...(input.ephemeral === true ? {
@@ -215,15 +240,26 @@ function claudeToolInput(toolName: string, input: Record<string, unknown>): Runt
 
 export function buildClaudeLeaderOptions(input: BuildLeaderRuntimeOptionsInput): Options {
   const builtinTools = claudeToolsForCapabilities(input.capabilities);
-  const mcpServers = input.mcpServerConfigs as Options["mcpServers"] | undefined;
+  const nativeContext = input.scratchDir
+    ? prepareClaudeNativeContext({
+        cwd: input.cwd,
+        scratchDir: input.scratchDir,
+        systemPrompt: input.systemPrompt,
+      })
+    : null;
+  const mcpServers = {
+    ...(nativeContext?.mcpServers ?? {}),
+    ...((input.mcpServerConfigs as Options["mcpServers"] | undefined) ?? {}),
+  };
+  const nativeMcpTools = nativeMcpAllowedTools(nativeContext?.mcpServers);
 
   return buildClaudeBaseOptions({
-    systemPrompt: input.systemPrompt,
+    systemPrompt: nativeContext?.systemPrompt ?? input.systemPrompt,
     cwd: input.cwd,
     scratchDir: input.scratchDir,
     // Leader 内置工具不进 allowedTools 预授权名单：预授权会跳过 canUseTool，
     // 而 Leader 的路径守卫（checkLeaderToolPath）依赖 canUseTool 对每次调用生效。
-    allowedTools: [...input.mcpTools],
+    allowedTools: [...input.mcpTools, ...nativeMcpTools],
     tools: builtinTools,
     disallowedTools: [],
     settingsPath: getAgentSettingsPath("leader"),
@@ -233,10 +269,12 @@ export function buildClaudeLeaderOptions(input: BuildLeaderRuntimeOptionsInput):
     ephemeral: input.ephemeral,
     resume: input.resume,
     sessionId: input.resume ? undefined : input.sessionId,
-    mcpServers: mcpServers ?? {},
+    mcpServers,
     runtimeConfig: input.runtimeConfig,
     modelName: input.modelName,
     pathToClaudeCodeExecutable: config.claudeCodeExecutable,
+    nativeContextPluginDir: nativeContext?.pluginDir,
+    sessionConfigDir: nativeContext?.sessionConfigDir,
   });
 }
 
@@ -246,23 +284,34 @@ export function buildClaudeExpertOptions(input: BuildExpertRuntimeOptionsInput):
   const allowedTools = [...builtinTools, ...input.mcpTools].filter((tool) => !permissionGatedClaudeTools.has(tool));
   const disallowedTools = [...permissionGatedClaudeTools].filter((tool) => !authorizedToolSet.has(tool));
   const mcpServerConfig = input.mcpServerConfig as NonNullable<Options["mcpServers"]>[string] | undefined;
+  const nativeContext = prepareClaudeNativeContext({
+    cwd: input.cwd,
+    scratchDir: input.scratchDir,
+    systemPrompt: input.systemPrompt,
+  });
+  const nativeMcpTools = nativeMcpAllowedTools(nativeContext.mcpServers);
 
   return buildClaudeBaseOptions({
-    systemPrompt: input.systemPrompt,
+    systemPrompt: nativeContext.systemPrompt,
     cwd: input.cwd,
     scratchDir: input.scratchDir,
     additionalDirectories: [],
-    allowedTools,
+    allowedTools: [...allowedTools, ...nativeMcpTools],
     tools: builtinTools,
     disallowedTools,
     settingsPath: getAgentSettingsPath(legacySettingsRoleForRuntimeRole(input.role)),
     canUseTool: toClaudeCanUseTool(input.canUseTool),
     maxTurns: input.maxTurns,
     resume: input.resume,
-    mcpServers: mcpServerConfig ? { "squadflow-browser": mcpServerConfig } : {},
+    mcpServers: {
+      ...(nativeContext.mcpServers ?? {}),
+      ...(mcpServerConfig ? { "squadflow-browser": mcpServerConfig } : {}),
+    },
     runtimeConfig: input.runtimeConfig,
     modelName: input.modelName,
     pathToClaudeCodeExecutable: config.claudeCodeExecutable,
+    nativeContextPluginDir: nativeContext.pluginDir,
+    sessionConfigDir: nativeContext.sessionConfigDir,
   });
 }
 

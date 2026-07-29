@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { UiMessageChunk } from "../protocol/uiMessageChunks.js";
+import type { UiMcpIcon, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { isRuntimeCapability, type RuntimeCapability } from "../domain/runtimeCapabilities.js";
 import type { CanonicalTranscriptEntry, Store } from "../db/store.js";
 
@@ -11,10 +11,17 @@ type ToolPart = {
   toolName: string;
   capability?: RuntimeCapability;
   providerToolName?: string;
+  mcp?: {
+    server: string;
+    tool: string;
+    title?: string;
+    icons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+    serverIcons?: Array<{ src: string; mimeType?: string; sizes?: string[]; theme?: "light" | "dark" }>;
+  };
   state: "input-streaming" | "input-available" | "output-available";
   inputText: string;
   input: Record<string, unknown> | null;
-  output: { content: string; is_error: boolean } | null;
+  output: { content: string; is_error: boolean; mcp?: UiMcpResult } | null;
 };
 
 type AssistantMessagePart = TextPart | ReasoningPart | ToolPart;
@@ -86,7 +93,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isToolOutput(value: unknown): value is { content: string; is_error: boolean } {
+function isToolOutput(value: unknown): value is { content: string; is_error: boolean; mcp?: UiMcpResult } {
   return isRecord(value) && typeof value.content === "string" && typeof value.is_error === "boolean";
 }
 
@@ -227,6 +234,7 @@ export class ChatJournal {
         this.currentToolPart(activeMessage, stringValue(eventRecord, "toolCallId"), stringValue(eventRecord, "toolName"), {
           capability: runtimeCapabilityValue(eventRecord),
           providerToolName: stringValue(eventRecord, "providerToolName"),
+          mcp: mcpMetadataValue(eventRecord.mcp),
         }).state =
           "input-streaming";
         break;
@@ -244,6 +252,7 @@ export class ChatJournal {
           {
             capability: runtimeCapabilityValue(eventRecord),
             providerToolName: stringValue(eventRecord, "providerToolName"),
+            mcp: mcpMetadataValue(eventRecord.mcp),
           },
         );
         toolPart.state = "input-available";
@@ -750,7 +759,11 @@ export class ChatJournal {
     message: AssistantUIMessage,
     toolCallId: string,
     toolName: string,
-    metadata: { capability?: RuntimeCapability; providerToolName?: string } = {},
+    metadata: {
+      capability?: RuntimeCapability;
+      providerToolName?: string;
+      mcp?: ToolPart["mcp"];
+    } = {},
   ): ToolPart {
     const existing = message.parts.find((part): part is ToolPart => isToolPart(part) && part.toolCallId === toolCallId);
     if (existing) {
@@ -760,6 +773,7 @@ export class ChatJournal {
       }
       if (metadata.capability) existing.capability = metadata.capability;
       if (metadata.providerToolName) existing.providerToolName = metadata.providerToolName;
+      if (metadata.mcp) existing.mcp = metadata.mcp;
       return existing;
     }
 
@@ -770,6 +784,7 @@ export class ChatJournal {
       toolName: name,
       ...(metadata.capability ? { capability: metadata.capability } : {}),
       ...(metadata.providerToolName ? { providerToolName: metadata.providerToolName } : {}),
+      ...(metadata.mcp ? { mcp: metadata.mcp } : {}),
       state: "input-available",
       inputText: "",
       input: null,
@@ -778,4 +793,27 @@ export class ChatJournal {
     message.parts.push(newPart);
     return newPart;
   }
+}
+
+function mcpMetadataValue(value: unknown): ToolPart["mcp"] | undefined {
+  if (!isRecord(value) || typeof value.server !== "string" || typeof value.tool !== "string") return undefined;
+  const iconList = (input: unknown) => Array.isArray(input)
+    ? input.flatMap((icon) => {
+      if (!isRecord(icon) || typeof icon.src !== "string" || !icon.src) return [];
+      const theme = icon.theme === "light" || icon.theme === "dark" ? icon.theme : undefined;
+      return [{
+        src: icon.src,
+        ...(typeof icon.mimeType === "string" ? { mimeType: icon.mimeType } : {}),
+        ...(Array.isArray(icon.sizes) ? { sizes: icon.sizes.filter((size): size is string => typeof size === "string") } : {}),
+        ...(theme ? { theme } : {}),
+      }] as UiMcpIcon[];
+    })
+    : undefined;
+  return {
+    server: value.server,
+    tool: value.tool,
+    ...(typeof value.title === "string" ? { title: value.title } : {}),
+    ...(iconList(value.icons) ? { icons: iconList(value.icons) } : {}),
+    ...(iconList(value.serverIcons) ? { serverIcons: iconList(value.serverIcons) } : {}),
+  };
 }

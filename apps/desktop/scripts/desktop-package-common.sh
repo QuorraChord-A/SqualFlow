@@ -335,8 +335,8 @@ desktop_verify_packaged_runtime() (
       renderer_port="$(node -p "require(process.argv[1]).renderer || ''" "$ports_file" 2>/dev/null || true)"
     fi
     if [[ -n "$backend_port" && -n "$renderer_port" ]]; then
-      curl --max-time 2 -fsS "http://127.0.0.1:$backend_port/health" >/dev/null 2>&1 && backend_ready=1
-      curl --max-time 2 -fsS "http://127.0.0.1:$renderer_port/" >/dev/null 2>&1 && frontend_ready=1
+      curl --noproxy '*' --max-time 2 -fsS "http://127.0.0.1:$backend_port/health" >/dev/null 2>&1 && backend_ready=1
+      curl --noproxy '*' --max-time 2 -fsS "http://127.0.0.1:$renderer_port/" >/dev/null 2>&1 && frontend_ready=1
     fi
     [[ "$backend_ready" = "1" && "$frontend_ready" = "1" ]] && break
     sleep 1
@@ -486,8 +486,8 @@ desktop_verify_release_artifacts() (
       renderer_port="$(node -p "require(process.argv[1]).renderer || ''" "$ports_file" 2>/dev/null || true)"
     fi
     if [[ -n "$backend_port" && -n "$renderer_port" ]]; then
-      curl --max-time 2 -fsS "http://127.0.0.1:$backend_port/health" >/dev/null 2>&1 && backend_ready=1
-      curl --max-time 2 -fsS "http://127.0.0.1:$renderer_port/" >/dev/null 2>&1 && frontend_ready=1
+      curl --noproxy '*' --max-time 2 -fsS "http://127.0.0.1:$backend_port/health" >/dev/null 2>&1 && backend_ready=1
+      curl --noproxy '*' --max-time 2 -fsS "http://127.0.0.1:$renderer_port/" >/dev/null 2>&1 && frontend_ready=1
     fi
     [[ "$backend_ready" = "1" && "$frontend_ready" = "1" ]] && break
     sleep 1

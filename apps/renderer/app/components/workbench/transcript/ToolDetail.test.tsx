@@ -1,4 +1,4 @@
-import { render } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import ToolDetail from "./ToolDetail";
 import type { ToolPresentation } from "./types";
@@ -27,5 +27,40 @@ describe("ToolDetail", () => {
     for (const row of container.querySelectorAll("[data-diff-kind]")) {
       expect(row.querySelectorAll("[data-diff-line-number]")).toHaveLength(1);
     }
+  });
+
+  it("renders generic MCP text and structured result content", () => {
+    const presentation: ToolPresentation = {
+      kind: "mcp",
+      icon: "unknown",
+      status: "completed",
+      statusLabel: "已完成",
+      title: "Tavily Search",
+      operationLabel: "MCP · tavily-mcp",
+      detailRows: [{ label: "工具名", value: "mcp__tavily-mcp__tavily_search" }],
+      rawInput: { query: "MCP" },
+      rawOutput: {
+        content: "Detailed Results",
+        is_error: false,
+        mcp: {
+          content: [{ type: "text", text: "Detailed Results" }],
+          structuredContent: { results: [{ title: "MCP" }] },
+        },
+      },
+      mcp: {
+        server: "tavily-mcp",
+        tool: "tavily_search",
+        title: "Tavily Search",
+        icons: [],
+        serverIcons: [],
+      },
+    };
+
+    render(<ToolDetail presentation={presentation} />);
+
+    expect(screen.getByTestId("mcp-result")).toBeInTheDocument();
+    expect(screen.getByText("Detailed Results")).toBeInTheDocument();
+    expect(screen.getByText("结构化结果")).toBeInTheDocument();
+    expect(screen.getByText(/"title": "MCP"/u)).toBeInTheDocument();
   });
 });

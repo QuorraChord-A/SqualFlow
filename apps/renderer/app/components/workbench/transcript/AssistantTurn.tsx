@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { CheckIcon, ChevronDown, CopyIcon, MessageSquareIcon } from "lucide-react";
 import { MessageResponse } from "@/components/ai-elements-official/message";
+import { PromptInlineContent } from "@/components/ai-elements-official/prompt-inline-entity";
 import type { DecisionCardData, SpecCardState } from "../../../hooks/useDashboardData";
 import PendingSpecCard from "../PendingSpecCard";
 import OrchestrationPlanCard from "../../orchestration/OrchestrationPlanCard";
@@ -413,7 +414,9 @@ function GuideMessageView({ block }: { block: Extract<TranscriptBlock, { type: "
             ) : null}
           </div>
         ) : null}
-        <div className={styles.userBubble}>{block.text}</div>
+        <div className={styles.userBubble}>
+          <PromptInlineContent value={block.text} />
+        </div>
         {block.statusLabel ? (
           <div className={styles.userGuideStatus}>{block.statusLabel}</div>
         ) : null}

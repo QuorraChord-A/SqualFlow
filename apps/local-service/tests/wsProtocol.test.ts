@@ -1125,7 +1125,7 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("passes client_message_id into the direct UserTurn input snapshot via flow:message", async () => {
+  it("passes canonical inline Markdown unchanged to persistence and the Leader runtime", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -1137,9 +1137,10 @@ describe("Fastify app and websocket gateway", () => {
       projectId: null,
       ...testLeaderRuntimeBinding,
     });
-    const chatJournal = new ChatJournal();
+    const chatJournal = new ChatJournal(store);
     const sent: unknown[] = [];
     const capturedTurns: Array<{ userMessage?: string; currentTurnInput?: unknown }> = [];
+    const content = "请使用 [$grill-me](/Users/test/.claude/skills/grill-me/SKILL.md) 和 [@context7](/.squadflow/mcp/context7) 查询";
     const connection: WsConnection = {
       clientId: "client-1",
       subscriptions: new Set(),
@@ -1158,7 +1159,7 @@ describe("Fastify app and websocket gateway", () => {
       data: {
         type: "flow:message",
         flow_id: flow.id,
-        content: "写个 helloworld",
+        content,
         client_message_id: "client-msg-42",
         log_id: "log-direct-message",
       },
@@ -1170,18 +1171,25 @@ describe("Fastify app and websocket gateway", () => {
       log_id: "log-direct-message",
     }));
     expect(capturedTurns).toHaveLength(1);
-    expect(capturedTurns[0]!.userMessage).toBe("写个 helloworld");
+    expect(capturedTurns[0]!.userMessage).toBe(content);
     expect(capturedTurns[0]!.currentTurnInput).toEqual(expect.objectContaining({
       trigger_kind: "user_message",
       message_id: "client-msg-42",
-      content: "写个 helloworld",
+      content,
       created_at: expect.any(String),
     }));
 
     const history = chatJournal.getHistory(flow.id, store.getFlow(flow.id)!.leaderSessionId ?? "");
     expect(history).toEqual([
-      expect.objectContaining({ id: "client-msg-42", role: "user", content: "写个 helloworld" }),
+      expect.objectContaining({ id: "client-msg-42", role: "user", content }),
     ]);
+    const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
+    expect(store.listTranscriptEntries(flow.id, leader.id)[0]?.message).toEqual(expect.objectContaining({
+      id: "client-msg-42",
+      role: "user",
+      content,
+      parts: [{ type: "text", text: content }],
+    }));
     const userTurn = store.listUserTurns(flow.id)[0]!;
     expect(store.listEventLog(flow.id).find((event) => event.eventType === "flow.user_message")).toEqual(
       expect.objectContaining({ userTurnId: userTurn.id }),

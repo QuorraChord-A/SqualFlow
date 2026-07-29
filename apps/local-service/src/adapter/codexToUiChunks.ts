@@ -1,4 +1,4 @@
-import type { UiMessageChunk } from "../protocol/uiMessageChunks.js";
+import type { UiMcpContentBlock, UiMcpIcon, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { UiMessageChunkBuilder } from "../protocol/uiMessageChunkBuilder.js";
 import type { RuntimeCapability } from "../domain/runtimeCapabilities.js";
 
@@ -160,7 +160,16 @@ export class CodexToUiChunkAdapter {
       const tool = stringValue(item.tool);
       const id = stringValue(item.id, `mcp-${server}-${tool}`);
       const toolName = `mcp__${server}__${tool}`;
-      const metadata = { providerToolName: "mcpToolCall" };
+      const metadata = {
+        providerToolName: "mcpToolCall",
+        mcp: {
+          server,
+          tool,
+          ...(stringValue(item.title) ? { title: stringValue(item.title) } : {}),
+          ...(iconsFromValue(item.icons) ? { icons: iconsFromValue(item.icons) } : {}),
+          ...(iconsFromValue(item.serverIcons) ? { serverIcons: iconsFromValue(item.serverIcons) } : {}),
+        },
+      };
       const chunks = isStart
         ? this.builder.toolCallStart(toolName, id, metadata)
         : this.startedMcpToolCallIds.has(id)
@@ -169,7 +178,15 @@ export class CodexToUiChunkAdapter {
       if (isStart) this.startedMcpToolCallIds.add(id);
       const result = asRecord(item.result);
       const error = asRecord(item.error);
-      if (result || error) chunks.push(this.builder.toolResult(id, error ? stringValue(error.message) : stringifyMcpResult(result), Boolean(error)));
+      if (result || error) {
+        const mcpResult = normalizeMcpResult(result, error);
+        chunks.push(this.builder.toolResult(
+          id,
+          error ? stringValue(error.message) : stringifyMcpResult(result),
+          Boolean(error) || mcpResult?.isError === true,
+          mcpResult ?? undefined,
+        ));
+      }
       return chunks;
     }
     return [];
@@ -216,6 +233,42 @@ function stringifyMcpResult(result: UnknownRecord | null): string {
     const record = asRecord(item);
     return record ? stringValue(record.text, JSON.stringify(record)) : String(item);
   }).join("\n");
+}
+
+function normalizeMcpResult(result: UnknownRecord | null, error: UnknownRecord | null): UiMcpResult | null {
+  if (!result && !error) return null;
+  const content = Array.isArray(result?.content)
+    ? result!.content.filter(isMcpContentBlock) as UiMcpContentBlock[]
+    : [];
+  const structuredContent = result?.structuredContent;
+  const meta = asRecord(result?._meta);
+  return {
+    content,
+    ...(structuredContent !== undefined ? { structuredContent } : {}),
+    ...(typeof result?.isError === "boolean" ? { isError: result.isError } : {}),
+    ...(meta ? { meta } : {}),
+    ...(error ? { isError: true, meta: { error: stringValue(error.message) } } : {}),
+  };
+}
+
+function isMcpContentBlock(value: unknown): value is UiMcpContentBlock {
+  return asRecord(value) !== null && typeof (value as Record<string, unknown>).type === "string";
+}
+
+function iconsFromValue(value: unknown): UiMcpIcon[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const icons = value.flatMap((item) => {
+    const record = asRecord(item);
+    if (!record || typeof record.src !== "string" || !record.src) return [];
+    const theme = record.theme === "light" || record.theme === "dark" ? record.theme : undefined;
+    return [{
+      src: record.src,
+      ...(typeof record.mimeType === "string" ? { mimeType: record.mimeType } : {}),
+      ...(Array.isArray(record.sizes) ? { sizes: record.sizes.filter((size): size is string => typeof size === "string") } : {}),
+      ...(theme ? { theme } : {}),
+    }] as UiMcpIcon[];
+  });
+  return icons.length > 0 ? icons : undefined;
 }
 
 function asRecord(value: unknown): UnknownRecord | null {

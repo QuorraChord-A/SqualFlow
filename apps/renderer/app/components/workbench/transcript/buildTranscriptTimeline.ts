@@ -238,6 +238,28 @@ function parsePlanCard(output: unknown): { planRevisionId: string } | null {
   return id ? { planRevisionId: id } : null;
 }
 
+/**
+ * Preserve the normalized MCP envelope for the result renderer. Older
+ * transcript records only contain the already-stringified tool output, so
+ * those continue through the legacy parser.
+ */
+function timelineToolOutput(
+  part: Extract<TimelineInputPart, { type: `tool-${string}` }>,
+): unknown {
+  if (part.output == null) return null;
+  const output = part.output;
+  if (
+    part.mcp
+    && output
+    && typeof output === "object"
+    && !Array.isArray(output)
+    && "mcp" in (output as Record<string, unknown>)
+  ) {
+    return output;
+  }
+  return parseMcpOutput(output);
+}
+
 type BuildOptions = {
   message: TimelineInputMessage;
   activity: TranscriptActivity;
@@ -322,9 +344,10 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       existing.toolName = part.toolName;
       existing.capability = part.capability ?? existing.capability;
       existing.providerToolName = part.providerToolName ?? existing.providerToolName;
+      existing.mcp = part.mcp ?? existing.mcp;
       existing.input = part.input ?? existing.input;
       if (part.state === "output-available") {
-        existing.output = parseMcpOutput(part.output);
+        existing.output = timelineToolOutput(part);
         existing.state = "completed";
       }
       return;
@@ -335,9 +358,10 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       toolName: part.toolName,
       capability: part.capability,
       providerToolName: part.providerToolName,
+      mcp: part.mcp,
       state: toolStateFromPart(part.state),
       input: part.input ?? null,
-      output: part.output ? parseMcpOutput(part.output) : null,
+      output: timelineToolOutput(part),
     });
   }
 

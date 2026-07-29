@@ -80,6 +80,41 @@ describe("UiMessageChunkBuilder", () => {
     });
   });
 
+  it("preserves MCP metadata and the normalized result envelope", () => {
+    const builder = new UiMessageChunkBuilder("msg-mcp");
+    const chunks = [
+      ...builder.toolCall("mcp__demo__lookup", "tool-1", { query: "MCP" }, {
+        providerToolName: "mcpToolCall",
+        mcp: {
+          server: "demo",
+          tool: "lookup",
+          title: "Demo Lookup",
+          icons: [{ src: "https://example.com/icon.png", mimeType: "image/png" }],
+        },
+      }),
+      builder.toolResult("tool-1", "found", false, {
+        content: [{ type: "text", text: "found" }],
+        structuredContent: { count: 1 },
+      }),
+    ];
+
+    expect(UiMessageChunkSchema.parse(chunks[0])).toMatchObject({
+      type: "tool-input-start",
+      mcp: { server: "demo", tool: "lookup", title: "Demo Lookup" },
+    });
+    expect(UiMessageChunkSchema.parse(chunks.at(-1))).toMatchObject({
+      type: "tool-output-available",
+      output: {
+        content: "found",
+        is_error: false,
+        mcp: {
+          content: [{ type: "text", text: "found" }],
+          structuredContent: { count: 1 },
+        },
+      },
+    });
+  });
+
   it("rejects unsupported data, error, and done chunk extensions", () => {
     expect(() => UiMessageChunkSchema.parse({ type: "data-claude-result", data: {} })).toThrow();
     expect(() => UiMessageChunkSchema.parse({ type: "error", code: "rate_limit", message: "limited" })).toThrow();

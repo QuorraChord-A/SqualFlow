@@ -11,6 +11,7 @@ const { configureApplicationPaths } = require("./desktop-paths");
 const { toNavigationUrl } = require("./navigation-url");
 const {
   createPackagedServiceSpecs,
+  resolveLoginShellEnv,
   startPackagedServices,
   stopPackagedServices,
 } = require("./packaged-services");
@@ -200,11 +201,13 @@ async function startLocalServices() {
       path.join(userDataPath, "service-ports.json"),
       JSON.stringify(packagedServicePorts),
     );
+    const serviceEnv = await resolveLoginShellEnv();
     const specs = createPackagedServiceSpecs({
       appPath: app.getAppPath(),
       resourcesPath: process.resourcesPath,
       userDataPath,
       ports: packagedServicePorts,
+      baseEnv: serviceEnv,
     });
     packagedServiceProcesses.push(...startPackagedServices({
       utilityProcess,

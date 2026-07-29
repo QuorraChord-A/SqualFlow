@@ -6,7 +6,7 @@ import {
   deriveActivityFromMessage,
   readHistoryTurnTiming,
 } from "./buildTranscriptTimeline";
-import type { RuntimeCapability, TranscriptActivity } from "./types";
+import type { RuntimeCapability, TimelineTool, TranscriptActivity } from "./types";
 import type { TurnTiming } from "./buildTranscriptTimeline";
 
 export type TranscriptStatus = "idle" | "submitted" | "streaming" | "ready";
@@ -20,9 +20,9 @@ export type TranscriptEvent =
   | { type: "reasoning-start"; messageId: string; id: string }
   | { type: "reasoning-delta"; messageId: string; id: string; delta: string }
   | { type: "reasoning-end"; messageId: string; id: string }
-  | { type: "tool-input-start"; messageId: string; toolCallId: string; toolName: string; capability?: RuntimeCapability; providerToolName?: string }
+  | { type: "tool-input-start"; messageId: string; toolCallId: string; toolName: string; capability?: RuntimeCapability; providerToolName?: string; mcp?: TimelineTool["mcp"] }
   | { type: "tool-input-delta"; messageId: string; toolCallId: string; inputTextDelta: string }
-  | { type: "tool-input-available"; messageId: string; toolCallId: string; toolName: string; capability?: RuntimeCapability; providerToolName?: string; input: Record<string, unknown> }
+  | { type: "tool-input-available"; messageId: string; toolCallId: string; toolName: string; capability?: RuntimeCapability; providerToolName?: string; mcp?: TimelineTool["mcp"]; input: Record<string, unknown> }
   | { type: "tool-output-available"; messageId: string; toolCallId: string; output: unknown }
   | { type: "turn-finished"; messageId: string; durationMs: number | null; finishedAt: string };
 
@@ -203,13 +203,14 @@ function upsertToolPart(
   message: UIMessage,
   toolCallId: string,
   toolName: string,
-  metadata: { capability?: RuntimeCapability; providerToolName?: string } = {},
+  metadata: { capability?: RuntimeCapability; providerToolName?: string; mcp?: TimelineTool["mcp"] } = {},
 ): AnyPart {
   const index = findPartIndex(message.parts, (part) => part.type.startsWith("tool-") && part.toolCallId === toolCallId);
   if (index >= 0) {
     const existing = message.parts[index] as AnyPart;
     if (metadata.capability) existing.capability = metadata.capability;
     if (metadata.providerToolName) existing.providerToolName = metadata.providerToolName;
+    if (metadata.mcp) existing.mcp = metadata.mcp;
     return existing;
   }
   const part = {
@@ -218,6 +219,7 @@ function upsertToolPart(
     toolName,
     ...(metadata.capability ? { capability: metadata.capability } : {}),
     ...(metadata.providerToolName ? { providerToolName: metadata.providerToolName } : {}),
+    ...(metadata.mcp ? { mcp: metadata.mcp } : {}),
     state: "input-streaming",
     inputText: "",
     input: undefined,
@@ -419,6 +421,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
       const part = upsertToolPart(message, event.toolCallId, event.toolName, {
         capability: event.capability,
         providerToolName: event.providerToolName,
+        mcp: event.mcp,
       });
       if (part.state === "output-available") {
         activity = hasRunningTool(message) ? "tool-running" : "waiting";
@@ -449,6 +452,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
       const part = upsertToolPart(message, event.toolCallId, toolName, {
         capability: event.capability,
         providerToolName: event.providerToolName,
+        mcp: event.mcp,
       });
       if (part.state === "output-available") {
         activity = hasRunningTool(message) ? "tool-running" : "waiting";
@@ -457,6 +461,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
       part.toolName = toolName;
       if (event.capability) part.capability = event.capability;
       if (event.providerToolName) part.providerToolName = event.providerToolName;
+      if (event.mcp) part.mcp = event.mcp;
       part.type = `tool-${toolName}`;
       part.input = event.input;
       part.inputText = undefined;

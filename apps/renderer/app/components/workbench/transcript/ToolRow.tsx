@@ -7,6 +7,7 @@ import { ReadToolSummary } from "./ReadToolView";
 import styles from "./transcript.module.css";
 import { useTranscriptScroll } from "./TranscriptScrollContext";
 import { useCollapse } from "./useCollapse";
+import McpToolIcon from "./McpToolIcon";
 
 const ICONS: Record<ToolPresentation["icon"], React.ComponentType<{ size?: number; className?: string }>> = {
   search: Search,
@@ -56,7 +57,9 @@ export default function ToolRow({ id, tool }: ToolRowProps) {
             <span className={styles.rowSpinner} role="status" aria-label="Loading" />
           ) : (
             <span className={styles.rowIcon}>
-              <Icon size={15} />
+              {presentation.kind === "mcp"
+                ? <McpToolIcon presentation={presentation} size={18} />
+                : <Icon size={15} />}
             </span>
           )}
           <span className={styles.toolMain}>

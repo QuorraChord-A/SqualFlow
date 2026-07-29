@@ -48,6 +48,20 @@ export type AgentRuntimeConfigSnapshotDto = {
   configs: AgentRuntimeConfigDto[];
 };
 
+export type NativeContextItemDto = {
+  name: string;
+  description: string;
+  scope: "project" | "global";
+  path: string | null;
+};
+
+export type NativeContextSnapshotDto = {
+  sdk: RuntimeSdk;
+  scope: "global" | "project";
+  skills: NativeContextItemDto[];
+  mcpServers: NativeContextItemDto[];
+};
+
 export type AgentRuntimeConnectionTestResultDto = {
   ok: boolean;
   sdk: RuntimeSdk;
@@ -157,6 +171,17 @@ export async function fetchAgentRuntimeConfig(): Promise<AgentRuntimeConfigSnaps
 export async function fetchExperts(): Promise<ExpertDto[]> {
   const res = await fetch(`${API_BASE}/api/experts`);
   return parseJsonResponse<ExpertDto[]>(res);
+}
+
+export async function fetchNativeContext(input: {
+  flowId?: string | null;
+  configId?: string | null;
+}): Promise<NativeContextSnapshotDto> {
+  const params = new URLSearchParams();
+  if (input.flowId) params.set("flow_id", input.flowId);
+  if (input.configId) params.set("config_id", input.configId);
+  const res = await fetch(`${API_BASE}/api/native-context?${params.toString()}`);
+  return parseJsonResponse<NativeContextSnapshotDto>(res);
 }
 
 export async function fetchFlowContextState(flowId: string): Promise<FlowContextStateDto> {

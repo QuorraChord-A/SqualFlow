@@ -7,6 +7,7 @@ import { ReadToolSummary } from "./ReadToolView";
 import styles from "./transcript.module.css";
 import { useTranscriptScroll } from "./TranscriptScrollContext";
 import { useCollapse } from "./useCollapse";
+import McpToolIcon from "./McpToolIcon";
 
 type ToolGroupProps = {
   group: Extract<TranscriptBlock, { type: "tool-group" }>;
@@ -82,7 +83,9 @@ export default function ToolGroup({ group }: ToolGroupProps) {
           aria-expanded={expanded}
         >
           <span className={styles.rowIcon}>
-            <Check size={15} aria-hidden="true" />
+            {currentPresentation.kind === "mcp"
+              ? <McpToolIcon presentation={currentPresentation} size={18} />
+              : <Check size={15} aria-hidden="true" />}
           </span>
           <span className={styles.toolMain}>
             <span className={styles.toolState}>{currentPresentation.statusLabel}</span>

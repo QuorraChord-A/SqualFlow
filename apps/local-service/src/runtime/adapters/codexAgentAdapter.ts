@@ -729,6 +729,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       if (eventResult.done) return;
       const event = eventResult.value;
       if (this.closed) return;
+      if (this.observeThreadNotification(event, threadId, turnId)) continue;
       const connectionStatus = providerConnectionStatusFromEvent(event);
       if (connectionStatus) this.emitConnectionStatus(connectionStatus);
       if (!firstNotificationObserved) {
@@ -749,7 +750,6 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
           sinceTurnStartMs: performance.now() - turnStartedAt,
         });
       }
-      this.observeThreadNotification(event, threadId, turnId);
       if (isContextCompactionEvent(event)) this.compactedInCurrentTurn = true;
       if (method(event) === "thread/tokenUsage/updated") {
         this.latestUsage = {
@@ -801,7 +801,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       const next = await notifications.next();
       if (next.done) return;
       const event = next.value;
-      this.observeThreadNotification(event, threadId, null);
+      if (this.observeThreadNotification(event, threadId, null)) continue;
       if (isContextCompactionEvent(event)) this.compactedInCurrentTurn = true;
       if (method(event) === "thread/tokenUsage/updated") {
         this.latestUsage = {
@@ -820,20 +820,29 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     }
   }
 
-  private observeThreadNotification(event: CodexJsonRpcMessage, expectedSessionId: string, turnId: string | null) {
+  private observeThreadNotification(
+    event: CodexJsonRpcMessage,
+    expectedSessionId: string,
+    turnId: string | null,
+  ): boolean {
     const observedSessionId = stringValue(params(event)?.threadId);
-    if (!observedSessionId || observedSessionId === expectedSessionId) return;
+    const eventTurn = isRecord(params(event)?.turn) ? params(event)?.turn as Record<string, unknown> : {};
+    const observedTurnId = stringValue(params(event)?.turnId) || stringValue(eventTurn.id);
+    const foreignSession = Boolean(observedSessionId && observedSessionId !== expectedSessionId);
+    const foreignTurn = Boolean(turnId && observedTurnId && observedTurnId !== turnId);
+    if (!foreignSession && !foreignTurn) return false;
     const eventMethod = method(event) || "unknown";
-    const key = `${eventMethod}\u0000${expectedSessionId}\u0000${observedSessionId}\u0000${turnId ?? ""}`;
-    if (this.reportedForeignNotifications.has(key)) return;
+    const key = `${eventMethod}\u0000${expectedSessionId}\u0000${observedSessionId || expectedSessionId}\u0000${turnId ?? ""}\u0000${observedTurnId}`;
+    if (this.reportedForeignNotifications.has(key)) return true;
     this.reportedForeignNotifications.add(key);
     this.options.diagnostics?.({
       type: "foreign_thread_notification",
       method: eventMethod,
       expectedSessionId,
-      observedSessionId,
+      observedSessionId: observedSessionId || expectedSessionId,
       turnId,
     });
+    return true;
   }
 
   private async answerServerRequest(event: CodexJsonRpcMessage) {

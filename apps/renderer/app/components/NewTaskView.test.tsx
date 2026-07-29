@@ -1,11 +1,13 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { setupRichEditorUser } from '../../test/rich-editor-user';
 import type { Project, SquadFlow } from '../types';
 import NewTaskView, {
   NEW_TASK_LEADER_RUNTIME_SELECTION_STORAGE_KEY,
   NEW_TASK_MODE_DEFAULTS_STORAGE_KEY,
 } from './NewTaskView';
+
+const userEvent = { setup: setupRichEditorUser };
 
 const defaultProject = {
   id: 'proj-default',
@@ -45,6 +47,7 @@ const projectState = vi.hoisted(() => ({
 const handleCreateFlow = vi.hoisted(() => vi.fn());
 const apiMocks = vi.hoisted(() => ({
   fetchAgentRuntimeConfig: vi.fn(),
+  fetchNativeContext: vi.fn(),
   updateAgentRuntimeConfig: vi.fn(),
   updateAgentRuntimeRole: vi.fn(),
   updateFlowLeaderRuntimeSelection: vi.fn(),
@@ -81,6 +84,7 @@ vi.mock('../lib/ws', () => ({
 vi.mock('../lib/api', () => ({
   API_BASE: 'http://localhost:8001',
   fetchAgentRuntimeConfig: apiMocks.fetchAgentRuntimeConfig,
+  fetchNativeContext: apiMocks.fetchNativeContext,
   updateAgentRuntimeConfig: apiMocks.updateAgentRuntimeConfig,
   updateAgentRuntimeRole: apiMocks.updateAgentRuntimeRole,
   updateFlowLeaderRuntimeSelection: apiMocks.updateFlowLeaderRuntimeSelection,
@@ -159,6 +163,13 @@ describe('NewTaskView', () => {
     handleCreateFlow.mockResolvedValue(createdFlow);
     apiMocks.fetchAgentRuntimeConfig.mockReset();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
+    apiMocks.fetchNativeContext.mockReset();
+    apiMocks.fetchNativeContext.mockResolvedValue({
+      sdk: 'claudecode',
+      scope: 'global',
+      skills: [{ name: 'global-skill', description: '', scope: 'global', path: '/home/.claude/skills/global-skill/SKILL.md' }],
+      mcpServers: [{ name: 'global-mcp', description: '', scope: 'global', path: '/home/.claude.json' }],
+    });
     apiMocks.updateAgentRuntimeConfig.mockReset();
     apiMocks.updateAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot.configs[1]);
     apiMocks.updateAgentRuntimeRole.mockReset();
@@ -180,7 +191,7 @@ describe('NewTaskView', () => {
     render(<NewTaskView onTaskCreated={onTaskCreated} />);
 
     expect(screen.getByRole('heading', { name: /我们应该在\s+ccdev\s+中做些什么？/ })).toBeInTheDocument();
-    const input = screen.getByPlaceholderText('随心输入');
+    const input = screen.getByRole('textbox', { name: '随心输入' });
     await user.type(input, '实现左侧面板');
     await user.keyboard('{Enter}');
 
@@ -222,7 +233,7 @@ describe('NewTaskView', () => {
     await user.click(screen.getByRole('button', { name: '执行模式：自动编辑' }));
     await user.click(screen.getByRole('button', { name: /计划模式：/ }));
     expect(screen.getByRole('button', { name: '执行模式：计划模式' })).toBeInTheDocument();
-    await user.type(screen.getByPlaceholderText('随心输入'), '先写规格');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), '先写规格');
     await user.keyboard('{Enter}');
 
     await waitFor(() => {
@@ -257,7 +268,7 @@ describe('NewTaskView', () => {
     await user.click(screen.getByRole('button', { name: '编排审批设置，当前：需要批准' }));
     await user.click(screen.getByRole('button', { name: '自动执行' }));
 
-    await user.type(screen.getByPlaceholderText('随心输入'), '使用自动档创建');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), '使用自动档创建');
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(handleCreateFlow).toHaveBeenCalledWith(
@@ -278,10 +289,11 @@ describe('NewTaskView', () => {
   });
 
   it('does not submit while IME composition is confirming text', async () => {
+    const user = userEvent.setup();
     render(<NewTaskView />);
 
-    const input = screen.getByPlaceholderText('随心输入');
-    fireEvent.change(input, { target: { value: '他' } });
+    const input = screen.getByRole('textbox', { name: '随心输入' });
+    await user.type(input, '他');
     fireEvent.compositionStart(input);
     fireEvent.keyDown(input, { key: 'Enter', code: 'Enter', keyCode: 13 });
 
@@ -340,7 +352,7 @@ describe('NewTaskView', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: '切换模型' })).toHaveTextContent('mimo-v2.5'));
 
-    await user.type(screen.getByPlaceholderText('随心输入'), '用默认模型创建');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), '用默认模型创建');
     await user.keyboard('{Enter}');
 
     await waitFor(() => {
@@ -362,7 +374,7 @@ describe('NewTaskView', () => {
     }));
     render(<NewTaskView />);
 
-    const input = screen.getByPlaceholderText('随心输入');
+    const input = screen.getByRole('textbox', { name: '随心输入' });
     await user.type(input, '不要在模型选择完成前创建');
     expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled();
     expect(handleCreateFlow).not.toHaveBeenCalled();
@@ -382,7 +394,7 @@ describe('NewTaskView', () => {
 
     await waitFor(() => expect(screen.getByRole('button', { name: '切换模型' })).toHaveTextContent('qwen3.6-35b-a3b'));
 
-    await user.type(screen.getByPlaceholderText('随心输入'), '用上次的新建默认模型创建');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), '用上次的新建默认模型创建');
     await user.keyboard('{Enter}');
 
     await waitFor(() => {
@@ -411,7 +423,7 @@ describe('NewTaskView', () => {
     fireEvent.keyDown(screen.getByRole('slider', { name: 'Codex 推理强度' }), { key: 'End' });
     expect(screen.getByRole('button', { name: '调整 Codex 推理强度' })).toHaveTextContent('极高');
 
-    await user.type(screen.getByPlaceholderText('随心输入'), '用最高 Effort 创建');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), '用最高 Effort 创建');
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(handleCreateFlow).toHaveBeenCalledWith(
@@ -441,7 +453,7 @@ describe('NewTaskView', () => {
     expect(await screen.findByRole('button', { name: '切换模型' })).toHaveTextContent('qwen3.7-plus');
     expect(screen.queryByRole('button', { name: '调整 Codex 推理强度' })).not.toBeInTheDocument();
 
-    await user.type(screen.getByPlaceholderText('随心输入'), 'API Key Codex 创建');
+    await user.type(screen.getByRole('textbox', { name: '随心输入' }), 'API Key Codex 创建');
     await user.keyboard('{Enter}');
 
     await waitFor(() => expect(handleCreateFlow).toHaveBeenCalledWith(
