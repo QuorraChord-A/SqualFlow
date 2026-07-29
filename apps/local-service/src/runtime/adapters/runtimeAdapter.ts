@@ -20,6 +20,7 @@ export type RuntimeQueryInput = {
 export type RuntimeQueryLike = AsyncIterable<RuntimeEvent> & {
   close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
+  getMcpServerStatus?: () => Promise<unknown>;
 };
 
 export type RuntimeQueryFn = (input: RuntimeQueryInput) => RuntimeQueryLike;
@@ -27,6 +28,7 @@ export type RuntimeQueryFn = (input: RuntimeQueryInput) => RuntimeQueryLike;
 export type RuntimeRawQueryLike = AsyncIterable<unknown> & {
   close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
+  getMcpServerStatus?: () => Promise<unknown>;
 };
 
 export type RuntimeToolUseContext = {
@@ -120,6 +122,7 @@ export type RuntimeOutputAdapter = {
   readonly finalAssistantText: string | null;
   readonly durationMs: number | null;
   readonly resultCacheUsage: ContextCacheUsage | null;
+  captureMcpServerStatus?: (value: unknown) => void;
   start: () => UiMessageChunk;
   adapt: (event: RuntimeEvent) => UiMessageChunk[];
   finish: () => UiMessageChunk[];
@@ -237,6 +240,7 @@ export function normalizeRuntimeQuery(
   return {
     close: query.close ? () => query.close?.() : undefined,
     getContextUsage: query.getContextUsage ? () => query.getContextUsage!() : undefined,
+    getMcpServerStatus: query.getMcpServerStatus ? () => query.getMcpServerStatus!() : undefined,
     async *[Symbol.asyncIterator]() {
       for await (const raw of query) {
         yield classifyEvent(raw, previous);

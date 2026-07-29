@@ -23,6 +23,47 @@ describe("adaptClaudeMessageToUiChunks", () => {
     expect(adapter.sdkSessionId).toBe("sdk-early-claude");
   });
 
+  it("uses the current Flow MCP server icon for Claude tool chunks", () => {
+    const adapter = createClaudeToUiChunkAdapter("msg-mcp-icons", {
+      mcpServerIcons: new Map(),
+    });
+
+    adapter.captureMcpServerStatus([{
+      name: "context7",
+      serverInfo: {
+        icons: [{
+          src: "https://context7.com/context7-icon-green.png",
+          mimeType: "image/png",
+        }],
+      },
+    }]);
+
+    const chunks = adapter.adapt({
+      type: "assistant",
+      message: {
+        content: [{
+          type: "tool_use",
+          id: "tool-context7",
+          name: "mcp__context7__query-docs",
+          input: { query: "React" },
+        }],
+      },
+    });
+
+    expect(chunks.at(-1)).toEqual(expect.objectContaining({
+      type: "tool-input-available",
+      toolName: "mcp__context7__query-docs",
+      mcp: {
+        server: "context7",
+        tool: "query-docs",
+        serverIcons: [{
+          src: "https://context7.com/context7-icon-green.png",
+          mimeType: "image/png",
+        }],
+      },
+    }));
+  });
+
   it("converts assistant message content blocks without duplicating streamed text", () => {
     const adapter = createClaudeToUiChunkAdapter("msg-1");
     const streamed = adapter.adapt({ type: "stream_event", event: { delta: { type: "text_delta", text: "hi" } } });

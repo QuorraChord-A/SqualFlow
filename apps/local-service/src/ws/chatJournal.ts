@@ -101,6 +101,18 @@ function isToolPart(part: AssistantMessagePart): part is ToolPart {
   return part.type.startsWith("tool-");
 }
 
+function stripTransientMcpIcons(message: ChatUIMessage): ChatUIMessage {
+  if (message.role !== "assistant") return message;
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      if (!isToolPart(part) || !part.mcp) return part;
+      const { icons: _icons, serverIcons: _serverIcons, ...mcp } = part.mcp;
+      return { ...part, mcp };
+    }),
+  };
+}
+
 export class ChatJournal {
   private readonly current = new Map<string, AssistantUIMessage | null>();
   private readonly history = new Map<string, ChatUIMessage[]>();
@@ -494,7 +506,10 @@ export class ChatJournal {
         sessionId,
         agentSessionId,
         messages: this.messagesForPersistence(flowId, sessionId, dirtyMessageIds).map((item) => ({
-          message: item.message as unknown as Record<string, unknown>,
+          // MCP server icons are runtime metadata. Keep them on the live
+          // message for the current Flow, but never persist them because the
+          // next Flow may discover a different server/icon set.
+          message: stripTransientMcpIcons(item.message) as unknown as Record<string, unknown>,
           lifecycle: item.lifecycle,
         })),
         removedMessageIds: [...(this.removedMessageIds.get(sessionKey) ?? [])],

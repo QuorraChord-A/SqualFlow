@@ -47,6 +47,10 @@ import {
   queryZeroProgressMs,
   ZERO_PROGRESS_ERROR_MESSAGE,
 } from "./queryLifecyclePolicy.js";
+import {
+  refreshMcpServerIcons,
+  type McpServerIconRegistry,
+} from "./mcpServerIcons.js";
 
 export type ExpertTaskInput = {
   flowId: string;
@@ -291,6 +295,7 @@ function expertDisplayContent(content: string, flowId: string): string {
 
 class FlowExpertWorker {
   private readonly input;
+  private readonly mcpServerIcons: McpServerIconRegistry = new Map();
   private readonly queued: FlowExpertTurn[] = [];
   private active: FlowExpertTurn | null = null;
   private query: RuntimeQueryLike | null = null;
@@ -402,6 +407,7 @@ class FlowExpertWorker {
       await this.activateNext();
       if (this.closed) return;
       this.query = this.runtimeAdapter.runQuery({ prompt: this.input, options: this.options });
+      void refreshMcpServerIcons(this.query, this.active?.adapter);
       void this.consume();
     } catch (error) {
       await this.failOutstanding(error instanceof Error ? error : new Error(String(error)));
@@ -722,7 +728,10 @@ class FlowExpertWorker {
         },
       });
 
-      next.adapter = this.runtimeAdapter.createOutputAdapter(next.assistantMessageId, { startedAt: next.startedAt });
+      next.adapter = this.runtimeAdapter.createOutputAdapter(next.assistantMessageId, {
+        startedAt: next.startedAt,
+        mcpServerIcons: this.mcpServerIcons,
+      });
       if (this.canWrite) {
         try {
           next.baseline = await captureUserTurnBaselineAsync(this.reviewRootPath);

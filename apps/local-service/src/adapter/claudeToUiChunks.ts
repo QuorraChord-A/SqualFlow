@@ -1,6 +1,11 @@
 import type { UiMcpContentBlock, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { UiMessageChunkBuilder } from "../protocol/uiMessageChunkBuilder.js";
 import { claudeCapabilityForTool } from "../runtime/adapters/claudeCapabilities.js";
+import {
+  captureMcpServerIcons,
+  mcpServerIconsForTool,
+  type McpServerIconRegistry,
+} from "../runtime/mcpServerIcons.js";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -14,16 +19,26 @@ export type ClaudeResultCacheUsage = {
 export function adaptClaudeMessageToUiChunks(
   raw: unknown,
   messageId: string,
-  metadata?: { startedAt?: string } | unknown,
+  metadata?: { startedAt?: string; mcpServerIcons?: McpServerIconRegistry } | unknown,
 ): UiMessageChunk[] {
   return createClaudeToUiChunkAdapter(messageId, metadata).adapt(raw);
 }
 
-export function createClaudeToUiChunkAdapter(messageId: string, metadata?: { startedAt?: string } | unknown) {
+export function createClaudeToUiChunkAdapter(
+  messageId: string,
+  metadata?: { startedAt?: string; mcpServerIcons?: McpServerIconRegistry } | unknown,
+) {
   const startedAt = metadata && typeof metadata === "object" && !Array.isArray(metadata)
     ? (metadata as { startedAt?: unknown }).startedAt
     : undefined;
-  return new ClaudeToUiChunkAdapter(messageId, typeof startedAt === "string" ? startedAt : undefined);
+  const mcpServerIcons = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as { mcpServerIcons?: unknown }).mcpServerIcons
+    : undefined;
+  return new ClaudeToUiChunkAdapter(
+    messageId,
+    typeof startedAt === "string" ? startedAt : undefined,
+    mcpServerIcons instanceof Map ? mcpServerIcons : undefined,
+  );
 }
 
 export class ClaudeToUiChunkAdapter {
@@ -43,9 +58,11 @@ export class ClaudeToUiChunkAdapter {
   private readonly toolNamesByCallId = new Map<string, string>();
   private _durationMs: number | null = null;
   private _resultCacheUsage: ClaudeResultCacheUsage | null = null;
+  private readonly mcpServerIcons?: McpServerIconRegistry;
 
-  constructor(messageId: string, startedAt?: string) {
+  constructor(messageId: string, startedAt?: string, mcpServerIcons?: McpServerIconRegistry) {
     this.builder = new UiMessageChunkBuilder(messageId, startedAt);
+    this.mcpServerIcons = mcpServerIcons;
   }
 
   get sdkSessionId(): string | null {
@@ -76,6 +93,10 @@ export class ClaudeToUiChunkAdapter {
     return this._resultCacheUsage;
   }
 
+  captureMcpServerStatus(value: unknown): void {
+    if (this.mcpServerIcons) captureMcpServerIcons(this.mcpServerIcons, value);
+  }
+
   start(): UiMessageChunk {
     return this.builder.start();
   }
@@ -84,6 +105,7 @@ export class ClaudeToUiChunkAdapter {
     const msg = asRecord(raw);
     if (!msg) return [];
     this.captureSdkSessionId(msg);
+    if (this.mcpServerIcons) captureMcpServerIcons(this.mcpServerIcons, msg);
 
     const type = stringValue(msg.type);
     if (type === "stream_event") return this.adaptStreamEvent(msg);
@@ -118,7 +140,7 @@ export class ClaudeToUiChunkAdapter {
       return this.builder.toolCallStart(name, id, {
         capability: claudeCapabilityForTool(name),
         providerToolName: name,
-        ...(mcpMetadataForToolName(name) ? { mcp: mcpMetadataForToolName(name)! } : {}),
+        ...(mcpMetadataForToolName(name, this.mcpServerIcons) ? { mcp: mcpMetadataForToolName(name, this.mcpServerIcons)! } : {}),
       });
     }
 
@@ -164,7 +186,7 @@ export class ClaudeToUiChunkAdapter {
         const toolCallId = stringValue(blockRecord.id, "tool-unknown");
         this.toolNamesByCallId.set(toolCallId, toolName);
         const metadata = { capability: claudeCapabilityForTool(toolName), providerToolName: toolName };
-        const mcp = mcpMetadataForToolName(toolName);
+        const mcp = mcpMetadataForToolName(toolName, this.mcpServerIcons);
         if (mcp) Object.assign(metadata, { mcp });
         if (this.streamedToolCallIds.has(toolCallId)) {
           chunks.push(this.builder.toolInputAvailable(toolName, toolCallId, recordValue(blockRecord.input), metadata));
@@ -174,7 +196,7 @@ export class ClaudeToUiChunkAdapter {
       } else if (blockType === "tool_result") {
         const toolUseId = stringValue(blockRecord.tool_use_id, "tool-unknown");
         const toolName = this.toolNamesByCallId.get(toolUseId) ?? "";
-        const mcp = mcpMetadataForToolName(toolName);
+        const mcp = mcpMetadataForToolName(toolName, this.mcpServerIcons);
         chunks.push(this.builder.toolResult(
           toolUseId,
           contentToString(blockRecord.content),
@@ -207,7 +229,7 @@ export class ClaudeToUiChunkAdapter {
       sawToolResult = true;
       const toolUseId = stringValue(blockRecord.tool_use_id, "tool-unknown");
       const toolName = this.toolNamesByCallId.get(toolUseId) ?? "";
-      const mcp = mcpMetadataForToolName(toolName);
+      const mcp = mcpMetadataForToolName(toolName, this.mcpServerIcons);
       chunks.push(this.builder.toolResult(
         toolUseId,
         contentToString(blockRecord.content),
@@ -346,12 +368,19 @@ function contentToString(content: unknown): string {
   return JSON.stringify(content);
 }
 
-function mcpMetadataForToolName(toolName: string): {
+function mcpMetadataForToolName(toolName: string, registry?: McpServerIconRegistry): {
   server: string;
   tool: string;
+  serverIcons?: NonNullable<ReturnType<typeof mcpServerIconsForTool>>;
 } | null {
   const match = /^mcp__(.+?)__(.+)$/u.exec(toolName);
-  return match ? { server: match[1], tool: match[2] } : null;
+  if (!match) return null;
+  const serverIcons = mcpServerIconsForTool(toolName, registry);
+  return {
+    server: match[1],
+    tool: match[2],
+    ...(serverIcons ? { serverIcons } : {}),
+  };
 }
 
 function mcpResultFromContent(content: unknown, isError: boolean): UiMcpResult {

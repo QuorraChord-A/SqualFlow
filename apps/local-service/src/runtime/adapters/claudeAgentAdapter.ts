@@ -27,6 +27,7 @@ import {
   getLatestClaudeCompactTranscriptMetadata,
   getRawClaudeSessionHistory,
 } from "./claudeSessionHistory.js";
+import type { McpServerIconRegistry } from "../mcpServerIcons.js";
 import { normalizeRuntimeQuery } from "./runtimeAdapter.js";
 import type {
   AgentRuntimeAdapter,
@@ -49,6 +50,7 @@ export type ClaudeQueryLike = AsyncIterable<unknown> & {
   close?: () => void;
   streamInput?: (stream: AsyncIterable<SDKUserMessage>) => Promise<void>;
   getContextUsage?: () => Promise<SDKControlGetContextUsageResponse>;
+  mcpServerStatus?: () => Promise<unknown>;
 };
 
 export type ClaudeQueryFn = (input: ClaudeQueryInput) => ClaudeQueryLike;
@@ -320,7 +322,21 @@ function normalizeQueryInput(input: RuntimeQueryInput): ClaudeQueryInput {
   };
 }
 
-function createOutputAdapter(messageId: string, metadata?: { startedAt?: string } | unknown): RuntimeOutputAdapter {
+function normalizeClaudeRawQuery(query: ClaudeQueryLike): RuntimeRawQueryLike {
+  return {
+    close: query.close,
+    getContextUsage: query.getContextUsage,
+    getMcpServerStatus: query.mcpServerStatus ? () => query.mcpServerStatus!() : undefined,
+    async *[Symbol.asyncIterator]() {
+      for await (const event of query) yield event;
+    },
+  };
+}
+
+function createOutputAdapter(
+  messageId: string,
+  metadata?: { startedAt?: string; mcpServerIcons?: McpServerIconRegistry } | unknown,
+): RuntimeOutputAdapter {
   const adapter = createClaudeToUiChunkAdapter(messageId, metadata);
   return {
     get sdkSessionId() {
@@ -344,6 +360,7 @@ function createOutputAdapter(messageId: string, metadata?: { startedAt?: string 
     get resultCacheUsage() {
       return adapter.resultCacheUsage;
     },
+    captureMcpServerStatus: (value) => adapter.captureMcpServerStatus(value),
     start: () => adapter.start(),
     adapt: (event) => adapter.adapt(event.raw),
     finish: () => adapter.finish(),
@@ -384,10 +401,10 @@ export function createClaudeAgentRuntimeAdapter(input: { query?: ClaudeQueryFn }
       const injection: NowInjectionState = { inFlight: false };
       const normalized = normalizeQueryInput(queryInput);
       return normalizeRuntimeQuery(
-        runQuery({
+        normalizeClaudeRawQuery(runQuery({
           ...normalized,
           prompt: trackNowInjections(normalized.prompt, injection),
-        }) as RuntimeRawQueryLike,
+        })),
         (raw, previous) => adjudicateEvent(raw, previous, injection),
         queryInput.previousContextUsage,
       );

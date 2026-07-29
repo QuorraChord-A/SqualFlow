@@ -267,6 +267,39 @@ describe("canonical transcript persistence", () => {
     ]);
   });
 
+  it("keeps MCP icons in the live Flow but strips them from transcript storage", () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    const journal = new ChatJournal(store);
+    const mcp = {
+      server: "context7",
+      tool: "query-docs",
+      serverIcons: [{
+        src: "https://context7.com/context7-icon-green.png",
+        mimeType: "image/png",
+      }],
+    };
+
+    journal.record("flow-icons", "sdk-icons", { type: "start", messageId: "msg-icons" });
+    journal.record("flow-icons", "sdk-icons", {
+      type: "tool-input-available",
+      toolCallId: "tool-context7",
+      toolName: "mcp__context7__query-docs",
+      mcp,
+      input: { query: "React" },
+    });
+
+    expect(journal.getCurrentMessage("flow-icons", "sdk-icons")?.parts).toEqual([
+      expect.objectContaining({ mcp }),
+    ]);
+    expect(store.listTranscriptEntries("flow-icons", "sdk-icons")[0]?.message).toEqual(expect.objectContaining({
+      parts: [expect.objectContaining({
+        mcp: { server: "context7", tool: "query-docs" },
+      })],
+    }));
+    store.sqlite.close();
+  });
+
   it("does not publish a websocket event when the transcript commit fails", async () => {
     const persistence = {
       commitTranscriptMutation() {

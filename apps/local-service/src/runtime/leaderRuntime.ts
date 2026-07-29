@@ -70,6 +70,10 @@ import {
   queryZeroProgressMs,
   ZERO_PROGRESS_ERROR_MESSAGE,
 } from "./queryLifecyclePolicy.js";
+import {
+  refreshMcpServerIcons,
+  type McpServerIconRegistry,
+} from "./mcpServerIcons.js";
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
 
@@ -255,6 +259,7 @@ function createPendingLeaderStart(): PendingLeaderStart {
 
 class LeaderFlowStream {
   private readonly input;
+  private readonly mcpServerIcons: McpServerIconRegistry = new Map();
   private readonly queued: DeferredTurn[] = [];
   private active: DeferredTurn | null = null;
   private activating = false;
@@ -380,6 +385,7 @@ class LeaderFlowStream {
       }
       if (this.closed) return;
       this.query = this.runtimeAdapter.runQuery({ prompt: this.input, options: this.options });
+      void refreshMcpServerIcons(this.query, this.active?.adapter);
       await this.consume();
     } catch (error) {
       if (!this.closed) await this.fail(error instanceof Error ? error : new Error(String(error)));
@@ -588,7 +594,10 @@ class LeaderFlowStream {
     }, "runtime turn started");
     this.browserTurnContext.agentSessionId = next.turn.leaderAgentSessionId;
     this.onCurrentTurnInput(next.currentTurnInput);
-    next.adapter = this.runtimeAdapter.createOutputAdapter(next.messageId, { startedAt: next.startedAt });
+    next.adapter = this.runtimeAdapter.createOutputAdapter(next.messageId, {
+      startedAt: next.startedAt,
+      mcpServerIcons: this.mcpServerIcons,
+    });
     next.pusher = new WsPusher(
       next.turn.flowId,
       () => this.sessionId,
