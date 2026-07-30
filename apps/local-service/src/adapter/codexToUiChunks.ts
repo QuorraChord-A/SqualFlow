@@ -1,16 +1,31 @@
 import type { UiMcpContentBlock, UiMcpIcon, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { UiMessageChunkBuilder } from "../protocol/uiMessageChunkBuilder.js";
 import type { RuntimeCapability } from "../domain/runtimeCapabilities.js";
+import {
+  captureMcpServerIcons,
+  mcpServerIconsForTool,
+  type McpServerIconRegistry,
+} from "../runtime/mcpServerIcons.js";
 
 type UnknownRecord = Record<string, unknown>;
 
 export const CODEX_COMMAND_DECLINED_OUTPUT = "用户已明确拒绝执行该风险命令。";
 
-export function createCodexToUiChunkAdapter(messageId: string, metadata?: { startedAt?: string } | unknown) {
+export function createCodexToUiChunkAdapter(
+  messageId: string,
+  metadata?: { startedAt?: string; mcpServerIcons?: McpServerIconRegistry } | unknown,
+) {
   const startedAt = metadata && typeof metadata === "object" && !Array.isArray(metadata)
     ? (metadata as { startedAt?: unknown }).startedAt
     : undefined;
-  return new CodexToUiChunkAdapter(messageId, typeof startedAt === "string" ? startedAt : undefined);
+  const mcpServerIcons = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as { mcpServerIcons?: unknown }).mcpServerIcons
+    : undefined;
+  return new CodexToUiChunkAdapter(
+    messageId,
+    typeof startedAt === "string" ? startedAt : undefined,
+    mcpServerIcons instanceof Map ? mcpServerIcons : undefined,
+  );
 }
 
 export class CodexToUiChunkAdapter {
@@ -32,7 +47,11 @@ export class CodexToUiChunkAdapter {
     cacheHitRate: number | null;
   } | null = null;
 
-  constructor(messageId: string, startedAt?: string) {
+  constructor(
+    messageId: string,
+    startedAt?: string,
+    private readonly mcpServerIcons?: McpServerIconRegistry,
+  ) {
     this.builder = new UiMessageChunkBuilder(messageId, startedAt);
   }
 
@@ -43,6 +62,10 @@ export class CodexToUiChunkAdapter {
   get finalAssistantText() { return this._finalAssistantText; }
   get durationMs() { return this._durationMs; }
   get resultCacheUsage() { return this._resultCacheUsage; }
+
+  captureMcpServerStatus(value: unknown): void {
+    if (this.mcpServerIcons) captureMcpServerIcons(this.mcpServerIcons, value);
+  }
 
   start(): UiMessageChunk {
     return this.builder.start();
@@ -160,14 +183,19 @@ export class CodexToUiChunkAdapter {
       const tool = stringValue(item.tool);
       const id = stringValue(item.id, `mcp-${server}-${tool}`);
       const toolName = `mcp__${server}__${tool}`;
+      const itemIcons = iconsFromValue(item.icons);
+      const itemServerIcons = iconsFromValue(item.serverIcons);
+      const registryServerIcons = mcpServerIconsForTool(toolName, this.mcpServerIcons);
       const metadata = {
         providerToolName: "mcpToolCall",
         mcp: {
           server,
           tool,
           ...(stringValue(item.title) ? { title: stringValue(item.title) } : {}),
-          ...(iconsFromValue(item.icons) ? { icons: iconsFromValue(item.icons) } : {}),
-          ...(iconsFromValue(item.serverIcons) ? { serverIcons: iconsFromValue(item.serverIcons) } : {}),
+          ...(itemIcons ? { icons: itemIcons } : {}),
+          ...(itemServerIcons ?? registryServerIcons
+            ? { serverIcons: itemServerIcons ?? registryServerIcons }
+            : {}),
         },
       };
       const chunks = isStart

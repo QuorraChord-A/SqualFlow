@@ -52,6 +52,146 @@ function writeCodexRollout(root: string, sessionId: string, entries: unknown[]) 
 }
 
 describe("Codex runtime adapter", () => {
+  it("reads MCP status for the active Codex thread without making it part of the turn", async () => {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const clientFactory: CodexClientFactory = () => ({
+      start: async () => {},
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "thread/start") return { thread: { id: "thread-mcp-status" } };
+        if (method === "mcpServerStatus/list") {
+          return {
+            data: [{
+              name: "context7",
+              serverInfo: { icons: [{ src: "https://context7.com/context7-icon-green.png" }] },
+              tools: {},
+              resources: [],
+              resourceTemplates: [],
+              authStatus: "connected",
+            }],
+            nextCursor: null,
+          };
+        }
+        if (method === "turn/start") return { turn: { id: "turn-mcp-status" } };
+        throw new Error(`unexpected request: ${method}`);
+      },
+      notify: () => {},
+      respond: () => {},
+      close: () => {},
+      notifications: async function* () {
+        yield {
+          method: "turn/completed",
+          params: { threadId: "thread-mcp-status", turn: { id: "turn-mcp-status", status: "completed" } },
+        };
+      },
+    });
+    const adapter = createCodexAgentRuntimeAdapter({ clientFactory });
+    const options = adapter.buildLeaderOptions({
+      role: "leader",
+      systemPrompt: "leader",
+      cwd: "/tmp/project",
+      capabilities: ["read"],
+      mcpTools: [],
+      runtimeConfig: runtimeConfig(),
+    });
+    const query = adapter.runQuery({
+      prompt: adapter.createSingleTextInput("hello"),
+      options,
+    });
+    const status = query.getMcpServerStatus!();
+    const consume = (async () => {
+      for await (const event of query) {
+        if (event.type === "turn_completed") return;
+      }
+    })();
+
+    await expect(status).resolves.toMatchObject({
+      data: [expect.objectContaining({ name: "context7" })],
+    });
+    await consume;
+    expect(requests).toContainEqual({
+      method: "mcpServerStatus/list",
+      params: {
+        threadId: "thread-mcp-status",
+        cursor: null,
+        limit: 100,
+        detail: "toolsAndAuthOnly",
+      },
+    });
+  });
+
+  it("refreshes MCP status after Codex starts a ready MCP tool", async () => {
+    const requests: Array<{ method: string; params: unknown }> = [];
+    const observedStatuses: unknown[] = [];
+    const clientFactory: CodexClientFactory = () => ({
+      start: async () => {},
+      request: async (method, params) => {
+        requests.push({ method, params });
+        if (method === "thread/start") return { thread: { id: "thread-mcp-icon" } };
+        if (method === "turn/start") return { turn: { id: "turn-mcp-icon" } };
+        if (method === "mcpServerStatus/list") {
+          return {
+            data: [{
+              name: "context7",
+              serverInfo: { icons: [{ src: "https://context7.com/context7-icon-green.png" }] },
+              tools: {},
+              resources: [],
+              resourceTemplates: [],
+              authStatus: "connected",
+            }],
+            nextCursor: null,
+          };
+        }
+        throw new Error(`unexpected request: ${method}`);
+      },
+      notify: () => {},
+      respond: () => {},
+      close: () => {},
+      notifications: async function* () {
+        yield {
+          method: "item/started",
+          params: {
+            threadId: "thread-mcp-icon",
+            turnId: "turn-mcp-icon",
+            item: { id: "mcp-call-1", type: "mcpToolCall", server: "context7", tool: "resolve-library-id" },
+          },
+        };
+        yield {
+          method: "turn/completed",
+          params: { threadId: "thread-mcp-icon", turn: { id: "turn-mcp-icon", status: "completed" } },
+        };
+      },
+    });
+    const adapter = createCodexAgentRuntimeAdapter({ clientFactory });
+    const options = adapter.buildLeaderOptions({
+      role: "leader",
+      systemPrompt: "leader",
+      cwd: "/tmp/project",
+      capabilities: ["read"],
+      mcpTools: [],
+      runtimeConfig: runtimeConfig(),
+    });
+    const query = adapter.runQuery({
+      prompt: adapter.createSingleTextInput("hello"),
+      options,
+    });
+    query.setMcpServerStatusObserver?.((status) => observedStatuses.push(status));
+
+    for await (const event of query) {
+      if (event.type === "turn_completed") break;
+    }
+
+    expect(requests.filter((request) => request.method === "mcpServerStatus/list")).toHaveLength(1);
+    expect(observedStatuses).toEqual([expect.objectContaining({
+      data: [expect.objectContaining({
+        name: "context7",
+        serverInfo: expect.objectContaining({
+          icons: [expect.objectContaining({ src: "https://context7.com/context7-icon-green.png" })],
+        }),
+      })],
+    })]);
+  });
+
   it("sets no reasoning effort on the ephemeral Flow Namer turn", async () => {
     const requests: Array<{ method: string; params: unknown }> = [];
     const clientFactory: CodexClientFactory = () => ({

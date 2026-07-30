@@ -385,6 +385,9 @@ class LeaderFlowStream {
       }
       if (this.closed) return;
       this.query = this.runtimeAdapter.runQuery({ prompt: this.input, options: this.options });
+      this.query.setMcpServerStatusObserver?.((status) => {
+        this.active?.adapter?.captureMcpServerStatus?.(status);
+      });
       void refreshMcpServerIcons(this.query, this.active?.adapter);
       await this.consume();
     } catch (error) {

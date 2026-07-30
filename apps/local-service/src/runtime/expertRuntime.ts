@@ -407,6 +407,9 @@ class FlowExpertWorker {
       await this.activateNext();
       if (this.closed) return;
       this.query = this.runtimeAdapter.runQuery({ prompt: this.input, options: this.options });
+      this.query.setMcpServerStatusObserver?.((status) => {
+        this.active?.adapter?.captureMcpServerStatus?.(status);
+      });
       void refreshMcpServerIcons(this.query, this.active?.adapter);
       void this.consume();
     } catch (error) {

@@ -23,6 +23,7 @@ import {
   getLatestCodexCompactTranscriptMetadata,
   getRawCodexSessionHistory,
 } from "./codexSessionHistory.js";
+import type { McpServerIconRegistry } from "../mcpServerIcons.js";
 import {
   buildCodexExpertOptions,
   buildCodexLeaderOptions,
@@ -455,6 +456,11 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   private compactedInCurrentTurn = false;
   private readonly pendingInputs: CodexRuntimeInput[] = [];
   private readonly reportedForeignNotifications = new Set<string>();
+  private readonly threadReady: Promise<string | null>;
+  private resolveThreadReady!: (threadId: string | null) => void;
+  private mcpServerStatusPromise: Promise<unknown> | null = null;
+  private mcpServerStatusObserver: ((value: unknown) => void) | null = null;
+  private readonly refreshedMcpToolCallIds = new Set<string>();
   private lastConnectionStatusKey = "";
   private observedProviderWebsocket = false;
   private closePromise: Promise<void> | null = null;
@@ -464,6 +470,9 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     private readonly options: CodexQueryOptions,
     clientFactory: CodexClientFactory,
   ) {
+    this.threadReady = new Promise((resolve) => {
+      this.resolveThreadReady = resolve;
+    });
     this.proxy = proxyPresence(options.env);
     const clientOptions: CodexAppServerClientOptions = {
       command: options.appServerCommand,
@@ -547,6 +556,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
   close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.resolveThreadReady(null);
     const threadId = this.currentThreadId;
     const turnId = this.currentTurnId;
     if (threadId && turnId) {
@@ -571,6 +581,19 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     throw new Error("Codex context usage is not available yet");
   }
 
+  async getMcpServerStatus() {
+    const threadId = this.currentThreadId ?? await this.threadReady;
+    if (!threadId) throw new Error("Codex MCP server status is unavailable before thread initialization");
+    if (!this.mcpServerStatusPromise) {
+      this.mcpServerStatusPromise = this.refreshMcpServerStatus(threadId);
+    }
+    return this.mcpServerStatusPromise;
+  }
+
+  setMcpServerStatusObserver(observer: ((value: unknown) => void) | undefined) {
+    this.mcpServerStatusObserver = observer ?? null;
+  }
+
   /**
    * True while injected text input is still awaiting delivery: a mid-turn steer
    * failed and fell back to `pendingInputs`, so this `turn/completed` is not the
@@ -587,10 +610,14 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     const inputCursor = new InputCursor(this.input[Symbol.asyncIterator]());
     const notifications = new InputCursor(this.client.notifications()[Symbol.asyncIterator]());
     const first = await inputCursor.next();
-    if (first.done) return;
+    if (first.done) {
+      this.resolveThreadReady(null);
+      return;
+    }
     const firstInput = first.value as CodexRuntimeInput;
     const threadId = await this.startOrResumeThread();
     this.currentThreadId = threadId;
+    this.resolveThreadReady(threadId);
     if (firstInput.type === "compact") {
       yield* this.compact(threadId, notifications);
       return;
@@ -615,6 +642,51 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
     if (this.pendingInputs.length > 0) return { done: false, value: this.pendingInputs.shift()! };
     const next = await inputCursor.next();
     return next.done ? { done: true } : { done: false, value: next.value as CodexRuntimeInput };
+  }
+
+  private async listMcpServerStatus(threadId: string): Promise<unknown> {
+    const data: unknown[] = [];
+    let cursor: string | null = null;
+
+    for (let page = 0; page < 10; page += 1) {
+      const result = await this.client.request("mcpServerStatus/list", {
+        threadId,
+        cursor,
+        limit: 100,
+        detail: "toolsAndAuthOnly",
+      });
+      if (!isRecord(result)) return result;
+      if (Array.isArray(result.data)) data.push(...result.data);
+      const nextCursor = stringValue(result.nextCursor).trim();
+      if (!nextCursor) break;
+      cursor = nextCursor;
+    }
+
+    return { data };
+  }
+
+  private async refreshMcpServerStatus(threadId: string): Promise<unknown> {
+    const status = await this.listMcpServerStatus(threadId);
+    this.mcpServerStatusObserver?.(status);
+    return status;
+  }
+
+  private async refreshMcpServerStatusForToolEvent(
+    event: CodexJsonRpcMessage,
+    threadId: string,
+  ) {
+    const toolCallId = mcpToolCallId(event);
+    if (!toolCallId || this.refreshedMcpToolCallIds.has(toolCallId)) return;
+    this.refreshedMcpToolCallIds.add(toolCallId);
+    try {
+      // A newly-created thread can report MCP inventory before a stdio/HTTP
+      // server has finished initialize. Once an actual MCP item arrives, that
+      // server is ready, so a fresh status query is the authoritative place to
+      // obtain its optional MCP-standard `serverInfo.icons` metadata.
+      await this.refreshMcpServerStatus(threadId);
+    } catch {
+      // Icon metadata never participates in tool execution or turn success.
+    }
   }
 
   private async startOrResumeThread(): Promise<string> {
@@ -762,6 +834,7 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
         await this.answerServerRequest(event);
         continue;
       }
+      await this.refreshMcpServerStatusForToolEvent(event, threadId);
       const completedTurn = method(event) === "turn/completed"
         && stringValue(params(event)?.threadId) === threadId;
       const eventTurn = completedTurn && isRecord(params(event)?.turn)
@@ -917,6 +990,14 @@ function isContextCompactionEvent(event: unknown) {
   return stringValue(item.type) === "contextCompaction";
 }
 
+function mcpToolCallId(event: CodexJsonRpcMessage): string | null {
+  const eventMethod = method(event);
+  if (eventMethod !== "item/started" && eventMethod !== "item/completed") return null;
+  const item = params(event)?.item;
+  if (!isRecord(item) || stringValue(item["type"]) !== "mcpToolCall") return null;
+  return stringValue(item["id"]).trim() || null;
+}
+
 function requestId(value: unknown): string | number | null {
   return typeof value === "number" || typeof value === "string" ? value : null;
 }
@@ -968,7 +1049,10 @@ function mcpToolInputFromElicitation(eventParams: Record<string, unknown>): Reco
   return isRecord(meta.tool_params) ? meta.tool_params : {};
 }
 
-function createOutputAdapter(messageId: string, metadata?: { startedAt?: string } | unknown): RuntimeOutputAdapter {
+function createOutputAdapter(
+  messageId: string,
+  metadata?: { startedAt?: string; mcpServerIcons?: McpServerIconRegistry } | unknown,
+): RuntimeOutputAdapter {
   const adapter = createCodexToUiChunkAdapter(messageId, metadata);
   return {
     get sdkSessionId() {
@@ -992,6 +1076,7 @@ function createOutputAdapter(messageId: string, metadata?: { startedAt?: string 
     get resultCacheUsage() {
       return adapter.resultCacheUsage;
     },
+    captureMcpServerStatus: (value) => adapter.captureMcpServerStatus(value),
     start: () => adapter.start(),
     adapt: (event) => adapter.adapt(event.raw),
     finish: () => adapter.finish(),

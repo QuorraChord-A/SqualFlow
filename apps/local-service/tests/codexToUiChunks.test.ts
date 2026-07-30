@@ -223,6 +223,42 @@ describe("Codex to UI chunk adapter", () => {
     ]));
   });
 
+  it("uses the active Flow MCP status icons when a tool event has no icon metadata", () => {
+    const mcpServerIcons = new Map();
+    const adapter = createCodexToUiChunkAdapter("msg-status-icon", { mcpServerIcons });
+    adapter.captureMcpServerStatus({
+      data: [{
+        name: "context7",
+        serverInfo: {
+          icons: [{ src: "https://context7.com/context7-icon-green.png", mimeType: "image/png" }],
+        },
+      }],
+    });
+
+    const chunks = adapter.adapt({
+      method: "item/completed",
+      params: {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-context7-1",
+          server: "context7",
+          tool: "query-docs",
+          arguments: { query: "MCP" },
+          result: { content: [{ type: "text", text: "ok" }] },
+        },
+      },
+    });
+
+    expect(chunks).toContainEqual(expect.objectContaining({
+      type: "tool-input-available",
+      mcp: {
+        server: "context7",
+        tool: "query-docs",
+        serverIcons: [{ src: "https://context7.com/context7-icon-green.png", mimeType: "image/png" }],
+      },
+    }));
+  });
+
   it("uses only the last agentMessage item's full text as finalAssistantText across multi-segment turns", () => {
     const adapter = createCodexToUiChunkAdapter("msg-1");
 

@@ -21,6 +21,7 @@ export type RuntimeQueryLike = AsyncIterable<RuntimeEvent> & {
   close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
   getMcpServerStatus?: () => Promise<unknown>;
+  setMcpServerStatusObserver?: (observer: ((value: unknown) => void) | undefined) => void;
 };
 
 export type RuntimeQueryFn = (input: RuntimeQueryInput) => RuntimeQueryLike;
@@ -29,6 +30,7 @@ export type RuntimeRawQueryLike = AsyncIterable<unknown> & {
   close?: () => void | Promise<void>;
   getContextUsage?: () => Promise<unknown>;
   getMcpServerStatus?: () => Promise<unknown>;
+  setMcpServerStatusObserver?: (observer: ((value: unknown) => void) | undefined) => void;
 };
 
 export type RuntimeToolUseContext = {
@@ -241,6 +243,9 @@ export function normalizeRuntimeQuery(
     close: query.close ? () => query.close?.() : undefined,
     getContextUsage: query.getContextUsage ? () => query.getContextUsage!() : undefined,
     getMcpServerStatus: query.getMcpServerStatus ? () => query.getMcpServerStatus!() : undefined,
+    setMcpServerStatusObserver: query.setMcpServerStatusObserver
+      ? (observer) => query.setMcpServerStatusObserver?.(observer)
+      : undefined,
     async *[Symbol.asyncIterator]() {
       for await (const raw of query) {
         yield classifyEvent(raw, previous);

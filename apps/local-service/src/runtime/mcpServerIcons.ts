@@ -35,6 +35,7 @@ function iconList(value: unknown): UiMcpIcon[] {
 function statusList(value: unknown): unknown[] {
   if (Array.isArray(value)) return value;
   if (!isRecord(value)) return [];
+  if (Array.isArray(value.data)) return value.data;
   if (Array.isArray(value.mcpServers)) return value.mcpServers;
   return Array.isArray(value.mcp_servers) ? value.mcp_servers : [];
 }
@@ -85,17 +86,24 @@ export async function refreshMcpServerIcons(
   if (!query?.getMcpServerStatus || !capture?.captureMcpServerStatus) return;
 
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  const status = query.getMcpServerStatus()
+    .then((value) => {
+      capture.captureMcpServerStatus?.(value);
+    })
+    .catch(() => {
+      // Icon discovery is best-effort. A slow or unavailable MCP server must
+      // never delay or fail the user's turn.
+    });
   try {
-    const status = await Promise.race([
-      query.getMcpServerStatus(),
+    await Promise.race([
+      status,
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new Error("MCP server status timed out")), timeoutMs);
       }),
     ]);
-    capture.captureMcpServerStatus(status);
   } catch {
-    // Icon discovery is best-effort. A slow or unavailable MCP server must
-    // never delay or fail the user's turn.
+    // Keep the status request alive after the UI timeout: a late success can
+    // still enrich a later tool call in the same active Flow.
   } finally {
     if (timeout) clearTimeout(timeout);
   }

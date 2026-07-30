@@ -28,10 +28,10 @@ describe("MCP server icon discovery", () => {
   it("accepts app-server status envelopes without retaining invalid icons", () => {
     const registry = new Map();
     captureMcpServerIcons(registry, {
-      mcp_servers: [
+      data: [
         {
           name: "context7",
-          server_info: {
+          serverInfo: {
             icons: [{ src: "", mimeType: "image/png" }, { src: "data:image/png;base64,abc" }],
           },
         },
@@ -52,5 +52,24 @@ describe("MCP server icon discovery", () => {
     );
 
     expect(captured).toEqual([]);
+  });
+
+  it("captures a status response that arrives after the UI timeout", async () => {
+    const captured: unknown[] = [];
+    let resolveStatus!: (value: unknown) => void;
+    const status = new Promise<unknown>((resolve) => {
+      resolveStatus = resolve;
+    });
+
+    await refreshMcpServerIcons(
+      { getMcpServerStatus: () => status },
+      { captureMcpServerStatus: (value) => captured.push(value) },
+      1,
+    );
+    expect(captured).toEqual([]);
+
+    resolveStatus({ data: [{ name: "context7", serverInfo: { icons: [] } }] });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(captured).toEqual([{ data: [{ name: "context7", serverInfo: { icons: [] } }] }]);
   });
 });
