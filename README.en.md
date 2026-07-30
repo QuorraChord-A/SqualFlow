@@ -4,7 +4,7 @@
 
 <h1 align="center">SquadFlow</h1>
 
-<p align="center">A local-first AI agent orchestration desktop app</p>
+<p align="center">A local-first AI agent orchestration workspace</p>
 
 <p align="center">
   <a href="README.md">中文</a> · <strong>English</strong>
@@ -16,47 +16,40 @@
   <a href="#running-from-source"><img src="https://img.shields.io/badge/node-22.x-brightgreen.svg" alt="Node.js 22"></a>
 </p>
 
-SquadFlow is a multi-agent collaboration workspace that runs on your computer. You describe a goal, the Leader clarifies the request and organizes a plan, and specialist agents take on architecture, implementation, verification, review, and diagnosis while you retain control of important decisions.
+SquadFlow is a multi-agent collaboration workspace that runs on your computer. You describe a goal, choose a project directory and model, and the Leader clarifies, plans, and coordinates the work. Specialist agents handle implementation, verification, review, and diagnosis while plans, key decisions, and execution stay visible to you.
 
-## How it works
+## Why SquadFlow
 
-1. **Create a Flow** — Choose a project directory and describe the outcome you want.
-2. **Approve the plan** — The Leader breaks down the work, assigns specialists, and asks you to review the execution plan.
-3. **Run the collaboration** — Specialist agents work within the same Flow and continuously report progress and results.
-4. **Review and adjust** — Use decision cards, feedback, and follow-up messages to refine the direction until the work is complete.
+- **Organize complex work into Flows** — A Flow keeps the goal, conversation, plan, tasks, tool calls, and result together and remains available after restart.
+- **Leader and specialist collaboration** — The Leader turns a goal into traceable work and delegates to specialists instead of forcing everything into one chat turn.
+- **Human control throughout** — Review plans, respond to decision cards, and redirect work when it matters; important decisions are not hidden in the background.
+- **Choose your runtime** — Use Codex, Claude, or a compatible custom model endpoint. Configure models and credentials through the in-app provider manager.
+- **Use native project context** — Discover available Skills and MCP servers from the current project and your machine; type `/` to filter and select them.
+- **See what tools did** — The workbench shows the exact MCP server and tool, status, input, and result. When an MCP provides an icon, it is shown in the active Flow.
+- **Local-first** — Conversations, project associations, and app settings remain on your computer by default. SquadFlow does not operate a model-request relay.
 
-## Core capabilities
+## How to use it
 
-- **Leader and specialist collaboration** — Turn complex goals into clearly owned, traceable agent tasks.
-- **Plan approval and human decisions** — Review plans before execution and respond at important checkpoints.
-- **Multiple runtimes** — Use Codex, Claude, or a compatible custom model endpoint.
-- **Integrated workbench** — Inspect files, runtime activity, browser previews, and web elements inside the desktop app.
-- **Recoverable Flows** — Return to conversations, task state, and execution records after restarting the app.
-- **Desktop updates** — Check, download, pause, resume, and install new releases from the app.
+1. **Create a Flow** — Choose a project directory, describe the outcome, and select a model.
+2. **Add context** — Type `/` in the composer, filter available Skills and MCP servers by name or description, then use the arrow keys and Enter to insert a selection.
+3. **Review the plan** — The Leader explains the breakdown and direction; confirm, reject, or add constraints through decision cards when needed.
+4. **Follow execution** — Inspect specialist progress, file operations, browser activity, and MCP results. Expand tool groups for raw details.
+5. **Continue the collaboration** — Follow up, correct course, or add work in the same Flow. Its state and conversation are persisted.
+
+## Skills and MCP
+
+SquadFlow reuses the native context available to the current Flow instead of requiring a separate, manually maintained list for each conversation.
+
+- **Skills** — Project-scoped Skills take precedence over global Skills. A chosen Skill is shown as an inline entity in the composer and transcript.
+- **MCP** — The app shows MCP tools that the current runtime connected successfully. Results render the standard MCP content structure for text, images, resource links, and structured data; a default MCP icon is used when the server supplies none.
+- **Scope** — A new Flow shows globally available items. A Flow attached to a project shows both project and global items, prioritizing items nearest to that project.
+- **Security boundary** — MCP servers may start local processes, read or write files, or call external services. Enable only machine and project configuration you trust, and understand its permissions and side effects before use.
+
+Selections are stored as standard Markdown links. The same user message can therefore move consistently between the composer, transcript, and runtime, while the interface simply renders recognized Skill and MCP links as readable inline entities.
 
 ## Data and privacy
 
-Workspace information, conversations, and application settings are stored on your computer by default.
-
-When you connect a cloud model, requests are sent directly to the model provider you configure; SquadFlow does not operate a model-request relay. Data sent to a provider remains subject to that provider's terms and data policies.
-
-## Installation
-
-Download the latest DMG from [Releases](../../releases), then drag SquadFlow into Applications. The current production build targets Apple Silicon Mac; other platforms are not officially supported yet.
-
-## First-time setup
-
-No model provider is created automatically on first launch. Click **Not configured** in the Leader area, then add Codex, Claude, or a compatible endpoint under **Agent Settings → Provider Management**.
-
-## Technical architecture
-
-This section is for readers who want to understand or contribute to the implementation:
-
-- **Desktop shell** — Electron
-- **Interface** — Next.js + React
-- **Local service** — TypeScript + Fastify
-- **Local persistence** — SQLite
-- **Agent runtimes** — Bundled Codex with Claude Agent SDK support
+Workspace information, conversations, and application settings are stored on your computer by default. When you connect a cloud model, requests are sent directly to the provider you configure; data sent to that provider remains subject to its terms and data policies.
 
 Mutable data for the installed app is stored at:
 
@@ -64,7 +57,25 @@ Mutable data for the installed app is stored at:
 ~/Library/Application Support/SquadFlow/
 ```
 
-Updating or replacing the `.app` does not overwrite this directory, and deleting the `.app` does not remove it automatically.
+Updating or replacing the `.app` does not overwrite this directory, and deleting the `.app` does not remove it automatically. Source-development data and installed-app data are isolated; development data is written to the ignored root `output/` directory.
+
+## Installation
+
+Download the latest DMG from [Releases](../../releases), then drag SquadFlow into Applications. The current production build targets Apple Silicon Macs; other platforms are not officially supported yet.
+
+### First-time setup
+
+No model provider is created automatically on first launch. Click **Not configured** in the Leader area, then add Codex, Claude, or a compatible endpoint under **Agent Settings → Provider Management**. After creating or opening a Flow, choose the model that Flow should use.
+
+## Technical architecture
+
+| Layer | Technology and responsibility |
+| --- | --- |
+| Desktop shell | Electron: windows, system integration, updates, packaging, and bundled runtimes |
+| Interface | Next.js + React: Flows, chat, decision cards, tools, and browser workbench |
+| Local service | TypeScript + Fastify: persistence, protocol, permissions, and agent orchestration |
+| Data | SQLite: local Flows, messages, tasks, and settings |
+| Agent runtimes | Codex App Server, Claude Agent SDK, and compatible custom model endpoints |
 
 ## Running from source
 
@@ -81,10 +92,8 @@ Common commands:
 | --- | --- |
 | `npm run check` | Run type checks, lint, and all tests |
 | `npm run build` | Build the production service and renderer |
-| `npm run desktop:package` | Build and verify an unsigned local App and DMG |
+| `npm run desktop:package` | Build and verify an unsigned local App, DMG, and update ZIP |
 | `npm run desktop:smoke` | Launch the packaged app with isolated data for smoke testing |
-
-Development data and installed-application data are isolated. Source development writes application-owned mutable data to the ignored root `output/` directory.
 
 ## Repository layout
 
