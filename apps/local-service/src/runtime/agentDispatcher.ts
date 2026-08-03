@@ -2,14 +2,18 @@ import { randomUUID } from "node:crypto";
 import type { Store } from "../db/store.js";
 import { isExpertRuntimeEnabled, readAgentRuntimeConfigSnapshot } from "../config/agentRuntimeConfig.js";
 import type { EventBus } from "../ws/eventBus.js";
-import type { ExpertRuntime, ExpertTaskFinishedEvent } from "./expertRuntime.js";
+import type {
+  ExpertConversationFinishedEvent,
+  ExpertRuntime,
+  ExpertTaskFinishedEvent,
+} from "./expertRuntime.js";
 
 export type AgentDispatcher = {
   dispatchAgent: (input: {
     flowId: string;
     taskId: string | null;
     expertId: string;
-    prompt: string;
+    prompt?: string;
     resumeAgentSessionId: string;
   }) => Promise<{
     agent_session_id: string;
@@ -24,16 +28,19 @@ export type AgentDispatcher = {
       subject: string;
       description: string;
       active_form: string;
+      progress: string | null;
       status: string;
       expert_id: string | null;
       flow_expert_id: string | null;
       agent_session_id: string | null;
+      revision: number;
     };
     error?: string;
   }>;
   sendMessage: (input: {
     flowId: string;
-    agentSessionId: string;
+    userTurnId: string;
+    expertId: string;
     content: string;
     summary?: string;
   }) => Promise<{
@@ -94,8 +101,10 @@ async function recordLeaderInputAudit(
 export function createAgentDispatcher(input: {
   store: Store;
   eventBus: EventBus;
-  expertRuntime: Pick<ExpertRuntime, "runTask"> & Partial<Pick<ExpertRuntime, "sendMessage" | "cancelTask">>;
+  expertRuntime: Pick<ExpertRuntime, "runTask">
+    & Partial<Pick<ExpertRuntime, "runConversation" | "sendMessage" | "cancelTask">>;
   onTaskFinished?: (event: ExpertTaskFinishedEvent) => Promise<void> | void;
+  onConversationFinished?: (event: ExpertConversationFinishedEvent) => Promise<void> | void;
 }): AgentDispatcher {
   return {
     async dispatchAgent(dispatch) {
@@ -132,7 +141,7 @@ export function createAgentDispatcher(input: {
         }
       }
       if (taskMetadata.resourceKeys.length > 0) {
-        const activeStatuses = new Set(["in_progress", "queued_for_expert", "recovery_pending"]);
+        const activeStatuses = new Set(["in_progress"]);
         const conflicting = input.store.listUserTurnTasks(task.userTurnId).some((candidate) =>
           candidate.id !== task.id
           && activeStatuses.has(candidate.status)
@@ -151,10 +160,6 @@ export function createAgentDispatcher(input: {
       if (currentSession?.status === "streaming" || currentSession?.status === "queued") {
         return { agent_session_id: "", status: "failed", error: "running sessions must use send_message" };
       }
-      if (task.agentSessionId && !dispatch.resumeAgentSessionId) {
-        return { agent_session_id: "", status: "failed", error: "resume_agent_session_id is required for an ended task" };
-      }
-
       let resumeSessionId: string | undefined;
       if (dispatch.resumeAgentSessionId) {
         const oldSession = input.store.getAgentSession(dispatch.resumeAgentSessionId);
@@ -163,15 +168,20 @@ export function createAgentDispatcher(input: {
           || oldSession.flowId !== dispatch.flowId
           || oldSession.taskId !== task.id
           || oldSession.expertId !== dispatch.expertId
-          || task.agentSessionId !== oldSession.id
-          || !["completed", "failed"].includes(oldSession.status)
-          || !["completed", "failed", "cancelled"].includes(task.status)
+          || !["completed", "failed", "interrupted"].includes(oldSession.status)
           || !oldSession.sessionId
         ) {
           return { agent_session_id: "", status: "failed", error: "invalid resume_agent_session_id" };
         }
         resumeSessionId = oldSession.sessionId;
-      } else if (task.status !== "pending" || task.agentSessionId) {
+      } else if (currentSession?.sessionId && ["completed", "failed", "interrupted"].includes(currentSession.status)) {
+        // A FlowExpert owns the provider conversation. A subsequent explicit
+        // dispatch starts a new execution record while resuming that same
+        // provider session by default.
+        resumeSessionId = currentSession.sessionId;
+      }
+
+      if (!["pending", "in_progress"].includes(task.status)) {
         return { agent_session_id: "", status: "failed", error: "task is not dispatchable" };
       }
 
@@ -185,7 +195,7 @@ export function createAgentDispatcher(input: {
         expertId: dispatch.expertId,
         flowExpertId: flowExpert.id,
         displayName: flowExpert.displayName,
-        resumeFromAgentSessionId: dispatch.resumeAgentSessionId || undefined,
+        resumeFromAgentSessionId: dispatch.resumeAgentSessionId || currentSession?.id || undefined,
       });
       if (!started) {
         return { agent_session_id: "", status: "failed", error: "task could not be started" };
@@ -232,7 +242,7 @@ export function createAgentDispatcher(input: {
       await recordLeaderInputAudit(
         input.store,
         agentSession,
-        dispatch.resumeAgentSessionId ? "继续执行" : "首次派发",
+        currentSession ? "继续执行" : "首次派发",
       );
 
       void input.expertRuntime.runTask({
@@ -241,11 +251,10 @@ export function createAgentDispatcher(input: {
         taskId: startedTask.id,
         flowExpertId: flowExpert.id,
         agentSessionId: agentSession.id,
-        prompt: dispatch.prompt,
+        prompt: dispatch.prompt || undefined,
         resumeSessionId: flowExpert.sdkSessionId ?? resumeSessionId,
       }).catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error);
-        input.store.failTask(startedTask.id, message);
         input.store.updateAgentSessionStatus(agentSession.id, "failed");
         input.store.updateFlowExpertStatus(flowExpert.id, "failed");
         void input.eventBus.publish(dispatch.flowId, {
@@ -257,7 +266,8 @@ export function createAgentDispatcher(input: {
             expert_id: startedTask.expertId,
             flow_expert_id: startedTask.flowExpertId,
             agent_session_id: agentSession.id,
-            status: "failed",
+            status: input.store.getTask(startedTask.id)?.status ?? startedTask.status,
+            session_status: "failed",
             error_message: message,
           },
         });
@@ -268,6 +278,7 @@ export function createAgentDispatcher(input: {
           agentSessionId: agentSession.id,
           expertId: dispatch.expertId,
           status: "failed",
+          taskStatus: input.store.getTask(startedTask.id)?.status ?? startedTask.status,
           turnOutcome: "errored",
           summary: message,
           error: message,
@@ -289,40 +300,148 @@ export function createAgentDispatcher(input: {
           subject: startedTask.title,
           description: startedTask.description,
           active_form: startedTask.activeForm,
+          progress: startedTask.progress,
           status: startedTask.status,
           expert_id: startedTask.expertId,
           flow_expert_id: startedTask.flowExpertId,
           agent_session_id: startedTask.agentSessionId,
+          revision: startedTask.revision,
         },
       };
     },
 
     async sendMessage(message) {
-      const session = input.store.getAgentSession(message.agentSessionId);
-      if (
-        !session
-        || session.flowId !== message.flowId
-        || session.status !== "streaming"
-        || !session.flowExpertId
-      ) {
+      const flow = input.store.getFlow(message.flowId);
+      const userTurn = input.store.getUserTurn(message.userTurnId);
+      const expert = input.store.getExpert(message.expertId);
+      if (!flow || !userTurn || userTurn.flowId !== message.flowId || userTurn.status !== "active") {
         return {
           accepted: false,
-          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "runtime delivery channel unavailable" },
+          error: { code: "USER_TURN_NOT_ACTIVE", message: "Expert conversation requires an active UserTurn" },
         };
       }
-      const accepted = input.expertRuntime.sendMessage?.({
+      if (!expert || expert.role === "leader") {
+        return {
+          accepted: false,
+          error: { code: "EXPERT_NOT_FOUND", message: `expert not found: ${message.expertId}` },
+        };
+      }
+      const runtimeConfigSnapshot = await readAgentRuntimeConfigSnapshot();
+      if (!isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role)) {
+        return {
+          accepted: false,
+          error: { code: "EXPERT_DISABLED", message: `expert is disabled: ${message.expertId}` },
+        };
+      }
+
+      const flowExpert = input.store.getOrCreateFlowExpert({
         flowId: message.flowId,
-        flowExpertId: session.flowExpertId,
-        agentSessionId: session.id,
-        content: message.content,
-      }) ?? false;
-      if (!accepted) {
+        expertId: message.expertId,
+      });
+      const sessions = input.store.listAgentSessions(message.flowId)
+        .filter((session) => session.flowExpertId === flowExpert.id)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const runningSession = sessions.find((session) => session.status === "streaming");
+      if (runningSession) {
+        const accepted = input.expertRuntime.sendMessage?.({
+          flowId: message.flowId,
+          flowExpertId: flowExpert.id,
+          agentSessionId: runningSession.id,
+          content: message.content,
+        }) ?? false;
+        if (!accepted) {
+          return {
+            accepted: false,
+            error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "runtime delivery channel unavailable" },
+          };
+        }
+        const messageId = await recordLeaderInputAudit(input.store, runningSession, message.summary);
+        return { accepted: true, message_id: messageId };
+      }
+      if (sessions.some((session) => session.status === "queued")) {
         return {
           accepted: false,
-          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "runtime delivery channel unavailable" },
+          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "Expert conversation is still starting" },
         };
       }
-      const messageId = await recordLeaderInputAudit(input.store, session, message.summary);
+
+      const previousSession = sessions[0] ?? null;
+      if (!input.expertRuntime.runConversation) {
+        return {
+          accepted: false,
+          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "Expert conversation runtime is unavailable" },
+        };
+      }
+      const agentSession = input.store.createAgentSession({
+        flowId: message.flowId,
+        userTurnId: message.userTurnId,
+        taskId: null,
+        expertId: message.expertId,
+        flowExpertId: flowExpert.id,
+        sessionId: flowExpert.sdkSessionId,
+        displayName: flowExpert.displayName,
+        resumeFromAgentSessionId: previousSession?.id,
+        status: "queued",
+      });
+      if (!agentSession) {
+        return {
+          accepted: false,
+          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "taskless Expert session could not be created" },
+        };
+      }
+      input.store.updateFlowExpertStatus(flowExpert.id, "queued");
+      await input.eventBus.publish(message.flowId, {
+        type: "session:event",
+        flow_id: message.flowId,
+        data: {
+          event: "created",
+          agent_session_id: agentSession.id,
+          user_turn_id: agentSession.userTurnId,
+          task_id: null,
+          expert_id: agentSession.expertId,
+          flow_expert_id: agentSession.flowExpertId,
+          display_name: agentSession.displayName,
+          status: agentSession.status,
+        },
+      });
+      await input.eventBus.publish(message.flowId, {
+        type: "flow_expert:event",
+        flow_id: message.flowId,
+        data: {
+          event: "updated",
+          flow_expert_id: flowExpert.id,
+          agent_session_id: agentSession.id,
+          expert_id: flowExpert.expertId,
+          display_name: flowExpert.displayName,
+          status: "queued",
+        },
+      });
+      const messageId = await recordLeaderInputAudit(input.store, agentSession, message.summary);
+      void input.expertRuntime.runConversation({
+        flowId: message.flowId,
+        userTurnId: message.userTurnId,
+        flowExpertId: flowExpert.id,
+        agentSessionId: agentSession.id,
+        expertId: message.expertId,
+        content: message.content,
+        resumeSessionId: flowExpert.sdkSessionId ?? previousSession?.sessionId ?? undefined,
+      }).catch(async (error) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        input.store.updateAgentSessionStatus(agentSession.id, "failed");
+        input.store.updateFlowExpertStatus(flowExpert.id, "failed");
+        await input.onConversationFinished?.({
+          flowId: message.flowId,
+          userTurnId: message.userTurnId,
+          agentSessionId: agentSession.id,
+          expertId: message.expertId,
+          status: "failed",
+          turnOutcome: "errored",
+          summary: errorMessage,
+          error: errorMessage,
+          artifactRefs: [],
+          completedAt: new Date().toISOString(),
+        });
+      });
       return { accepted: true, message_id: messageId };
     },
 

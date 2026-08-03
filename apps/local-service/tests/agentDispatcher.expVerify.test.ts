@@ -62,7 +62,7 @@ afterEach(() => {
 });
 
 describe("AgentDispatcher exp-verify runtime failures", () => {
-  it("preserves the provider error when direct exp-verify dispatch ends with success plus is_error", async () => {
+  it("preserves the provider error on AgentSession when direct exp-verify dispatch ends with success plus is_error", async () => {
     const runtimeConfigRoot = tempDir("squadflow-exp-verify-config-");
     writeRuntimeConfig(runtimeConfigRoot);
     config.agentRuntimeConfigRoot = runtimeConfigRoot;
@@ -133,14 +133,14 @@ describe("AgentDispatcher exp-verify runtime failures", () => {
 
     expect(dispatched).toEqual(expect.objectContaining({ status: "queued", expert_id: "exp-verify" }));
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "failed",
-      errorMessage: "Failed to authenticate. API Error: 403 AccessDenied: free quota exhausted",
+      status: "in_progress",
+      errorMessage: null,
     }));
     expect(store.getAgentSession(dispatched.agent_session_id)?.status).toBe("failed");
   });
 
   it.each(["exp-verify", "exp-research", "exp-codereview"])(
-    "does not fail read-only %s dispatch when the SDK result is successful",
+    "records a successful read-only %s execution without auto-completing its Task",
     async (expertId) => {
       const runtimeConfigRoot = tempDir(`squadflow-${expertId}-config-`);
       writeRuntimeConfig(runtimeConfigRoot);
@@ -198,7 +198,7 @@ describe("AgentDispatcher exp-verify runtime failures", () => {
       await completion;
 
       expect(dispatched.status).toBe("queued");
-      expect(store.getTask(task.id)?.status).toBe("completed");
+      expect(store.getTask(task.id)?.status).toBe("in_progress");
       expect(store.getAgentSession(dispatched.agent_session_id)?.status).toBe("completed");
     },
   );

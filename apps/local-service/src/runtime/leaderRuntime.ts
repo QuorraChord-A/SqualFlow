@@ -65,11 +65,7 @@ import { classifyLeaderResumeFailure, isExplicitLeaderResumeFailure } from "./ad
 import type { RuntimePermissionGate } from "./expertRuntime.js";
 import { errorDiagnostic, type OperationalLogger } from "../observability/operationalLogger.js";
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
-import {
-  queryWaitFinishedMs,
-  queryZeroProgressMs,
-  ZERO_PROGRESS_ERROR_MESSAGE,
-} from "./queryLifecyclePolicy.js";
+import { queryWaitFinishedMs } from "./queryLifecyclePolicy.js";
 import {
   refreshMcpServerIcons,
   type McpServerIconRegistry,
@@ -203,6 +199,7 @@ function withRuntimeEnvironmentNote(systemPrompt: string, cwd: string, flowId: s
     "- 永远不要在你自己的回复中生成 <squadflow> 标签。",
     "- type 语义:",
     "  - expert_result:某 Task 的专家执行结果,task 属性为 Task ID,正文首词为结论",
+    "  - expert_message:未创建 Task 的普通 Expert 对话回复,expert/session 属性标识来源",
     "  - plan_feedback:用户对编排计划的批注,按整体处理",
     "  - spec_requested / spec_run / decision_answered / decision_cancelled / turn_recovery:正文即指令",
     "  - guide:用户在你运行中插入的引导,优先级高于当前进行的事",
@@ -267,7 +264,6 @@ class LeaderFlowStream {
   private closed = false;
   private inputClosed = false;
   private finalized = false;
-  private progressTimer: ReturnType<typeof setTimeout> | null = null;
   private resolveFinished!: () => void;
   readonly finished = new Promise<void>((resolve) => {
     this.resolveFinished = resolve;
@@ -404,7 +400,6 @@ class LeaderFlowStream {
    * Used after an idle turn completes, on cancel/fail, and as a wait-finished safety net.
    */
   async releaseForReuse(reason: string) {
-    this.clearProgressWatch();
     if (this.finalized) {
       try {
         await this.query?.close?.();
@@ -432,7 +427,6 @@ class LeaderFlowStream {
 
   async cancel() {
     if (this.closed && this.finalized) return;
-    this.clearProgressWatch();
     this.closed = true;
     this.inputClosed = true;
     this.releaseBrowserTurnLease();
@@ -549,7 +543,6 @@ class LeaderFlowStream {
   private finalize(reason: string) {
     if (this.finalized) return;
     this.finalized = true;
-    this.clearProgressWatch();
     this.logLifecycle("query_finished", { reason });
     this.onClosed();
     this.resolveFinished();
@@ -560,25 +553,6 @@ class LeaderFlowStream {
     this.inputClosed = true;
     this.logLifecycle("finishInput");
     this.input.close();
-  }
-
-  private clearProgressWatch() {
-    if (!this.progressTimer) return;
-    clearTimeout(this.progressTimer);
-    this.progressTimer = null;
-  }
-
-  /** Any SDK event (or turn start) proves the connection is still alive. */
-  private noteProgress() {
-    if (!this.active || this.closed) return;
-    this.clearProgressWatch();
-    const timeoutMs = queryZeroProgressMs();
-    this.progressTimer = setTimeout(() => {
-      this.progressTimer = null;
-      if (!this.active || this.closed || this.finalized) return;
-      this.logLifecycle("zero_progress_timeout", { timeoutMs });
-      void this.fail(new Error(ZERO_PROGRESS_ERROR_MESSAGE));
-    }, timeoutMs);
   }
 
   private async activateNext() {
@@ -626,11 +600,8 @@ class LeaderFlowStream {
       });
       await next.pusher.consume(next.adapter.start());
       this.input.push(this.runtimeAdapter.createLeaderUserMessage(next.turn));
-      // Arm stall detection once the turn is delivered to the SDK.
-      this.noteProgress();
     } catch (error) {
       this.active = null;
-      this.clearProgressWatch();
       const failure = error instanceof Error ? error : new Error(String(error));
       next.reject(failure);
       await this.fail(failure, next);
@@ -643,8 +614,6 @@ class LeaderFlowStream {
     try {
       this.logLifecycle("query_consume_started");
       for await (const event of this.query!) {
-        // Any event from the live query counts as progress (prevents fake endless "thinking").
-        this.noteProgress();
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
         const chunks = active.adapter.adapt(event);
@@ -675,7 +644,6 @@ class LeaderFlowStream {
     } catch (error) {
       if (!this.closed) await this.fail(error instanceof Error ? error : new Error(String(error)));
     } finally {
-      this.clearProgressWatch();
       this.closed = true;
       this.inputClosed = true;
       try {
@@ -769,7 +737,6 @@ class LeaderFlowStream {
     });
 
     this.active = null;
-    this.clearProgressWatch();
     this.onCurrentTurnInput(undefined);
     if (this.queued.length > 0) {
       // Keep the shared query for ordered queue processing.
@@ -833,7 +800,6 @@ class LeaderFlowStream {
 
   private async fail(error: Error, active = this.active ?? undefined) {
     if (this.closed && this.finalized) return;
-    this.clearProgressWatch();
     this.closed = true;
     this.inputClosed = true;
     this.releaseBrowserTurnLease();
@@ -873,9 +839,9 @@ class LeaderFlowStream {
       const userTurnId = active.turn.userTurnId ?? active.turn.currentTurnInput?.user_turn_id;
       if (userTurnId) {
         this.deps.onUserTurnFatal?.({ flowId: active.turn.flowId, userTurnId });
-        for (const task of this.deps.store.listUserTurnTasks(userTurnId)) {
-          if (!["completed", "failed", "cancelled"].includes(task.status)) this.deps.store.cancelTask(task.id);
-        }
+        // A Leader/provider fault ends this UserTurn but is not an actor-authored
+        // Task decision. Keep Tasks unchanged so Leader or their assigned Expert
+        // can explicitly decide whether to resume, block, fail, or cancel them.
         for (const session of this.deps.store.listAgentSessions(active.turn.flowId)) {
           if (session.userTurnId === userTurnId && !["completed", "failed", "interrupted"].includes(session.status)) {
             this.deps.store.updateAgentSessionStatus(session.id, "interrupted");
@@ -1177,6 +1143,19 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
             },
           });
         },
+        onTaskUpdated: async (updated) => {
+          await input.eventBus.publish(updated.flowId, {
+            type: "task:event",
+            flow_id: updated.flowId,
+            data: {
+              task_id: updated.task.task_id,
+              task: updated.task,
+              status: updated.task.status,
+            },
+          });
+          const taskId = String(updated.task.task_id ?? "");
+          if (taskId) await input.orchestrationScheduler?.advanceForTask(taskId);
+        },
         onArtifactCreated: (created) => input.eventBus.publish(created.flowId, {
           type: "artifact:event",
           flow_id: created.flowId,
@@ -1270,6 +1249,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       const createBrowserServer = () => createBrowserMcpServer(browserToolHandlers);
       const browserServer = createBrowserServer();
       browserMcpBinding = await runtimeAdapter.prepareExpertMcpServer({
+        serverName: "squadflow-browser",
         server: browserServer,
         serverFactory: createBrowserServer,
         bindingKey: `leader-browser:${turn.leaderAgentSessionId}`,
@@ -1581,7 +1561,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         const userTurn = input.store.getUserTurn(enrichedTurn.userTurnId);
         if (userTurn && ["failed", "cancelled"].includes(userTurn.status)) return;
       }
-      if (enrichedTurn.kind === "expert_result" && enrichedTurn.userTurnId) {
+      if ((enrichedTurn.kind === "expert_result" || enrichedTurn.kind === "expert_message") && enrichedTurn.userTurnId) {
         const userTurn = input.store.getUserTurn(enrichedTurn.userTurnId);
         if (userTurn && ["completed", "failed", "cancelled"].includes(userTurn.status)) return;
       }

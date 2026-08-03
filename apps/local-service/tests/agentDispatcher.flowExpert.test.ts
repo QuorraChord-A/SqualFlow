@@ -26,7 +26,7 @@ function setup() {
 }
 
 describe("AgentDispatcher Flow Expert reuse", () => {
-  it("reuses one Flow Expert and initially queues both task runtimes", async () => {
+  it("reuses one Flow Expert while AgentSessions queue independently of Task state", async () => {
     const { store, flow, userTurn, cleanup } = setup();
     const runTask = vi.fn(async () => undefined);
     const eventBus = { publish: vi.fn(async () => undefined) };
@@ -42,11 +42,11 @@ describe("AgentDispatcher Flow Expert reuse", () => {
       expect(second.flow_expert_id).toBe(first.flow_expert_id);
       expect(store.getTask(task1.id)).toEqual(expect.objectContaining({
         flowExpertId: first.flow_expert_id,
-        status: "queued_for_expert",
+        status: "in_progress",
       }));
       expect(store.getTask(task2.id)).toEqual(expect.objectContaining({
         flowExpertId: first.flow_expert_id,
-        status: "queued_for_expert",
+        status: "in_progress",
       }));
       expect(store.getAgentSession(first.agent_session_id)?.status).toBe("queued");
       expect(store.getAgentSession(second.agent_session_id)?.status).toBe("queued");

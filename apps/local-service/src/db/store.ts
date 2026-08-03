@@ -401,7 +401,9 @@ export function createStore(databasePath: string) {
           expert_id TEXT,
           flow_expert_id TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
+          revision INTEGER NOT NULL DEFAULT 1,
           active_form TEXT NOT NULL DEFAULT '',
+          progress TEXT,
           agent_session_id TEXT,
           metadata_json TEXT NOT NULL DEFAULT '{}',
           acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
@@ -615,6 +617,7 @@ export function createStore(databasePath: string) {
       addColumnIfMissing(sqlite, "flows", "last_output_completed_at", "TEXT");
       addColumnIfMissing(sqlite, "flows", "name_generation_status", "TEXT NOT NULL DEFAULT 'generated'");
       addColumnIfMissing(sqlite, "tasks", "active_form", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(sqlite, "tasks", "progress", "TEXT");
       addColumnIfMissing(sqlite, "tasks", "flow_expert_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "user_turn_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "flow_expert_id", "TEXT");
@@ -664,6 +667,7 @@ export function createStore(databasePath: string) {
       addColumnIfMissing(sqlite, "spec_revisions", "overview", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "spec_revisions", "file_name", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "tasks", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
+      addColumnIfMissing(sqlite, "tasks", "revision", "INTEGER NOT NULL DEFAULT 1");
       addColumnIfMissing(sqlite, "agent_context_usage_snapshots", "cache_input_tokens", "INTEGER");
       addColumnIfMissing(sqlite, "agent_context_usage_snapshots", "cache_read_input_tokens", "INTEGER");
       addColumnIfMissing(sqlite, "agent_context_usage_snapshots", "cache_creation_input_tokens", "INTEGER");
@@ -694,6 +698,7 @@ export function createStore(databasePath: string) {
       sqlite.exec("DROP TABLE IF EXISTS scoped_authorizations");
       sqlite.prepare("UPDATE tasks SET status = 'pending' WHERE status = 'ready'").run();
       sqlite.prepare("UPDATE tasks SET status = 'in_progress' WHERE status = 'running'").run();
+      sqlite.prepare("UPDATE tasks SET status = 'in_progress' WHERE status IN ('queued_for_expert', 'recovery_pending')").run();
       sqlite.exec(`
         DROP TABLE IF EXISTS workspaces;
         CREATE UNIQUE INDEX IF NOT EXISTS user_turns_one_open_per_flow ON user_turns(flow_id)
@@ -1025,7 +1030,7 @@ export function createStore(databasePath: string) {
           if (!turn || turn.status !== "active") continue;
 
           const hasRecoverableTask = this.listUserTurnTasks(turn.id).some((task) =>
-            ["queued_for_expert", "in_progress", "recovery_pending"].includes(task.status)
+            task.status === "in_progress"
           );
           const hasPendingUserAction = this.listDecisionCards(flowId).some((card) =>
             card.userTurnId === turn.id && card.status === "pending"
@@ -1848,7 +1853,9 @@ export function createStore(databasePath: string) {
           expertId: null,
           flowExpertId: null,
           status: "pending",
+          revision: 1,
           activeForm: input.activeForm ?? "",
+          progress: null,
           agentSessionId: null,
           metadataJson: "{}",
           acceptanceCriteriaJson: "[]",
@@ -2203,7 +2210,7 @@ export function createStore(databasePath: string) {
       }
 
       const taskIdForNode = (nodeId: string) => reusedTaskIds.get(nodeId) ?? createdTaskIds.get(nodeId)!;
-      const activeTaskStatuses = new Set(["in_progress", "queued_for_expert", "recovery_pending"]);
+      const activeTaskStatuses = new Set(["in_progress"]);
       sqlite.transaction(() => {
         if (previousRun) {
           for (const previousMapping of db.select().from(planNodeTasks).where(eq(planNodeTasks.planRunId, previousRun.id)).all()) {
@@ -2239,7 +2246,8 @@ export function createStore(databasePath: string) {
             db.insert(tasks).values({
               id: taskId, flowId: plan.flowId, userTurnId: plan.userTurnId,
               title: node.title, description: node.description, expertId: node.expertId,
-              flowExpertId: null, status: "pending", activeForm: node.title,
+              flowExpertId: null, status: "pending", revision: 1, activeForm: node.title,
+              progress: null,
               agentSessionId: null, metadataJson: JSON.stringify({ plan_revision_id: revisionId, plan_node_id: node.id, resource_keys: parseJsonStringArray(node.resourceKeysJson) }),
               acceptanceCriteriaJson: node.acceptanceCriteriaJson, resultArtifactIdsJson: "[]", resultJson: null, errorMessage: null,
               createdByAgentSessionId: revision.sourceAgentSessionId, createdAt: timestamp, startedAt: null, finishedAt: null, updatedAt: timestamp,
@@ -2354,7 +2362,9 @@ export function createStore(databasePath: string) {
         expertId: input.expertId ?? null,
         flowExpertId: null,
         status: "pending",
+        revision: 1,
         activeForm: input.activeForm ?? "",
+        progress: null,
         agentSessionId: null,
         metadataJson: "{}",
         acceptanceCriteriaJson: JSON.stringify(input.acceptanceCriteria ?? []),
@@ -2417,6 +2427,9 @@ export function createStore(databasePath: string) {
           db.select().from(tasks).where(eq(tasks.id, edge.dependsOnTaskId)).get()?.status !== "completed"
         )) return;
 
+        const currentSession = task.agentSessionId
+          ? db.select().from(agentSessions).where(eq(agentSessions.id, task.agentSessionId)).get()
+          : undefined;
         if (input.resumeFromAgentSessionId) {
           const resumeSession = db.select().from(agentSessions)
             .where(eq(agentSessions.id, input.resumeFromAgentSessionId))
@@ -2426,12 +2439,14 @@ export function createStore(databasePath: string) {
             || resumeSession.flowId !== input.flowId
             || resumeSession.taskId !== task.id
             || resumeSession.expertId !== input.expertId
-            || task.agentSessionId !== resumeSession.id
-            || !["completed", "failed"].includes(resumeSession.status)
-            || !resumeSession.sessionId
-            || !["completed", "failed", "cancelled"].includes(task.status)
+            || !["completed", "failed", "interrupted"].includes(resumeSession.status)
           ) return;
-        } else if (task.status !== "pending" || task.agentSessionId) {
+        }
+        if (task.status === "pending") {
+          if (task.agentSessionId) return;
+        } else if (task.status === "in_progress") {
+          if (currentSession && !["completed", "failed", "interrupted"].includes(currentSession.status)) return;
+        } else {
           return;
         }
 
@@ -2454,8 +2469,9 @@ export function createStore(databasePath: string) {
             expertId: input.expertId,
             flowExpertId: input.flowExpertId,
             agentSessionId: sessionId,
-            status: "queued_for_expert",
-            startedAt: null,
+            status: "in_progress",
+            revision: task.revision + 1,
+            startedAt: task.startedAt ?? timestamp,
             finishedAt: null,
             resultJson: null,
             errorMessage: null,
@@ -2536,6 +2552,7 @@ export function createStore(databasePath: string) {
             expertId: input.expertId,
             agentSessionId,
             status: "in_progress",
+            revision: task.revision + 1,
             startedAt: timestamp,
             updatedAt: timestamp,
           })
@@ -2558,7 +2575,7 @@ export function createStore(databasePath: string) {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       if (!existing || existing.agentSessionId) return undefined;
       db.update(tasks)
-        .set({ agentSessionId, updatedAt: now() })
+        .set({ agentSessionId, revision: existing.revision + 1, updatedAt: now() })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -2599,7 +2616,7 @@ export function createStore(databasePath: string) {
       if (!dependenciesComplete) return undefined;
       const timestamp = now();
       db.update(tasks)
-        .set({ status: "in_progress", agentSessionId, startedAt: timestamp, updatedAt: timestamp })
+        .set({ status: "in_progress", agentSessionId, revision: existing.revision + 1, startedAt: timestamp, updatedAt: timestamp })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -2609,7 +2626,7 @@ export function createStore(databasePath: string) {
       if (!existing || existing.status !== "in_progress") return undefined;
       const timestamp = now();
       db.update(tasks)
-        .set({ status: "completed", resultJson, finishedAt: timestamp, updatedAt: timestamp })
+        .set({ status: "completed", revision: existing.revision + 1, resultJson, finishedAt: timestamp, updatedAt: timestamp })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -2617,29 +2634,48 @@ export function createStore(databasePath: string) {
     updateTask(taskId: string, input: {
       title?: string;
       description?: string;
-      status?: "pending" | "queued_for_expert" | "recovery_pending" | "in_progress" | "completed" | "failed" | "cancelled";
+      status?: "pending" | "in_progress" | "blocked" | "completed" | "failed" | "cancelled";
+      expectedRevision?: number;
       activeForm?: string;
+      progress?: string | null;
+      expertId?: string;
       owner?: string;
       metadata?: Record<string, unknown>;
       addBlocks?: string[];
       addBlockedBy?: string[];
-      resultJson?: string;
-      errorMessage?: string;
+      resultJson?: string | null;
+      errorMessage?: string | null;
     }) {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       if (!existing) return undefined;
+      if (input.expectedRevision !== undefined && input.expectedRevision !== existing.revision) return undefined;
+
+      const isReassignment = input.expertId !== undefined && input.expertId !== existing.expertId;
+      if (isReassignment && !db.select().from(experts).where(eq(experts.id, input.expertId!)).get()) {
+        return undefined;
+      }
 
       const allowedTransitions: Record<string, Set<string>> = {
-        pending: new Set(["pending", "queued_for_expert", "in_progress", "cancelled"]),
-        queued_for_expert: new Set(["queued_for_expert", "recovery_pending", "in_progress", "failed", "cancelled"]),
-        recovery_pending: new Set(["recovery_pending", "in_progress", "failed", "cancelled"]),
-        in_progress: new Set(["in_progress", "completed", "failed", "cancelled"]),
-        completed: new Set(["completed"]),
-        failed: new Set(["failed"]),
-        cancelled: new Set(["cancelled"]),
+        pending: new Set(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]),
+        in_progress: new Set(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]),
+        blocked: new Set(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]),
+        completed: new Set(["completed", "pending"]),
+        failed: new Set(["failed", "pending"]),
+        cancelled: new Set(["cancelled", "pending"]),
       };
       if (input.status && !allowedTransitions[existing.status]?.has(input.status)) {
         return undefined;
+      }
+      const isReopening = input.status === "pending" && existing.status !== "pending";
+      if (isReopening && existing.agentSessionId) {
+        const session = db.select().from(agentSessions).where(eq(agentSessions.id, existing.agentSessionId)).get();
+        if (session && ["queued", "streaming"].includes(session.status)) return undefined;
+      }
+      if (isReassignment) {
+        const currentSession = existing.agentSessionId
+          ? db.select().from(agentSessions).where(eq(agentSessions.id, existing.agentSessionId)).get()
+          : undefined;
+        if (currentSession && ["queued", "streaming"].includes(currentSession.status)) return undefined;
       }
 
       function hasCycle(startTaskId: string, targetDependsOnTaskId: string): boolean {
@@ -2697,20 +2733,41 @@ export function createStore(databasePath: string) {
       }
 
       const timestamp = now();
-      const finishedAt = input.status && ["completed", "failed", "cancelled"].includes(input.status)
-        ? timestamp
-        : existing.finishedAt;
+      const nextStatus = input.status ?? existing.status;
+      // Reassignment is an explicit Leader decision. A task that has already
+      // started must first be returned to pending so the hand-off is visible
+      // rather than silently looking like the new Expert was already working.
+      if (isReassignment && nextStatus !== "pending") return undefined;
+      const isTerminal = ["completed", "failed", "cancelled"].includes(nextStatus);
+      const finishedAt = isTerminal
+        ? (input.status !== undefined && input.status !== existing.status ? timestamp : existing.finishedAt ?? timestamp)
+        : null;
+      const startedAt = isReopening
+        ? null
+        : nextStatus === "in_progress"
+          ? existing.startedAt ?? timestamp
+          : existing.startedAt;
 
       sqlite.transaction(() => {
         db.update(tasks)
           .set({
             title: input.title ?? existing.title,
             description: input.description ?? existing.description,
-            status: input.status ?? existing.status,
+            status: nextStatus,
+            revision: existing.revision + 1,
             activeForm: input.activeForm ?? existing.activeForm,
+            progress: input.progress === undefined ? existing.progress : input.progress,
+            expertId: input.expertId ?? existing.expertId,
+            // A FlowExpert owns a provider conversation. Moving this one Task
+            // to a different Expert deliberately clears the source association;
+            // the next explicit dispatch uses the target FlowExpert (and never
+            // resumes the source Expert's provider session).
+            flowExpertId: isReassignment ? null : existing.flowExpertId,
+            agentSessionId: isReopening || isReassignment ? null : existing.agentSessionId,
             metadataJson: JSON.stringify(metadata),
-            resultJson: input.resultJson ?? existing.resultJson,
-            errorMessage: input.errorMessage ?? existing.errorMessage,
+            resultJson: isReopening ? null : (input.resultJson === undefined ? existing.resultJson : input.resultJson),
+            errorMessage: isReopening ? null : (input.errorMessage === undefined ? existing.errorMessage : input.errorMessage),
+            startedAt,
             finishedAt,
             updatedAt: timestamp,
           })
@@ -2739,6 +2796,7 @@ export function createStore(databasePath: string) {
       db.update(tasks)
         .set({
           status: "failed",
+          revision: existing.revision + 1,
           errorMessage,
           resultJson: resultJson ?? existing.resultJson,
           finishedAt: timestamp,
@@ -2753,7 +2811,7 @@ export function createStore(databasePath: string) {
       if (!existing || ["completed", "failed", "cancelled"].includes(existing.status)) return undefined;
       const timestamp = now();
       db.update(tasks)
-        .set({ status: "cancelled", resultJson: resultJson ?? existing.resultJson, finishedAt: timestamp, updatedAt: timestamp })
+        .set({ status: "cancelled", revision: existing.revision + 1, resultJson: resultJson ?? existing.resultJson, finishedAt: timestamp, updatedAt: timestamp })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -2934,17 +2992,18 @@ export function createStore(databasePath: string) {
         .set({
           flowExpertId,
           agentSessionId: agentSessionId ?? existing.agentSessionId,
+          revision: existing.revision + 1,
           updatedAt: now(),
         })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
     },
-    setTaskRuntimeStatus(taskId: string, status: "queued_for_expert" | "in_progress" | "recovery_pending" | "completed" | "failed" | "cancelled") {
+    setTaskRuntimeStatus(taskId: string, status: "in_progress" | "blocked" | "completed" | "failed" | "cancelled") {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       if (!existing) return undefined;
       db.update(tasks)
-        .set({ status, updatedAt: now() })
+        .set({ status, revision: existing.revision + 1, updatedAt: now() })
         .where(eq(tasks.id, taskId))
         .run();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -2957,14 +3016,10 @@ export function createStore(databasePath: string) {
         || !session
         || session.taskId !== task.id
         || session.flowExpertId !== task.flowExpertId
-        || !["queued_for_expert", "recovery_pending"].includes(task.status)
+        || task.status !== "in_progress"
         || !["queued", "interrupted"].includes(session.status)
       ) return undefined;
       const timestamp = now();
-      db.update(tasks)
-        .set({ status: "in_progress", startedAt: task.startedAt ?? timestamp, updatedAt: timestamp })
-        .where(eq(tasks.id, taskId))
-        .run();
       db.update(agentSessions)
         .set({ status: "streaming", updatedAt: timestamp })
         .where(eq(agentSessions.id, agentSessionId))
@@ -2976,7 +3031,7 @@ export function createStore(databasePath: string) {
           .run();
       }
       return {
-        task: db.select().from(tasks).where(eq(tasks.id, taskId)).get()!,
+        task,
         agentSession: db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get()!,
       };
     },
@@ -3024,28 +3079,22 @@ export function createStore(databasePath: string) {
           });
         };
 
-        if (task.status === "queued_for_expert" && session.status === "queued") {
+        if (task.status === "in_progress" && session.status === "queued") {
           pushRecoveryItem(false);
           continue;
         }
 
         if (task.status === "in_progress" && session.status === "streaming") {
           const timestamp = now();
-          sqlite.transaction(() => {
-            db.update(tasks)
-              .set({ status: "recovery_pending", updatedAt: timestamp })
-              .where(eq(tasks.id, task.id))
-              .run();
-            db.update(agentSessions)
-              .set({ status: "interrupted", updatedAt: timestamp })
-              .where(eq(agentSessions.id, session.id))
-              .run();
-          })();
+          db.update(agentSessions)
+            .set({ status: "interrupted", updatedAt: timestamp })
+            .where(eq(agentSessions.id, session.id))
+            .run();
           pushRecoveryItem(true);
           continue;
         }
 
-        if (task.status === "recovery_pending" && session.status === "interrupted") {
+        if (task.status === "in_progress" && session.status === "interrupted") {
           pushRecoveryItem(true);
         }
       }
@@ -3266,7 +3315,7 @@ export function createStore(databasePath: string) {
       messageId: string;
       answers?: DecisionAnswers;
       userDeniedCommand?: {
-        scopeKind: "expert_task" | "leader_user_turn";
+        scopeKind: "expert_task" | "expert_conversation" | "leader_user_turn";
         userTurnId: string;
         taskId?: string;
         agentSessionId?: string;
@@ -3310,11 +3359,19 @@ export function createStore(databasePath: string) {
           const validScope = existing.userTurnId === denied.userTurnId
             && (denied.scopeKind === "leader_user_turn"
               ? !denied.taskId && !denied.agentSessionId
-              : Boolean(
+              : denied.scopeKind === "expert_task"
+                ? Boolean(
                   task
                   && task.flowId === input.flowId
                   && task.userTurnId === denied.userTurnId
                   && (!denied.agentSessionId || (session?.flowId === input.flowId && session.taskId === task.id)),
+                )
+                : Boolean(
+                  !denied.taskId
+                  && session
+                  && session.flowId === input.flowId
+                  && session.userTurnId === denied.userTurnId
+                  && session.taskId === null,
                 ));
           if (!validScope) throw new Error("permission denial scope does not match decision card");
           const existingEvents = db.select().from(eventLog).where(eq(eventLog.flowId, input.flowId)).all();
@@ -3344,7 +3401,7 @@ export function createStore(databasePath: string) {
     hasUserDeniedPermissionCommand(input: {
       flowId: string;
       userTurnId: string;
-      scopeKind: "expert_task" | "leader_user_turn";
+      scopeKind: "expert_task" | "expert_conversation" | "leader_user_turn";
       taskId?: string;
       cwd: string;
       commandSha256: string;
@@ -3355,7 +3412,7 @@ export function createStore(databasePath: string) {
       )).all().some((event) => {
         if (event.userTurnId !== input.userTurnId) return false;
         if (input.scopeKind === "expert_task" && event.taskId !== input.taskId) return false;
-        if (input.scopeKind === "leader_user_turn" && event.taskId !== null) return false;
+        if (input.scopeKind !== "expert_task" && event.taskId !== null) return false;
         const payload = parseJsonObject(event.payloadJson);
         return payload.scope_kind === input.scopeKind
           && payload.cwd === input.cwd

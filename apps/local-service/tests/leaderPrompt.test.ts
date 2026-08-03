@@ -27,6 +27,7 @@ function expertResultInput(summary: string) {
       taskId: "task-1",
       agentSessionId: "ags-1",
       expertId: "exp-backend",
+      taskStatus: "in_progress",
       turnOutcome: "completed",
       summary,
       error: null,
@@ -47,7 +48,7 @@ describe("buildLeaderPrompt", () => {
       kind: "event",
       type: "expert_result",
       attrs: { task: "task-1" },
-      body: "完成：done",
+      body: "Expert 本次回复（Task 仍为 in_progress）：done\n当前 Task 状态：in_progress",
     })]);
     expect(prompt).not.toContain("agentSessionId");
     expect(prompt).not.toContain("expertId");
@@ -58,7 +59,23 @@ describe("buildLeaderPrompt", () => {
     const segment = parseMessageSegments(prompt, "flow-1")[0];
 
     expect(segment).toMatchObject({ kind: "event", type: "expert_result" });
-    expect(segment?.kind === "event" ? segment.body : "").toBe(`完成：${"x".repeat(2000)}`);
+    expect(segment?.kind === "event" ? segment.body : "").toBe(
+      `Expert 本次回复（Task 仍为 in_progress）：${"x".repeat(2000)}\n当前 Task 状态：in_progress`,
+    );
+  });
+
+  it("reports Task completion only when an actor explicitly marked the Task completed", () => {
+    const prompt = buildLeaderPrompt({
+      ...expertResultInput("done"),
+      expertResult: {
+        ...expertResultInput("done").expertResult,
+        taskStatus: "completed",
+      },
+    });
+    const segment = parseMessageSegments(prompt, "flow-1")[0];
+    expect(segment?.kind === "event" ? segment.body : "").toBe(
+      "Task 已标记完成：done\n当前 Task 状态：completed",
+    );
   });
 
   it("keeps user text raw and appends spec, plan feedback and browser events", () => {

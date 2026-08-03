@@ -385,8 +385,8 @@ export function createClaudeAgentRuntimeAdapter(input: { query?: ClaudeQueryFn }
       mcpServerConfig: { type: "sdk", name: "squadflow-leader", instance: server },
       close: async () => {},
     }),
-    prepareExpertMcpServer: async ({ server }) => ({
-      mcpServerConfig: { type: "sdk", name: "squadflow-browser", instance: server },
+    prepareExpertMcpServer: async ({ serverName, server }) => ({
+      mcpServerConfig: { type: "sdk", name: serverName, instance: server },
       close: async () => {},
     }),
     createInputQueue: () => new AsyncMessageQueue<unknown>(),

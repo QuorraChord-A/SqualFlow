@@ -9,9 +9,14 @@ import { ChatJournal } from "../ws/chatJournal.js";
 import { EventBus } from "../ws/eventBus.js";
 import { createLeaderRuntime } from "../runtime/leaderRuntime.js";
 import type { LeaderRuntime } from "../runtime/leaderRuntime.js";
-import { createExpertRuntime, type ExpertRuntime, type ExpertTaskFinishedEvent } from "../runtime/expertRuntime.js";
+import {
+  createExpertRuntime,
+  type ExpertConversationFinishedEvent,
+  type ExpertRuntime,
+  type ExpertTaskFinishedEvent,
+} from "../runtime/expertRuntime.js";
 import { createAgentDispatcher } from "../runtime/agentDispatcher.js";
-import { createOrchestrationScheduler, type OrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
+import { createOrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
 import { listUserTurnsNeedingRecovery } from "../runtime/userTurnLifecycle.js";
 import { pauseUserTurnIfAwaitingPlanFeedback, publishUserTurnEvent } from "../domain/userTurn.js";
 import { ContextCompactionState } from "../runtime/contextCompactionState.js";
@@ -48,12 +53,10 @@ type CreateAppOptions = {
 
 export async function routeExpertResultToLeader(input: {
   store: Store;
-  orchestrationScheduler?: Pick<OrchestrationScheduler, "advanceForTask">;
   leaderRuntime: Pick<LeaderRuntime, "runLeaderTurn">;
   event: ExpertTaskFinishedEvent;
 }) {
   const { event } = input;
-  await input.orchestrationScheduler?.advanceForTask(event.taskId);
   const leaderAgentSession = input.store
     .listAgentSessions(event.flowId)
     .find((session) => session.expertId === "exp-leader" && session.taskId === null);
@@ -76,6 +79,50 @@ export async function routeExpertResultToLeader(input: {
     userTurnId: event.userTurnId,
     expertResult: {
       taskId: event.taskId,
+      agentSessionId: event.agentSessionId,
+      expertId: event.expertId,
+      status: event.status,
+      taskStatus: event.taskStatus,
+      turnOutcome: event.turnOutcome,
+      summary: event.summary,
+      error: event.error,
+      artifactRefs: event.artifactRefs,
+      completedAt: event.completedAt,
+    },
+    leaderAgentSessionId: leaderAgentSession.id,
+    leaderSessionId,
+    resumeSessionId: providerLeaderSessionId ?? undefined,
+  });
+  return true;
+}
+
+export async function routeExpertMessageToLeader(input: {
+  store: Store;
+  leaderRuntime: Pick<LeaderRuntime, "runLeaderTurn">;
+  event: ExpertConversationFinishedEvent;
+}) {
+  const { event } = input;
+  const leaderAgentSession = input.store
+    .listAgentSessions(event.flowId)
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
+  const flowLeaderSessionId = input.store.getFlow(event.flowId)?.leaderSessionId ?? null;
+  const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
+    ? flowLeaderSessionId
+    : leaderAgentSession?.sessionId ?? null;
+  const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
+  const userTurn = input.store.getUserTurn(event.userTurnId);
+  if (
+    !leaderAgentSession
+    || !leaderSessionId
+    || !userTurn
+    || ["completed", "failed", "cancelled"].includes(userTurn.status)
+  ) return false;
+
+  await input.leaderRuntime.runLeaderTurn({
+    flowId: event.flowId,
+    kind: "expert_message",
+    userTurnId: event.userTurnId,
+    expertMessage: {
       agentSessionId: event.agentSessionId,
       expertId: event.expertId,
       status: event.status,
@@ -159,10 +206,12 @@ export function createApp(options: CreateAppOptions = {}) {
   const desktopBridge = new DesktopBridge();
   let leaderRuntime: LeaderRuntime;
   let expertRuntime: ExpertRuntime;
-  let orchestrationScheduler: OrchestrationScheduler;
+  // This is a deterministic plan ledger only. It never decides or changes a
+  // Task; explicit Leader/Expert task-tool mutations are its only inputs.
+  const orchestrationScheduler = createOrchestrationScheduler({ store, eventBus });
   const deliverExpertResultToLeader = async (event: ExpertTaskFinishedEvent) => {
     try {
-      await routeExpertResultToLeader({ store, orchestrationScheduler, leaderRuntime, event });
+      await routeExpertResultToLeader({ store, leaderRuntime, event });
     } catch (error) {
       app.log.error({
         flowId: event.flowId,
@@ -171,9 +220,8 @@ export function createApp(options: CreateAppOptions = {}) {
         ...errorDiagnostic(error),
       }, "failed to deliver Expert result to Leader");
       expertRuntime?.cancelUserTurn({ flowId: event.flowId, userTurnId: event.userTurnId });
-      for (const task of store.listUserTurnTasks(event.userTurnId)) {
-        if (!['completed', 'failed', 'cancelled'].includes(task.status)) store.cancelTask(task.id);
-      }
+      // A delivery/provider failure is not an actor-authored Task cancellation.
+      // Preserve Task state; only the execution transport/UserTurn is stopped.
       for (const session of store.listAgentSessions(event.flowId)) {
         if (session.userTurnId === event.userTurnId && ['queued', 'streaming'].includes(session.status)) {
           store.updateAgentSessionStatus(session.id, 'interrupted');
@@ -189,6 +237,21 @@ export function createApp(options: CreateAppOptions = {}) {
       }, "UserTurn failed after Leader delivery error");
     }
   };
+  const deliverExpertMessageToLeader = async (event: ExpertConversationFinishedEvent) => {
+    try {
+      await routeExpertMessageToLeader({ store, leaderRuntime, event });
+    } catch (error) {
+      app.log.error({
+        flowId: event.flowId,
+        userTurnId: event.userTurnId,
+        agentSessionId: event.agentSessionId,
+        ...errorDiagnostic(error),
+      }, "failed to deliver taskless Expert message to Leader");
+      expertRuntime?.cancelUserTurn({ flowId: event.flowId, userTurnId: event.userTurnId });
+      const failedTurn = store.failUserTurn(event.userTurnId, "failed");
+      if (failedTurn) await publishUserTurnEvent(eventBus, failedTurn);
+    }
+  };
   expertRuntime = createExpertRuntime({
     store,
     eventBus,
@@ -198,9 +261,30 @@ export function createApp(options: CreateAppOptions = {}) {
     desktopBridge,
     logger: app.log,
     onTaskFinished: deliverExpertResultToLeader,
+    onConversationFinished: deliverExpertMessageToLeader,
+    onTaskUpdated: async ({ flowId, task }) => {
+      await eventBus.publish(flowId, {
+        type: "task:event",
+        flow_id: flowId,
+        data: {
+          task_id: task.task_id,
+          user_turn_id: task.user_turn_id,
+          expert_id: task.assignment.expert_id,
+          flow_expert_id: task.assignment.flow_expert_id,
+          status: task.status,
+          task,
+        },
+      });
+      await orchestrationScheduler.advanceForTask(task.task_id);
+    },
   });
-  const agentDispatcher = createAgentDispatcher({ store, eventBus, expertRuntime, onTaskFinished: deliverExpertResultToLeader });
-  orchestrationScheduler = createOrchestrationScheduler({ store, eventBus });
+  const agentDispatcher = createAgentDispatcher({
+    store,
+    eventBus,
+    expertRuntime,
+    onTaskFinished: deliverExpertResultToLeader,
+    onConversationFinished: deliverExpertMessageToLeader,
+  });
   leaderRuntime = createLeaderRuntime({
     store,
     eventBus,

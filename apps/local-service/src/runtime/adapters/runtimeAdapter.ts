@@ -162,7 +162,8 @@ export type BuildExpertRuntimeOptionsInput = {
   scratchDir: string;
   capabilities: RuntimeCapability[];
   mcpTools: string[];
-  mcpServerConfig?: unknown;
+  /** Named platform MCP servers available to this Expert runtime. */
+  mcpServerConfigs?: Record<string, unknown>;
   canUseTool?: RuntimeToolPermission;
   maxTurns?: number;
   resume?: string;
@@ -204,6 +205,8 @@ export type AgentRuntimeAdapter = {
     bridgeRegistry?: McpBridgeRegistry;
   }) => Promise<RuntimeLeaderMcpBinding>;
   prepareExpertMcpServer: (input: {
+    /** The MCP server name exposed to the provider, e.g. squadflow-expert-task. */
+    serverName: string;
     server: McpServer;
     serverFactory?: () => McpServer;
     bindingKey?: string;

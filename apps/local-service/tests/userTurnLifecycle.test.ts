@@ -37,11 +37,11 @@ describe("UserTurn single lifecycle", () => {
     store.sqlite.close();
   });
 
-  it.each(["queued_for_expert", "recovery_pending"])("recognizes %s as a valid non-terminal Task status", (status) => {
+  it.each(["in_progress", "blocked"])("recognizes %s as a valid non-terminal Task status", (status) => {
     expect(TaskStatusSchema.parse(status)).toBe(status);
   });
 
-  it.each(["queued_for_expert", "recovery_pending"] as const)("does not settle while a Task is %s", (status) => {
+  it.each(["in_progress", "blocked"] as const)("does not settle while a Task is %s", (status) => {
     const { store, flow } = setup();
     const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const started = store.startUserTurnWork({

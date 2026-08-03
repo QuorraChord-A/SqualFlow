@@ -58,10 +58,17 @@ export const ResolvePlanFeedbackInput = z.object({
 export const UpdateTaskInput = z.object({
   flow_id: z.string().min(1),
   task_id: z.string().min(1),
-  status: z.enum(["pending", "queued_for_expert", "recovery_pending", "in_progress", "completed", "failed", "cancelled"]).optional(),
+  status: z.enum(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]).optional(),
+  expected_revision: z.number().int().positive().optional(),
   subject: z.string().min(1).optional(),
   description: z.string().min(1).optional(),
   active_form: z.string().optional(),
+  progress: z.string().nullable().optional(),
+  /**
+   * Explicit Leader reassignment. The task stays one durable Task; a later
+   * dispatch creates a new AgentSession for this selected Expert.
+   */
+  expert_id: z.string().min(1).optional(),
   owner: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   add_blocks: z.array(z.string()).optional(),
@@ -81,7 +88,7 @@ export const DispatchAgentInput = z.object({
   flow_id: z.string().min(1),
   task_id: z.string().min(1),
   expert_id: z.string().min(1),
-  prompt: z.string().min(1),
+  prompt: z.string().min(1).optional().default(""),
   resume_agent_session_id: z.string().optional().default(""),
 }).strict();
 
@@ -92,7 +99,7 @@ export const CancelAgentInput = z.object({
 
 export const SendMessageInput = z.object({
   flow_id: z.string().min(1),
-  agent_session_id: z.string().min(1),
+  expert_id: z.string().min(1),
   content: z.string().min(1),
   summary: z.string().optional(),
 }).strict();

@@ -18,10 +18,6 @@ import { ChatJournal } from "../src/ws/chatJournal.js";
 import { EventBus } from "../src/ws/eventBus.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
 import { DesktopBridge } from "../src/server/desktopBridge.js";
-import {
-  resetQueryLifecycleTimeoutsForTests,
-  setQueryLifecycleTimeoutsForTests,
-} from "../src/runtime/queryLifecyclePolicy.js";
 
 const dirs: string[] = [];
 const stores: Array<ReturnType<typeof createStore>> = [];
@@ -131,6 +127,10 @@ function createFakeNonClaudeAdapter(
       return {};
     },
     prepareLeaderMcpServer: async () => ({ mcpServerConfig: {}, close: async () => {} }),
+    prepareExpertMcpServer: async ({ serverName }) => ({
+      mcpServerConfig: { type: "test", name: serverName },
+      close: async () => {},
+    }),
     createInputQueue: () => new AsyncMessageQueue<unknown>(),
     createLeaderUserMessage: () => ({}),
     createLeaderGuideMessage: () => ({}),
@@ -347,7 +347,7 @@ function createAssignedTaskForFlowExpert(
     status: "queued",
   });
   store.assignTaskFlowExpert(task.id, input.flowExpertId, session.id);
-  store.setTaskRuntimeStatus(task.id, "queued_for_expert");
+  store.setTaskRuntimeStatus(task.id, "in_progress");
   return { task: store.getTask(task.id)!, session };
 }
 
@@ -379,7 +379,6 @@ function createRunningTask(store: ReturnType<typeof createStore>, expertId = "ex
 }
 
 afterEach(() => {
-  resetQueryLifecycleTimeoutsForTests();
   config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
   for (const store of stores.splice(0)) store.sqlite.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -415,7 +414,279 @@ describe("ExpertRuntime", () => {
       sessionId: "fake-codex-session",
       status: "completed",
     }));
-    expect(store.getTask(task.id)?.status).toBe("completed");
+    expect(store.getTask(task.id)?.status).toBe("in_progress");
+  });
+
+  it("runs an ordinary Expert conversation without creating or changing a Task", async () => {
+    const store = tempStore("codex");
+    const { flow } = createFlowWithProject(store, {
+      id: "flow-expert-conversation",
+      name: "Expert Conversation",
+      description: "",
+    });
+    const userTurn = store.createUserTurn({
+      flowId: flow.id,
+      triggerMessageId: "msg-expert-conversation",
+    })!;
+    expect(userTurn.workRootPath).toBe("");
+    const flowExpert = store.getOrCreateFlowExpert({
+      flowId: flow.id,
+      expertId: "exp-research",
+    });
+    const session = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: null,
+      expertId: "exp-research",
+      flowExpertId: flowExpert.id,
+      displayName: flowExpert.displayName,
+      status: "queued",
+    });
+    const capturedOptions: BuildExpertRuntimeOptionsInput[] = [];
+    const userMessages: string[] = [];
+    const completions: unknown[] = [];
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      onConversationFinished: (event) => { completions.push(event); },
+      runtimeAdapterFactory: ({ sdk }) => {
+        const base = createFakeNonClaudeAdapter(capturedOptions, sdk);
+        return {
+          ...base,
+          createExpertUserMessage: (content) => {
+            userMessages.push(content);
+            return { role: "user", content };
+          },
+        };
+      },
+    });
+
+    await runtime.runConversation({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      flowExpertId: flowExpert.id,
+      agentSessionId: session.id,
+      expertId: "exp-research",
+      content: "你有哪些 MCP 工具？",
+    });
+
+    expect(store.listTasks(flow.id)).toEqual([]);
+    expect(store.getAgentSession(session.id)).toEqual(expect.objectContaining({
+      taskId: null,
+      status: "completed",
+      sessionId: "fake-codex-session",
+    }));
+    expect(userMessages).toHaveLength(1);
+    expect(parseMessageSegments(userMessages[0]!, flow.id)).toEqual([
+      expect.objectContaining({
+        kind: "event",
+        type: "leader_message",
+        body: "普通沟通（未创建 Task）：你有哪些 MCP 工具？",
+      }),
+    ]);
+    expect(completions).toEqual([
+      expect.objectContaining({
+        flowId: flow.id,
+        userTurnId: userTurn.id,
+        agentSessionId: session.id,
+        expertId: "exp-research",
+        status: "completed",
+        summary: "fake adapter completed",
+      }),
+    ]);
+  });
+
+  it("gives every running Expert an actor-scoped Task MCP and persists only its explicit Task update", async () => {
+    const store = tempStore("codex");
+    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const capturedOptions: BuildExpertRuntimeOptionsInput[] = [];
+    const updates: Array<{ flowId: string; task: { task_id: string; status: string } }> = [];
+    let taskServer: McpServer | null = null;
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      onTaskUpdated: (event) => { updates.push(event); },
+      runtimeAdapterFactory: ({ sdk }) => {
+        const base = createFakeNonClaudeAdapter(capturedOptions, sdk);
+        return {
+          ...base,
+          prepareExpertMcpServer: async ({ serverName, server }) => {
+            if (serverName === "squadflow-expert-task") taskServer = server;
+            return {
+              mcpServerConfig: { type: "test", name: serverName },
+              close: async () => {},
+            };
+          },
+          runQuery: () => ({
+            async *[Symbol.asyncIterator]() {
+              if (!taskServer) throw new Error("missing Expert Task MCP server");
+              const taskMcp = await connectBrowserMcpClient(taskServer);
+              try {
+                const listed = parseToolJson(await taskMcp.client.callTool({ name: "list_my_tasks", arguments: {} }) as any);
+                const listedTask = listed.tasks?.[0] as { task_id: string; revision: number } | undefined;
+                if (!listedTask) throw new Error("active Expert did not receive its Task");
+                const updated = parseToolJson(await taskMcp.client.callTool({
+                  name: "update_my_task",
+                  arguments: {
+                    task_id: listedTask.task_id,
+                    expected_revision: listedTask.revision,
+                    progress: "Verified the implementation.",
+                    status: "completed",
+                  },
+                }) as any);
+                if (updated.ok !== true) throw new Error(`Task MCP update failed: ${JSON.stringify(updated)}`);
+              } finally {
+                await taskMcp.close();
+              }
+              yield {
+                type: "turn_completed",
+                result: { status: "success", isError: false, sessionId: "fake-task-mcp-session" },
+                raw: {
+                  type: "result",
+                  subtype: "success",
+                  session_id: "fake-task-mcp-session",
+                  is_error: false,
+                  final_text: "Task explicitly updated.",
+                },
+              } satisfies RuntimeEvent;
+            },
+            close() {},
+          }),
+        };
+      },
+    });
+
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: task.id,
+      agentSessionId: session.id,
+    });
+
+    expect(capturedOptions).toHaveLength(1);
+    expect(capturedOptions[0]?.mcpTools).toEqual(expect.arrayContaining([
+      "mcp__squadflow-expert-task__list_my_tasks",
+      "mcp__squadflow-expert-task__get_my_task",
+      "mcp__squadflow-expert-task__update_my_task",
+    ]));
+    expect(capturedOptions[0]?.mcpServerConfigs).toEqual(expect.objectContaining({
+      "squadflow-expert-task": expect.any(Object),
+    }));
+    expect(store.getTask(task.id)).toEqual(expect.objectContaining({
+      status: "completed",
+      progress: "Verified the implementation.",
+    }));
+    expect(store.getAgentSession(session.id)?.status).toBe("completed");
+    expect(updates).toEqual([expect.objectContaining({
+      flowId: flow.id,
+      task: expect.objectContaining({ task_id: task.id, status: "completed" }),
+    })]);
+  });
+
+  it("keeps a stable Task MCP bridge dynamically scoped when a FlowExpert starts its next execution record", async () => {
+    const store = tempStore("codex");
+    const { flow, userTurn, task: firstTask, session: firstSession } = createRunningTask(store, "exp-verify");
+    let retainedTaskServer: McpServer | null = null;
+    let taskClient: Awaited<ReturnType<typeof connectBrowserMcpClient>> | null = null;
+    let queryCount = 0;
+    let secondTaskId: string | null = null;
+    let secondSessionId: string | null = null;
+    const taskUpdateAgentSessionIds: string[] = [];
+    const runtime = createExpertRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      onTaskUpdated: ({ task }) => {
+        const event = store.listEventLog(flow.id).at(-1);
+        if (task.task_id === secondTaskId && event?.eventType === "expert_task.updated" && event.agentSessionId) {
+          taskUpdateAgentSessionIds.push(event.agentSessionId);
+        }
+      },
+      runtimeAdapterFactory: ({ sdk }) => {
+        const base = createFakeNonClaudeAdapter([], sdk);
+        return {
+          ...base,
+          prepareExpertMcpServer: async ({ serverName, server }) => {
+            if (serverName === "squadflow-expert-task" && !retainedTaskServer) retainedTaskServer = server;
+            return { mcpServerConfig: { type: "test", name: serverName }, close: async () => {} };
+          },
+          runQuery: () => ({
+            async *[Symbol.asyncIterator]() {
+              if (!retainedTaskServer) throw new Error("missing stable Task MCP server");
+              taskClient ??= await connectBrowserMcpClient(retainedTaskServer);
+              queryCount += 1;
+              const listed = parseToolJson(await taskClient.client.callTool({ name: "list_my_tasks", arguments: {} }) as any);
+              if (queryCount === 1) {
+                expect(listed.tasks.map((candidate: { task_id: string }) => candidate.task_id)).toContain(firstTask.id);
+              } else {
+                const second = listed.tasks.find((candidate: { task_id: string }) => candidate.task_id === secondTaskId) as { revision: number } | undefined;
+                if (!second || !secondTaskId) throw new Error("second Task is not visible through the retained Task MCP server");
+                const updated = parseToolJson(await taskClient.client.callTool({
+                  name: "update_my_task",
+                  arguments: {
+                    task_id: secondTaskId,
+                    expected_revision: second.revision,
+                    progress: "Second execution updated through the retained bridge.",
+                  },
+                }) as any);
+                if (updated.ok !== true) throw new Error(`retained Task MCP update failed: ${JSON.stringify(updated)}`);
+              }
+              yield {
+                type: "turn_completed",
+                result: { status: "success", isError: false, sessionId: `stable-task-mcp-${queryCount}` },
+                raw: {
+                  type: "result",
+                  subtype: "success",
+                  session_id: `stable-task-mcp-${queryCount}`,
+                  is_error: false,
+                  final_text: "done",
+                },
+              } satisfies RuntimeEvent;
+            },
+            close() {},
+          }),
+        };
+      },
+    });
+
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: firstTask.id,
+      agentSessionId: firstSession.id,
+    });
+    expect(taskClient).not.toBeNull();
+    const inactive = parseToolJson(await taskClient!.client.callTool({ name: "list_my_tasks", arguments: {} }) as any);
+    expect(inactive).toEqual(expect.objectContaining({
+      ok: false,
+      error: expect.objectContaining({ code: "EXPERT_CONTEXT_UNAVAILABLE" }),
+    }));
+
+    const flowExpert = store.getTask(firstTask.id)!.flowExpertId!;
+    const second = createAssignedTaskForFlowExpert(store, {
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      expertId: "exp-verify",
+      flowExpertId: flowExpert,
+      title: "Second task",
+    });
+    secondTaskId = second.task.id;
+    secondSessionId = second.session.id;
+    await runtime.runTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: second.task.id,
+      flowExpertId: flowExpert,
+      agentSessionId: second.session.id,
+    });
+
+    expect(store.getTask(second.task.id)).toEqual(expect.objectContaining({
+      progress: "Second execution updated through the retained bridge.",
+    }));
+    expect(taskUpdateAgentSessionIds).toEqual([secondSessionId]);
+    await taskClient!.close();
   });
 
   it("locks a Flow Expert runtime after first start while unstarted experts use the latest role config", async () => {
@@ -554,7 +825,7 @@ describe("ExpertRuntime", () => {
     }));
   });
 
-  it("completes a running task and persists the ExpertResult and session state", async () => {
+  it("records a normal Expert turn without completing the Task", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
     const finished: unknown[] = [];
@@ -594,9 +865,9 @@ describe("ExpertRuntime", () => {
     });
 
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "completed",
+      status: "in_progress",
       agentSessionId: session.id,
-      resultJson: expect.stringContaining("验证通过"),
+      resultJson: null,
     }));
     expect(store.listAgentSessions(flow.id)).toEqual([
       expect.objectContaining({
@@ -633,6 +904,7 @@ describe("ExpertRuntime", () => {
       expect.objectContaining({
         agentSessionId: session.id,
         status: "completed",
+        taskStatus: "in_progress",
         summary: "验证通过",
         error: null,
         artifactRefs: [],
@@ -642,7 +914,7 @@ describe("ExpertRuntime", () => {
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
         type: "task:event",
-        data: expect.objectContaining({ task_id: task.id, status: "completed" }),
+        data: expect.objectContaining({ task_id: task.id, status: "in_progress", session_status: "completed" }),
       }),
       expect.objectContaining({
         type: "flow_expert:event",
@@ -665,7 +937,7 @@ describe("ExpertRuntime", () => {
     expect(usage?.percentage).toBeCloseTo(7, 5);
   });
 
-  it("notifies the Leader queue before publishing an Expert completion event", async () => {
+  it("notifies the Leader queue before publishing an Expert turn report", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
     const publishStarted = deferred<void>();
@@ -673,7 +945,7 @@ describe("ExpertRuntime", () => {
     let leaderNotified = false;
     const eventBus = new EventBus();
     eventBus.subscribe(flow.id, "blocking-client", async (message) => {
-      if (message.type !== "task:event" || message.data.status !== "completed") return;
+      if (message.type !== "task:event" || message.data.status !== "in_progress" || message.data.session_status !== "completed") return;
       publishStarted.resolve();
       await releasePublish.promise;
     });
@@ -767,11 +1039,12 @@ describe("ExpertRuntime", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
 
-  it("fails a stuck Expert task when the SDK produces no progress events", async () => {
-    setQueryLifecycleTimeoutsForTests({ zeroProgressMs: 40 });
+  it("keeps a silent Expert turn running until the user cancels it", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
-    const close = vi.fn();
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const close = vi.fn(() => release.resolve());
     const runtime = createExpertRuntime({
       store,
       eventBus: new EventBus(),
@@ -779,25 +1052,27 @@ describe("ExpertRuntime", () => {
       runtimeAdapterFactory: createClaudeTestAdapterFactory({
         expertQuery: () => ({
           async *[Symbol.asyncIterator]() {
-            await new Promise(() => {});
+            started.resolve();
+            await release.promise;
           },
           close,
         }),
       }),
     });
 
-    await runtime.runTask({
+    const running = runtime.runTask({
       flowId: flow.id,
       userTurnId: userTurn.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
+    await started.promise;
 
-    expect(store.getTask(task.id)?.status).toBe("failed");
-    expect(store.getAgentSession(session.id)?.status).toBe("failed");
-    await vi.waitFor(() => expect(close).toHaveBeenCalled());
-    // Group is settled by failTurn (resolve), not rejected — runTask completes after release.
-    expect(store.getTask(task.id)?.errorMessage).toContain("no progress");
+    expect(close).not.toHaveBeenCalled();
+    expect(store.getAgentSession(session.id)?.status).toBe("streaming");
+    expect(runtime.cancelUserTurn({ flowId: flow.id, userTurnId: userTurn.id })).toBe(1);
+    await running;
+    expect(close).toHaveBeenCalled();
   });
 
   it("starts the next Expert task even when prior context usage never returns and the iterator stays open", async () => {
@@ -848,7 +1123,7 @@ describe("ExpertRuntime", () => {
       taskId: task.id,
       agentSessionId: session.id,
     });
-    expect(store.getTask(task.id)?.status).toBe("completed");
+    expect(store.getTask(task.id)?.status).toBe("in_progress");
     expect(closeFns[0]).toHaveBeenCalled();
 
     const secondTask = store.createTask({
@@ -879,7 +1154,7 @@ describe("ExpertRuntime", () => {
 
     expect(queryCount).toBe(2);
     expect(secondDurationMs).toBeLessThan(5_000);
-    expect(store.getTask(secondTask.id)?.status).toBe("completed");
+    expect(store.getTask(secondTask.id)?.status).toBe("in_progress");
     expect(closeFns[1]).toHaveBeenCalled();
   });
 
@@ -910,7 +1185,7 @@ describe("ExpertRuntime", () => {
       agentSessionId: session.id,
     });
 
-    expect(store.getTask(task.id)?.status).toBe("failed");
+    expect(store.getTask(task.id)?.status).toBe("in_progress");
     expect(desktopBridge.getLease()).toBeNull();
   });
 
@@ -959,9 +1234,9 @@ describe("ExpertRuntime", () => {
         }) })(input);
         return {
           ...base,
-          prepareExpertMcpServer: async ({ server, bridgeRegistry }) => {
+          prepareExpertMcpServer: async ({ serverName, server, bridgeRegistry }) => {
             browserServer = server;
-            return base.prepareExpertMcpServer({ server, bridgeRegistry });
+            return base.prepareExpertMcpServer({ serverName, server, bridgeRegistry });
           },
         };
       },
@@ -1029,9 +1304,9 @@ describe("ExpertRuntime", () => {
         }) })(input);
         return {
           ...base,
-          prepareExpertMcpServer: async ({ server, bridgeRegistry }) => {
+          prepareExpertMcpServer: async ({ serverName, server, bridgeRegistry }) => {
             browserServer = server;
-            return base.prepareExpertMcpServer({ server, bridgeRegistry });
+            return base.prepareExpertMcpServer({ serverName, server, bridgeRegistry });
           },
         };
       },
@@ -1091,9 +1366,9 @@ describe("ExpertRuntime", () => {
         }) })(input);
         return {
           ...base,
-          prepareExpertMcpServer: async ({ server, bridgeRegistry }) => {
+          prepareExpertMcpServer: async ({ serverName, server, bridgeRegistry }) => {
             browserServer = server;
-            return base.prepareExpertMcpServer({ server, bridgeRegistry });
+            return base.prepareExpertMcpServer({ serverName, server, bridgeRegistry });
           },
         };
       },
@@ -1158,13 +1433,13 @@ describe("ExpertRuntime", () => {
         }) })(input);
         return {
           ...base,
-          prepareExpertMcpServer: async ({ server, bridgeRegistry }) => {
+          prepareExpertMcpServer: async ({ serverName, server, bridgeRegistry }) => {
             browserServer = server;
-            const binding = await base.prepareExpertMcpServer({ server, bridgeRegistry });
+            const binding = await base.prepareExpertMcpServer({ serverName, server, bridgeRegistry });
             return {
               ...binding,
               close: async () => {
-                mcpCloseCalls += 1;
+                if (serverName === "squadflow-browser") mcpCloseCalls += 1;
                 await binding.close();
               },
             };
@@ -1372,7 +1647,7 @@ describe("ExpertRuntime", () => {
     }
   });
 
-  it("completes the task on a successful turn even when the Expert leaves no final assistant text", async () => {
+  it("records a successful Expert turn without completing the Task when the Expert leaves no final assistant text", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
     const runtime = createExpertRuntime({
@@ -1392,11 +1667,8 @@ describe("ExpertRuntime", () => {
     });
 
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "completed",
-      resultJson: expect.stringContaining('"turn_outcome":"completed"'),
-    }));
-    expect(JSON.parse(store.getTask(task.id)!.resultJson!)).toEqual(expect.objectContaining({
-      summary: "Expert turn completed without a final message; review the session transcript before judging completion.",
+      status: "in_progress",
+      resultJson: null,
     }));
     expect(store.listAgentSessions(flow.id)[0]?.status).toBe("completed");
     expect(store.listEventLog(flow.id)).toEqual(expect.arrayContaining([
@@ -1408,7 +1680,7 @@ describe("ExpertRuntime", () => {
     ]));
   });
 
-  it("fails the task with an errored turn outcome when the SDK turn ends in error", async () => {
+  it("records an errored Expert session without changing the Task when the SDK turn ends in error", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
     const runtime = createExpertRuntime({
@@ -1433,11 +1705,8 @@ describe("ExpertRuntime", () => {
     });
 
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "failed",
-      errorMessage: expect.stringContaining("error_during_execution"),
-    }));
-    expect(JSON.parse(store.getTask(task.id)!.resultJson!)).toEqual(expect.objectContaining({
-      turn_outcome: "errored",
+      status: "in_progress",
+      errorMessage: null,
     }));
     expect(store.listAgentSessions(flow.id)[0]?.status).toBe("failed");
     expect(store.listEventLog(flow.id)).toEqual(expect.arrayContaining([
@@ -1949,7 +2218,7 @@ describe("ExpertRuntime", () => {
     });
   });
 
-  it("steers a Leader follow-up into the running Expert turn and settles on the real completion", async () => {
+  it("steers a Leader follow-up into the running Expert turn while keeping the Task as the fact source", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
     const received: string[] = [];
@@ -2022,8 +2291,13 @@ describe("ExpertRuntime", () => {
       }),
       {
         kind: "user_text",
-        raw: "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
+        raw: "验证 hello world",
       },
+      expect.objectContaining({
+        kind: "event",
+        type: "leader_message",
+        body: "派发附言：task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
+      }),
     ]);
     expect(priorities).toEqual(["now"]);
     expect(parseMessageSegments(received[1] ?? "", flow.id)).toEqual([
@@ -2042,7 +2316,7 @@ describe("ExpertRuntime", () => {
     }))).toEqual([
       {
         role: "user",
-        content: "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
+        content: "验证 hello world",
         localMessageKind: undefined,
       },
       { role: "assistant", content: "before-guide", localMessageKind: undefined },
@@ -2050,14 +2324,14 @@ describe("ExpertRuntime", () => {
       { role: "assistant", content: "done-final", localMessageKind: undefined },
     ]);
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "completed",
-      resultJson: expect.stringContaining('"summary":"before-guidedone-final"'),
+      status: "in_progress",
+      resultJson: null,
     }));
     expect(store.listEventLog(flow.id).filter((event) => event.eventType === "agent_session.turn_completed"))
       .toHaveLength(1);
   });
 
-  it("uses the dispatch prompt instead of only the stored task description", async () => {
+  it("uses the Task description as the fact source and carries the dispatch prompt as a supplemental Leader message", async () => {
     const store = tempStore();
     const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
     let captured: ClaudeQueryInput | null = null;
@@ -2084,7 +2358,14 @@ describe("ExpertRuntime", () => {
       prompt: "DISPATCH PROMPT CONTENT",
     });
 
-    expect(await firstPromptText(captured!.prompt)).toContain("DISPATCH PROMPT CONTENT");
+    expect(parseMessageSegments(await firstPromptText(captured!.prompt), flow.id)).toEqual(expect.arrayContaining([
+      { kind: "user_text", raw: "验证 hello world" },
+      expect.objectContaining({
+        kind: "event",
+        type: "leader_message",
+        body: "派发附言：DISPATCH PROMPT CONTENT",
+      }),
+    ]));
   });
 
   it("uses one active SDK query for two queued tasks of the same Flow Expert", async () => {
@@ -2129,8 +2410,8 @@ describe("ExpertRuntime", () => {
 
     expect(queryInputs).toHaveLength(1);
     expect(received).toHaveLength(2);
-    expect(store.getTask(first.task.id)?.status).toBe("completed");
-    expect(store.getTask(second.task.id)?.status).toBe("completed");
+    expect(store.getTask(first.task.id)?.status).toBe("in_progress");
+    expect(store.getTask(second.task.id)?.status).toBe("in_progress");
     expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-flow-expert-frontend");
   });
 
@@ -2222,7 +2503,7 @@ describe("ExpertRuntime", () => {
 
     expect(inputs).toHaveLength(2);
     expect(inputs[1]?.options?.resume).toBe("sdk-stable");
-    expect(store.getTask(second.task.id)?.status).toBe("completed");
+    expect(store.getTask(second.task.id)?.status).toBe("in_progress");
   });
 
   it("keeps read-only FlowExpert SDK sessions on the stable project cwd across UserTurns", async () => {
@@ -2314,7 +2595,7 @@ describe("ExpertRuntime", () => {
     releaseFirst();
     await secondRun;
     expect(queryCount).toBe(2);
-    expect(store.getTask(second.task.id)?.status).toBe("completed");
+    expect(store.getTask(second.task.id)?.status).toBe("in_progress");
   });
 
   it("recovers queued and interrupted Flow Expert tasks in dispatch order", () => {
@@ -2332,7 +2613,7 @@ describe("ExpertRuntime", () => {
     expect(work.map((item) => item.taskId)).toEqual([queued.task.id, interrupted.task.id]);
     expect(work[0]).toEqual(expect.objectContaining({ prompt: "queued", resumeSessionId: "sdk-existing" }));
     expect(work[1]?.prompt).toContain(`继续任务 ${interrupted.task.id}`);
-    expect(store.getTask(interrupted.task.id)?.status).toBe("recovery_pending");
+    expect(store.getTask(interrupted.task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(interrupted.session.id)?.status).toBe("interrupted");
     expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-existing");
   });

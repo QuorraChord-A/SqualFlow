@@ -332,7 +332,7 @@ function titleForSendMessage(input: Record<string, unknown> | null): string {
   if (summary) return truncate(summary, 40);
   const content = firstString(input?.content);
   if (content) return truncate(content, 40);
-  return firstString(input?.agent_session_id) ?? "send_message";
+  return firstString(input?.expert_id) ?? "send_message";
 }
 
 function titleForListTasks(): string {
@@ -517,7 +517,7 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
       break;
     }
     case "send_message": {
-      push("会话", input?.agent_session_id);
+      push("Expert", input?.expert_id);
       push("摘要", input?.summary);
       const accepted = parsedObj?.accepted;
       if (typeof accepted === "boolean") {

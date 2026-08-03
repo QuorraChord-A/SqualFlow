@@ -110,7 +110,7 @@ export const parityAssistantMessage: UIMessage = {
       agent_session: { agent_session_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" },
     }),
     toolPart("tc-sendmessage-1", "mcp__squadflow-leader__send_message", {
-      agent_session_id: "ags-frontend-7a2f",
+      expert_id: "Frontend Expert",
       summary: "补充指令",
       content: "请保留键盘输入支持，并补充除零提示",
     }, { accepted: true }),

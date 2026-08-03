@@ -584,6 +584,7 @@ describe("leader MCP handlers", () => {
 
   it("updates tasks with snake_case input mapped to store fields", async () => {
     const updated: unknown[] = [];
+    const taskEvents: unknown[] = [];
     const handlers = createLeaderToolHandlers(fakeStore({
       updateTask(args) {
         updated.push(args);
@@ -593,21 +594,29 @@ describe("leader MCP handlers", () => {
           subject: args.subject ?? "Build",
           description: args.description ?? "Build feature",
           active_form: args.activeForm ?? "",
+          progress: args.progress ?? null,
           status: args.status ?? "pending",
-          expert_id: null,
+          expert_id: args.expertId ?? null,
           agent_session_id: null,
           metadata: args.metadata ?? {},
           blocked_by: args.addBlockedBy ?? [],
           blocks: args.addBlocks ?? [],
         };
       },
-    }));
+    }), {
+      onTaskUpdated: (event) => {
+        taskEvents.push(event);
+      },
+    });
 
     const result = jsonResult(await handlers.updateTask({
       flow_id: "flow-1",
       task_id: "task-1",
-      status: "completed",
+      status: "pending",
+      expected_revision: 4,
       active_form: "done",
+      progress: "Verified the implementation.",
+      expert_id: "exp-verify",
       owner: "exp-frontend",
       metadata: { priority: "P0" },
     }));
@@ -620,8 +629,9 @@ describe("leader MCP handlers", () => {
         subject: "Build",
         description: "Build feature",
         active_form: "done",
-        status: "completed",
-        expert_id: null,
+        progress: "Verified the implementation.",
+        status: "pending",
+        expert_id: "exp-verify",
         agent_session_id: null,
         metadata: { priority: "P0" },
         blocked_by: [],
@@ -631,12 +641,23 @@ describe("leader MCP handlers", () => {
     expect(updated).toEqual([{
       flowId: "flow-1",
       taskId: "task-1",
-      status: "completed",
+      status: "pending",
+      expectedRevision: 4,
       activeForm: "done",
+      progress: "Verified the implementation.",
+      expertId: "exp-verify",
       owner: "exp-frontend",
       metadata: { priority: "P0" },
       addBlocks: undefined,
       addBlockedBy: undefined,
+    }]);
+    expect(taskEvents).toEqual([{
+      flowId: "flow-1",
+      task: expect.objectContaining({
+        task_id: "task-1",
+        status: "pending",
+        progress: "Verified the implementation.",
+      }),
     }]);
   });
 
@@ -973,7 +994,7 @@ describe("leader MCP handlers", () => {
 
     const result = jsonResult(await handlers.sendMessage({
       flow_id: "flow-1",
-      agent_session_id: "ags-1",
+      expert_id: "exp-research",
       content: "hello",
       summary: "greeting",
     }));
@@ -985,7 +1006,7 @@ describe("leader MCP handlers", () => {
     });
     expect(calls).toEqual([{
       flowId: "flow-1",
-      agentSessionId: "ags-1",
+      expertId: "exp-research",
       content: "hello",
       summary: "greeting",
     }]);
@@ -1009,7 +1030,7 @@ describe("leader MCP handlers", () => {
       handlers.saveExecutionPlan({ flow_id: "flow-1", title: "Execution Plan", plan: "# Execution Plan" }),
       handlers.updateTask({ flow_id: "flow-1", task_id: "task-1", status: "completed" }),
       handlers.dispatchAgent({ flow_id: "flow-1", task_id: "task-1", expert_id: "exp-frontend", prompt: "Build" }),
-      handlers.sendMessage({ flow_id: "flow-1", agent_session_id: "ags-1", content: "hello" }),
+      handlers.sendMessage({ flow_id: "flow-1", expert_id: "exp-research", content: "hello" }),
     ]);
 
     for (const raw of results) {
@@ -1031,7 +1052,7 @@ describe("leader MCP handlers", () => {
 
     await expect(handlers.sendMessage({
       flow_id: "flow-1",
-      agent_session_id: "ags-1",
+      expert_id: "exp-research",
       content: "",
     })).rejects.toThrow();
     expect(calls).toEqual([]);

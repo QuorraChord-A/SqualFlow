@@ -52,7 +52,7 @@ describe("Flow Expert app recovery", () => {
       status: "queued",
     })!;
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
-    store.setTaskRuntimeStatus(task.id, "queued_for_expert");
+    store.setTaskRuntimeStatus(task.id, "in_progress");
     store.activateFlowExpertTask(task.id, session.id);
     return { flow, userTurn, flowExpert, task, session };
   }
@@ -68,13 +68,13 @@ describe("Flow Expert app recovery", () => {
     expect(expertRecovery).toEqual([
       expect.objectContaining({ taskId: fixture.task.id, userTurnId: fixture.userTurn.id }),
     ]);
-    expect(store.getTask(fixture.task.id)?.status).toBe("recovery_pending");
+    expect(store.getTask(fixture.task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(fixture.session.id)?.status).toBe("interrupted");
     expect(listUserTurnsNeedingRecovery(store)).toEqual([]);
     store.sqlite.close();
   });
 
-  it("on a second restart recovers the same recovery_pending and interrupted Expert work", () => {
+  it("on a second restart recovers the same in-progress and interrupted Expert work", () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -93,7 +93,7 @@ describe("Flow Expert app recovery", () => {
     ]);
     expect(secondRestart[0]?.resumeSessionId).toBe("sdk-before-restart");
     expect(store.getFlowExpert(fixture.flowExpert.id)?.sdkSessionId).toBe("sdk-before-restart");
-    expect(store.getTask(fixture.task.id)?.status).toBe("recovery_pending");
+    expect(store.getTask(fixture.task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(fixture.session.id)?.status).toBe("interrupted");
     store.sqlite.close();
   });
@@ -178,7 +178,7 @@ describe("Flow Expert app recovery", () => {
       status: "queued",
     });
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
-    store.setTaskRuntimeStatus(task.id, "queued_for_expert");
+    store.setTaskRuntimeStatus(task.id, "in_progress");
 
     let captured: ClaudeQueryInput | null = null;
     let persistedSessionAtQueryStart: string | null | undefined;
@@ -198,7 +198,7 @@ describe("Flow Expert app recovery", () => {
       await drained;
       expect(persistedSessionAtQueryStart).toBe("sdk-before-restart");
       expect(captured?.options?.resume).toBe("sdk-before-restart");
-      expect(store.getTask(task.id)?.status).toBe("completed");
+      expect(store.getTask(task.id)?.status).toBe("in_progress");
       expect(store.getAgentSession(session.id)?.status).toBe("completed");
       expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-recovered-frontend");
     } finally {
@@ -243,7 +243,7 @@ describe("Flow Expert app recovery", () => {
       status: "queued",
     });
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
-    store.setTaskRuntimeStatus(task.id, "queued_for_expert");
+    store.setTaskRuntimeStatus(task.id, "in_progress");
 
     let captured: ClaudeQueryInput | null = null;
     let resolveDrained!: () => void;
@@ -260,7 +260,7 @@ describe("Flow Expert app recovery", () => {
     try {
       await drained;
       expect(captured?.options?.resume).toBeUndefined();
-      expect(store.getTask(task.id)?.status).toBe("completed");
+      expect(store.getTask(task.id)?.status).toBe("in_progress");
       expect(store.getAgentSession(session.id)?.status).toBe("completed");
       expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-recovered-frontend");
     } finally {

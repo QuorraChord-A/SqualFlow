@@ -127,7 +127,7 @@ describe("agent dispatcher", () => {
     expect(result.flow_expert_id).toBeTruthy();
     const agentSessionId = result.agent_session_id;
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "queued_for_expert",
+      status: "in_progress",
       expertId: "exp-coder",
       flowExpertId: result.flow_expert_id,
       agentSessionId,
@@ -232,7 +232,7 @@ describe("agent dispatcher", () => {
     expect(result.flow_expert_id).toBeTruthy();
     const agentSessionId = result.agent_session_id;
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "queued_for_expert",
+      status: "in_progress",
       flowExpertId: result.flow_expert_id,
       agentSessionId,
     }));
@@ -314,7 +314,8 @@ describe("agent dispatcher", () => {
     store.activateFlowExpertTask(task.id, dispatched.agent_session_id);
     const result = await dispatcher.sendMessage({
       flowId: flow.id,
-      agentSessionId: dispatched.agent_session_id,
+      userTurnId: userTurn.id,
+      expertId: "exp-coder",
       content: "Use the existing API contract",
       summary: "补充约束",
     });
@@ -334,6 +335,86 @@ describe("agent dispatcher", () => {
     expect(audit).toBeTruthy();
     expect(JSON.parse(audit!.payloadJson)).not.toHaveProperty("content");
     expect(events.some((event) => event.type === "session:history")).toBe(false);
+  });
+
+  it("starts a taskless conversation for an idle Expert and resumes its provider session", async () => {
+    const store = tempStore();
+    const flow = store.createFlow({
+      id: "flow-idle-expert-message",
+      workspaceId: "ws-default",
+      name: "Idle Expert Message",
+      description: "",
+      projectId: null,
+    });
+    const userTurn = beginUserTurn(store, {
+      flowId: flow.id,
+      inputSnapshotJson: "{}",
+      createdBy: "user",
+    })!;
+    const flowExpert = store.getOrCreateFlowExpert({
+      flowId: flow.id,
+      expertId: "exp-coder",
+    });
+    const previousSession = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: null,
+      expertId: "exp-coder",
+      flowExpertId: flowExpert.id,
+      sessionId: "sdk-research",
+      status: "completed",
+    });
+    store.updateFlowExpertSession(flowExpert.id, "sdk-research");
+    store.updateFlowExpertStatus(flowExpert.id, "idle");
+    const runConversation = vi.fn(async () => undefined);
+    const eventBus = new EventBus();
+    const events: any[] = [];
+    eventBus.subscribe(flow.id, "test", (message) => events.push(message));
+    const dispatcher = createAgentDispatcher({
+      store,
+      eventBus,
+      expertRuntime: {
+        runTask: async () => undefined,
+        runConversation,
+      },
+    });
+
+    const result = await dispatcher.sendMessage({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      expertId: "exp-coder",
+      content: "你有哪些 MCP 工具？",
+      summary: "询问能力",
+    });
+
+    expect(result).toEqual({ accepted: true, message_id: expect.any(String) });
+    expect(store.listTasks(flow.id)).toEqual([]);
+    const created = store.listAgentSessions(flow.id)
+      .find((session) => session.id !== previousSession.id);
+    expect(created).toEqual(expect.objectContaining({
+      taskId: null,
+      expertId: "exp-coder",
+      flowExpertId: flowExpert.id,
+      resumeFromAgentSessionId: previousSession.id,
+      status: "queued",
+    }));
+    expect(runConversation).toHaveBeenCalledWith({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      flowExpertId: flowExpert.id,
+      agentSessionId: created!.id,
+      expertId: "exp-coder",
+      content: "你有哪些 MCP 工具？",
+      resumeSessionId: "sdk-research",
+    });
+    expect(events).toContainEqual(expect.objectContaining({
+      type: "session:event",
+      data: expect.objectContaining({
+        event: "created",
+        task_id: null,
+        expert_id: "exp-coder",
+      }),
+    }));
   });
 
   it("interrupts a running Task through the Expert runtime", async () => {
@@ -437,7 +518,7 @@ describe("agent dispatcher", () => {
     expect(store.listAgentSessions(flow.id)).toHaveLength(0);
   });
 
-  it("allows task-bound resume only after the previous session has ended", async () => {
+  it("reuses the FlowExpert provider session for an explicit follow-up dispatch without completing the Task", async () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-resume",
@@ -459,16 +540,6 @@ describe("agent dispatcher", () => {
       expertId: null,
       dependsOnTaskIds: [],
     })!;
-    const oldSession = store.createAgentSession({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      taskId: task.id,
-      expertId: "exp-coder",
-      sessionId: "sdk-old",
-      status: "completed",
-    });
-    store.startTask(task.id, oldSession.id);
-    store.completeTask(task.id);
     const runTask = vi.fn(async () => undefined);
     const dispatcher = createAgentDispatcher({
       store,
@@ -476,21 +547,116 @@ describe("agent dispatcher", () => {
       expertRuntime: runtime(runTask),
     });
 
+    const first = await dispatcher.dispatchAgent({
+      flowId: flow.id,
+      taskId: task.id,
+      expertId: "exp-coder",
+      prompt: "Start the implementation",
+      resumeAgentSessionId: "",
+    });
+    store.updateAgentSessionSession(first.agent_session_id, "sdk-flow-expert");
+    store.updateAgentSessionStatus(first.agent_session_id, "completed");
+    store.updateFlowExpertSession(first.flow_expert_id!, "sdk-flow-expert");
+
+    // A reply ends an AgentSession, not its Task. Leader explicitly dispatches
+    // the next turn and the provider conversation remains the same.
+    expect(store.getTask(task.id)).toEqual(expect.objectContaining({
+      status: "in_progress",
+      agentSessionId: first.agent_session_id,
+    }));
+
     const result = await dispatcher.dispatchAgent({
       flowId: flow.id,
       taskId: task.id,
       expertId: "exp-coder",
-      prompt: "Resume with full context",
-      resumeAgentSessionId: oldSession.id,
+      prompt: "Please clarify the remaining risk.",
+      resumeAgentSessionId: "",
     });
 
     expect(result.status).toBe("queued");
     expect(store.getAgentSession(result.agent_session_id)).toEqual(expect.objectContaining({
-      resumeFromAgentSessionId: oldSession.id,
+      resumeFromAgentSessionId: first.agent_session_id,
       taskId: task.id,
       expertId: "exp-coder",
     }));
-    expect(runTask).toHaveBeenCalledWith(expect.objectContaining({ resumeSessionId: "sdk-old" }));
+    expect(runTask).toHaveBeenLastCalledWith(expect.objectContaining({
+      resumeSessionId: "sdk-flow-expert",
+      prompt: "Please clarify the remaining risk.",
+    }));
+    expect(store.getTask(task.id)).toEqual(expect.objectContaining({
+      status: "in_progress",
+      agentSessionId: result.agent_session_id,
+    }));
+  });
+
+  it("lets the Leader explicitly reassign a finished execution without resuming the source Expert session", async () => {
+    const store = tempStore();
+    const flow = store.createFlow({
+      id: "flow-reassign",
+      workspaceId: "ws-default",
+      name: "Reassign",
+      description: "",
+      projectId: null,
+    });
+    const userTurn = beginUserTurn(store, {
+      flowId: flow.id,
+      inputSnapshotJson: "{}",
+      createdBy: "user",
+    })!;
+    const task = store.createTask({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      title: "Review",
+      description: "Review",
+      expertId: null,
+      dependsOnTaskIds: [],
+    })!;
+    const runTask = vi.fn(async () => undefined);
+    const dispatcher = createAgentDispatcher({
+      store,
+      eventBus: new EventBus(),
+      expertRuntime: runtime(runTask),
+    });
+
+    const first = await dispatcher.dispatchAgent({
+      flowId: flow.id,
+      taskId: task.id,
+      expertId: "exp-coder",
+      prompt: "Inspect the implementation.",
+      resumeAgentSessionId: "",
+    });
+
+    expect(store.updateTask(task.id, { expertId: "exp-verify", status: "pending" })).toBeUndefined();
+
+    store.updateAgentSessionSession(first.agent_session_id, "sdk-coder");
+    store.updateAgentSessionStatus(first.agent_session_id, "completed");
+    store.updateFlowExpertSession(first.flow_expert_id!, "sdk-coder");
+    const reassigned = store.updateTask(task.id, { expertId: "exp-verify", status: "pending" });
+    expect(reassigned).toEqual(expect.objectContaining({
+      expertId: "exp-verify",
+      flowExpertId: null,
+      agentSessionId: null,
+      status: "pending",
+    }));
+
+    const second = await dispatcher.dispatchAgent({
+      flowId: flow.id,
+      taskId: task.id,
+      expertId: "exp-verify",
+      prompt: "Independently verify the implementation.",
+      resumeAgentSessionId: "",
+    });
+
+    expect(second.status).toBe("queued");
+    expect(second.flow_expert_id).not.toBe(first.flow_expert_id);
+    expect(store.getAgentSession(second.agent_session_id)).toEqual(expect.objectContaining({
+      resumeFromAgentSessionId: "",
+      expertId: "exp-verify",
+    }));
+    expect(runTask).toHaveBeenLastCalledWith(expect.objectContaining({
+      prompt: "Independently verify the implementation.",
+      resumeSessionId: undefined,
+    }));
   });
 
   it("rejects resume for a running session", async () => {

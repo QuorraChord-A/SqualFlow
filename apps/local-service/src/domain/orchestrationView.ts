@@ -72,7 +72,14 @@ export function planRevisionView(store: Store, revisionId: string) {
         risk_tags: parseArray(node.riskTagsJson),
         side_effects: parseArray(node.sideEffectsJson),
         resource_keys: parseArray(node.resourceKeysJson),
-        task: task ? { task_id: task.id, status: task.status, agent_session_id: task.agentSessionId, error_message: task.errorMessage } : null,
+        task: task ? {
+          task_id: task.id,
+          status: task.status,
+          revision: task.revision,
+          progress: task.progress,
+          agent_session_id: task.agentSessionId,
+          error_message: task.errorMessage,
+        } : null,
       };
     }),
     feedback: store.listPlanFeedback(revision.id).map((item) => ({

@@ -302,7 +302,10 @@ function retrySuffix(progress: { attempt?: number; maxAttempts?: number }) {
     : "";
 }
 
-function providerConnectionStatusFromText(text: string): ProviderConnectionStatus | null {
+function providerConnectionStatusFromText(
+  text: string,
+  source: "stderr" | "provider_error" = "stderr",
+): ProviderConnectionStatus | null {
   const normalized = text.toLowerCase();
   const progress = retryProgress(text);
   if (/fall(?:ing)?\s+back|fallback|switch(?:ed|ing)?\s+to\s+https?/iu.test(text)) {
@@ -311,17 +314,23 @@ function providerConnectionStatusFromText(text: string): ProviderConnectionStatu
       message: "Codex WebSocket 不可用，已切换到 HTTPS",
     };
   }
+  const explicitlyWebSocket = /websocket|responses[_-]?ws|\bwss?:\/\//iu.test(text);
+  if (source === "stderr" && !explicitlyWebSocket) return null;
   if (/timed?\s*out|timeout/iu.test(text)) {
     return {
       state: "timeout",
-      message: `Codex WebSocket 连接超时，正在重试${retrySuffix(progress)}`,
+      message: source === "provider_error" && !explicitlyWebSocket
+        ? `Codex 网络连接超时，正在重试${retrySuffix(progress)}`
+        : `Codex WebSocket 连接超时，正在重试${retrySuffix(progress)}`,
       ...progress,
     };
   }
   if (/reconnect|retry|will\s+retry/iu.test(normalized)) {
     return {
       state: "reconnecting",
-      message: `Codex WebSocket 正在重连${retrySuffix(progress)}`,
+      message: source === "provider_error" && !explicitlyWebSocket
+        ? `Codex 网络连接异常，正在重试${retrySuffix(progress)}`
+        : `Codex WebSocket 正在重连${retrySuffix(progress)}`,
       ...progress,
     };
   }
@@ -334,7 +343,7 @@ function providerConnectionStatusFromEvent(event: CodexJsonRpcMessage): Provider
   if (payload?.willRetry !== true) return null;
   const error = isRecord(payload.error) ? payload.error : {};
   const text = [stringValue(error.message), stringValue(error.additionalDetails)].filter(Boolean).join(" ");
-  return providerConnectionStatusFromText(text) ?? {
+  return providerConnectionStatusFromText(text, "provider_error") ?? {
     state: "reconnecting",
     message: "Codex 网络连接异常，正在重试",
   };
@@ -1117,16 +1126,16 @@ export function createCodexAgentRuntimeAdapter(input: {
         close: bridge.close,
       };
     },
-    prepareExpertMcpServer: async ({ server, serverFactory, bindingKey, bridgeRegistry }) => {
+    prepareExpertMcpServer: async ({ serverName, server, serverFactory, bindingKey, bridgeRegistry }) => {
       if (!bridgeRegistry) throw new Error("Codex Expert requires a standard MCP bridge registry");
-      const bridge = await bridgeRegistry.register(server, "browser", {
+      const bridge = await bridgeRegistry.register(server, serverName, {
         ...(bindingKey ? { stableKey: bindingKey } : {}),
         ...(serverFactory ? { createServer: serverFactory } : {}),
       });
       return {
         mcpServerConfig: {
           type: "http",
-          name: "squadflow-browser",
+          name: serverName,
           url: bridge.url,
           bearerToken: bridge.bearerToken,
           bearerTokenEnvVar: bridge.bearerTokenEnvVar,

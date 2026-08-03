@@ -283,7 +283,7 @@ export function buildClaudeExpertOptions(input: BuildExpertRuntimeOptionsInput):
   const authorizedToolSet = new Set([...builtinTools, ...input.mcpTools]);
   const allowedTools = [...builtinTools, ...input.mcpTools].filter((tool) => !permissionGatedClaudeTools.has(tool));
   const disallowedTools = [...permissionGatedClaudeTools].filter((tool) => !authorizedToolSet.has(tool));
-  const mcpServerConfig = input.mcpServerConfig as NonNullable<Options["mcpServers"]>[string] | undefined;
+  const platformMcpServers = (input.mcpServerConfigs as Options["mcpServers"] | undefined) ?? {};
   const nativeContext = prepareClaudeNativeContext({
     cwd: input.cwd,
     scratchDir: input.scratchDir,
@@ -305,7 +305,7 @@ export function buildClaudeExpertOptions(input: BuildExpertRuntimeOptionsInput):
     resume: input.resume,
     mcpServers: {
       ...(nativeContext.mcpServers ?? {}),
-      ...(mcpServerConfig ? { "squadflow-browser": mcpServerConfig } : {}),
+      ...platformMcpServers,
     },
     runtimeConfig: input.runtimeConfig,
     modelName: input.modelName,

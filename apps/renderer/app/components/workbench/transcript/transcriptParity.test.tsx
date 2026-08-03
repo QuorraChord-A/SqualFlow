@@ -189,7 +189,7 @@ function replayRealtimeChunks() {
     { toolCallId: "tc-listtasks-1", toolName: "mcp__squadflow-leader__list_tasks", input: {}, output: { tasks: [{ task_id: "task-101", subject: "实现 Web 计算器", status: "in_progress" }, { task_id: "task-102", subject: "浏览器验证", status: "blocked" }, { task_id: "task-103", subject: "代码审查", status: "pending" }] } },
     { toolCallId: "tc-gettask-1", toolName: "mcp__squadflow-leader__get_task", input: { task_id: "task-101" }, output: { task: { task_id: "task-101", subject: "实现 Web 计算器", status: "in_progress" } } },
     { toolCallId: "tc-dispatchagent-1", toolName: "mcp__squadflow-leader__dispatch_agent", input: { expert_id: "Frontend Expert", task_id: "task-101" }, output: { agent_session: { agent_session_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" } } },
-    { toolCallId: "tc-sendmessage-1", toolName: "mcp__squadflow-leader__send_message", input: { agent_session_id: "ags-frontend-7a2f", summary: "补充指令", content: "请保留键盘输入支持，并补充除零提示" }, output: { accepted: true } },
+    { toolCallId: "tc-sendmessage-1", toolName: "mcp__squadflow-leader__send_message", input: { expert_id: "Frontend Expert", summary: "补充指令", content: "请保留键盘输入支持，并补充除零提示" }, output: { accepted: true } },
   ];
 
   for (const tool of toolCalls) {

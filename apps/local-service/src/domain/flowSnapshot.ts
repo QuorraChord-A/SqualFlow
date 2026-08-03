@@ -60,7 +60,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
   const hasActiveExecution = agentSessions.some((session) => session.status === "queued" || session.status === "streaming")
     || (activeUserTurn?.status === "active"
       && store.listUserTurnTasks(activeUserTurn.id).some((task) =>
-        ["queued_for_expert", "recovery_pending", "in_progress"].includes(task.status),
+        task.status === "in_progress",
       ));
 
   const latestSpecRow = store.listSpecRevisions(flowId).reduce<
@@ -155,7 +155,9 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
       description: task.description,
       expert_id: task.expertId,
       status: task.status,
+      revision: task.revision,
       active_form: task.activeForm,
+      progress: task.progress,
       agent_session_id: task.agentSessionId,
       depends_on_task_ids: store.listTaskDependencies(task.id),
       acceptance_criteria: parseJsonArray(task.acceptanceCriteriaJson),

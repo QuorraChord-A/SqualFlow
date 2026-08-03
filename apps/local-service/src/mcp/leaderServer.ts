@@ -33,7 +33,7 @@ import {
 } from "./platformModels.js";
 
 export interface CurrentTurnInput {
-  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "user_turn_recovery" | "plan_approved" | "flow_name_generation";
+  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "expert_message" | "user_turn_recovery" | "plan_approved" | "flow_name_generation";
   user_turn_id?: string;
   message_id?: string;
   card_id?: string;
@@ -71,6 +71,15 @@ export type LeaderToolHooks = {
   onTaskCreated?: (args: {
     flowId: string;
     userTurnId: string;
+    task: Record<string, unknown>;
+  }) => Promise<void> | void;
+  /**
+   * A Task changed through an explicit Leader action. Provider turn completion
+   * is intentionally not routed through this hook: a reply is not a Task
+   * state transition.
+   */
+  onTaskUpdated?: (args: {
+    flowId: string;
     task: Record<string, unknown>;
   }) => Promise<void> | void;
   onArtifactCreated?: (args: {
@@ -143,10 +152,13 @@ export interface StorePort {
   updateTask: (args: {
     flowId: string;
     taskId: string;
-    status?: "pending" | "queued_for_expert" | "recovery_pending" | "in_progress" | "completed" | "failed" | "cancelled";
+    status?: "pending" | "in_progress" | "blocked" | "completed" | "failed" | "cancelled";
+    expectedRevision?: number;
     subject?: string;
     description?: string;
     activeForm?: string;
+    progress?: string | null;
+    expertId?: string;
     owner?: string;
     metadata?: Record<string, unknown>;
     addBlocks?: string[];
@@ -159,7 +171,7 @@ export interface StorePort {
     flowId: string;
     taskId: string;
     expertId: string;
-    prompt: string;
+    prompt?: string;
     resumeAgentSessionId: string;
     currentTurnInput?: CurrentTurnInput;
   }) => Promise<
@@ -173,7 +185,7 @@ export interface StorePort {
   }) => Promise<CancelAgentResult> | CancelAgentResult;
   sendMessage: (args: {
     flowId: string;
-    agentSessionId: string;
+    expertId: string;
     content: string;
     summary?: string;
     currentTurnInput?: CurrentTurnInput;
@@ -408,16 +420,25 @@ export function createLeaderToolHandlers(
         flowId: parsed.flow_id,
         taskId: parsed.task_id,
         status: parsed.status,
+        expectedRevision: parsed.expected_revision,
         subject: parsed.subject,
         description: parsed.description,
         activeForm: parsed.active_form,
+        progress: parsed.progress,
+        expertId: parsed.expert_id,
         owner: parsed.owner,
         metadata: parsed.metadata,
         addBlocks: parsed.add_blocks,
         addBlockedBy: parsed.add_blocked_by,
         currentTurnInput: currentTurnInput(),
       });
-      return task ? ok({ task }) : fail("INVALID_TASK", `task not found: ${parsed.task_id}`);
+      if (!task) {
+        return parsed.expected_revision !== undefined
+          ? fail("TASK_REVISION_CONFLICT", `task changed or was not found: ${parsed.task_id}`)
+          : fail("INVALID_TASK", `task not found: ${parsed.task_id}`);
+      }
+      await hooks.onTaskUpdated?.({ flowId: parsed.flow_id, task });
+      return ok({ task });
     },
 
     async listTasks(input: ListTasksInputValue) {
@@ -470,7 +491,7 @@ export function createLeaderToolHandlers(
       if (isCancellationFollowup()) return cancellationFailure();
       const result = await store.sendMessage({
         flowId: parsed.flow_id,
-        agentSessionId: parsed.agent_session_id,
+        expertId: parsed.expert_id,
         content: parsed.content,
         summary: parsed.summary,
         currentTurnInput: currentTurnInput(),
@@ -572,7 +593,11 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "send_message",
-    { title: "send_message", description: "Send a non-blocking runtime message to a running agent session.", inputSchema: SendMessageInput },
+    {
+      title: "send_message",
+      description: "Talk to one enabled Expert without creating a Task. If that FlowExpert is running, steer its current turn; otherwise resume its existing provider conversation for a taskless reply.",
+      inputSchema: SendMessageInput,
+    },
     async (input) => ({ content: [{ type: "text", text: await handlers.sendMessage(input) }] }),
   );
 

@@ -16,11 +16,6 @@ import { DesktopBridge } from "../src/server/desktopBridge.js";
 import { ChatJournal } from "../src/ws/chatJournal.js";
 import { EventBus } from "../src/ws/eventBus.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
-import {
-  resetQueryLifecycleTimeoutsForTests,
-  setQueryLifecycleTimeoutsForTests,
-  ZERO_PROGRESS_ERROR_MESSAGE,
-} from "../src/runtime/queryLifecyclePolicy.js";
 
 const dirs: string[] = [];
 const stores: Array<ReturnType<typeof createStore>> = [];
@@ -179,7 +174,6 @@ function createFlowLeader(
 }
 
 afterEach(() => {
-  resetQueryLifecycleTimeoutsForTests();
   config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
   for (const store of stores.splice(0)) store.sqlite.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -868,12 +862,13 @@ describe("LeaderRuntime platform event protocol", () => {
     await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
   });
 
-  it("fails a stuck Leader turn when the SDK produces no progress events", async () => {
-    setQueryLifecycleTimeoutsForTests({ zeroProgressMs: 40 });
+  it("keeps a silent Leader turn running until the user cancels it", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
-    const close = vi.fn();
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const close = vi.fn(() => release.resolve());
     const runtime = createLeaderRuntime({
       store,
       eventBus: new EventBus(),
@@ -882,26 +877,29 @@ describe("LeaderRuntime platform event protocol", () => {
       runtimeAdapterFactory: createClaudeTestAdapterFactory({
         leaderQuery: () => ({
           async *[Symbol.asyncIterator]() {
-            // Never yields — reproduces a dead query after the user message was accepted.
-            await new Promise(() => {});
+            started.resolve();
+            await release.promise;
           },
           close,
         }),
       }),
     });
 
-    await expect(runtime.runLeaderTurn({
+    const running = runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "user",
-      userMessage: "这句话会卡住",
+      userMessage: "保持等待，直到用户中断",
       userTurnId: userTurn.id,
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
-    })).rejects.toThrow(ZERO_PROGRESS_ERROR_MESSAGE);
+    });
+    await started.promise;
 
-    await vi.waitFor(() => expect(close).toHaveBeenCalled());
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("failed");
-    expect(store.getAgentSession(leader.id)?.status).toBe("failed");
+    expect(close).not.toHaveBeenCalled();
+    expect(store.getAgentSession(leader.id)?.status).toBe("streaming");
+    expect(runtime.cancelFlow(flow.id, userTurn.id)).toBe(true);
+    await running;
+    expect(close).toHaveBeenCalled();
   });
 
   it("starts the next Leader turn even when prior context usage never returns and the iterator stays open", async () => {
@@ -1634,6 +1632,7 @@ describe("LeaderRuntime platform event protocol", () => {
         taskId: "task-1",
         agentSessionId: "ags-backend-1",
         expertId: "exp-backend",
+        taskStatus: "in_progress",
         turnOutcome: "completed",
         summary: "built",
         error: null,
@@ -1650,7 +1649,7 @@ describe("LeaderRuntime platform event protocol", () => {
         kind: "event",
         type: "expert_result",
         attrs: { task: "task-1" },
-        body: "完成：built",
+        body: "Expert 本次回复（Task 仍为 in_progress）：built\n当前 Task 状态：in_progress",
       }),
     ]);
     expect(prompt).not.toContain(userTurn.id);
@@ -2130,7 +2129,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(desktopBridge.getLease()).toBeNull();
   });
 
-  it("stops a running Expert and cancels nonterminal UserTurn work when the Leader fails fatally", async () => {
+  it("stops a running Expert without mutating Task state when the Leader fails fatally", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     const userTurn = beginUserTurn(store, { flowId: flow.id })!;
@@ -2153,7 +2152,7 @@ describe("LeaderRuntime platform event protocol", () => {
       status: "queued",
     });
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
-    store.setTaskRuntimeStatus(task.id, "queued_for_expert");
+    store.setTaskRuntimeStatus(task.id, "in_progress");
 
     const completedTask = store.createTask({
       flowId: flow.id,
@@ -2272,7 +2271,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(desktopBridge.getLease()).toBeNull();
     expect(fs.existsSync(lateWritePath)).toBe(false);
     expect(store.getUserTurn(userTurn.id)?.status).toBe("failed");
-    expect(store.getTask(task.id)?.status).toBe("cancelled");
+    expect(store.getTask(task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(session.id)?.status).toBe("interrupted");
     expect(store.getDecisionCard(card.id)?.status).toBe("cancelled");
     expect(store.getSpecApproval(approval.id)?.status).toBe("cancelled");

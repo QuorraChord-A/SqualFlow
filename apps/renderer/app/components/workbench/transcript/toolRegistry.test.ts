@@ -777,7 +777,7 @@ describe("toolRegistry", () => {
           "completed",
           {
             flow_id: "flow-1",
-            agent_session_id: "session-1",
+            expert_id: "exp-research",
             content: "What is the current status?",
             summary: "status?",
           },
@@ -798,7 +798,7 @@ describe("toolRegistry", () => {
           title: "status?",
           operationLabel: "Message",
           detailRows: [
-            { label: "会话", value: "session-1" },
+            { label: "Expert", value: "exp-research" },
             { label: "摘要", value: "status?" },
             { label: "送达", value: "未接受" },
             { label: "错误", value: "RUNTIME_DELIVERY_UNAVAILABLE" },
@@ -809,7 +809,7 @@ describe("toolRegistry", () => {
       it("presents send_message with message labels", () => {
         const tool = makeTool("mcp__squadflow-leader__send_message", "completed", {
           flow_id: "flow-1",
-          agent_session_id: "session-1",
+          expert_id: "exp-research",
           content: "What is the current status?",
           summary: "status?",
         });
@@ -822,7 +822,7 @@ describe("toolRegistry", () => {
           title: "status?",
           operationLabel: "Message",
           detailRows: [
-            { label: "会话", value: "session-1" },
+            { label: "Expert", value: "exp-research" },
             { label: "摘要", value: "status?" },
             { label: "内容", value: "What is the current status?" },
           ],

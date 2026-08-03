@@ -5,6 +5,7 @@ import { config } from "../config.js";
 
 export const PLATFORM_EVENT_TYPES = [
   "expert_result",
+  "expert_message",
   "plan_feedback",
   "spec_requested",
   "spec_run",
@@ -45,6 +46,7 @@ const eventClosingTag = "</squadflow>";
 const eventTypes = new Set<string>(PLATFORM_EVENT_TYPES);
 const allowedAttrs: Record<PlatformEventType, ReadonlySet<string>> = {
   expert_result: new Set(["task"]),
+  expert_message: new Set(["expert", "session"]),
   plan_feedback: new Set(),
   spec_requested: new Set(),
   spec_run: new Set(),
@@ -142,6 +144,9 @@ function assertAttrs(type: PlatformEventType, attrs: Record<string, string>) {
     if (!value) throw new Error(`Platform event attribute cannot be empty: ${name}`);
   }
   if (type === "expert_result" && !attrs.task) throw new Error("expert_result requires task");
+  if (type === "expert_message" && (!attrs.expert || !attrs.session)) {
+    throw new Error("expert_message requires expert and session");
+  }
   if (type === "browser_comment") {
     const markerNumber = Number(attrs.n);
     if (!Number.isInteger(markerNumber) || markerNumber <= 0) {

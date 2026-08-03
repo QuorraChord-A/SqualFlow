@@ -407,8 +407,9 @@ describe("Codex runtime adapter", () => {
     clientOptions?.onStderrLine?.("authorization: secret-value");
     clientOptions?.onStderrLine?.("target=codex_api::endpoint::responses_websocket connecting");
     clientOptions?.onStderrLine?.('{"target":"codex_api::endpoint::responses_websocket","fields":{"message":"success","headers":"cookie=private-cookie"}}');
-    clientOptions?.onStderrLine?.("Reconnecting... 2/5");
-    clientOptions?.onStderrLine?.("request timed out; retry 3/5");
+    clientOptions?.onStderrLine?.("responses_websocket reconnecting... 2/5");
+    clientOptions?.onStderrLine?.("responses_websocket request timed out; retry 3/5");
+    clientOptions?.onStderrLine?.("codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit");
     clientOptions?.onStderrLine?.("falling back to HTTP transport");
     expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
       type: "provider_transport_observed",
@@ -438,6 +439,14 @@ describe("Codex runtime adapter", () => {
       state: "fallback_https",
       message: "Codex WebSocket 不可用，已切换到 HTTPS",
     }));
+    expect(diagnostics).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_connection_status",
+      message: expect.stringContaining("模型"),
+    }));
+    const timeoutStatuses = diagnostics.mock.calls
+      .map(([event]) => event)
+      .filter((event) => event.type === "provider_connection_status" && event.state === "timeout");
+    expect(timeoutStatuses).toHaveLength(1);
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("secret-value");
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private-cookie");
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("sensitive payload");
@@ -1683,6 +1692,7 @@ describe("Codex runtime adapter", () => {
     const serverFactory = () => ({ close: async () => {} }) as any;
     const registerCalls: Array<{ namePrefix?: string; options?: Record<string, unknown> }> = [];
     const binding = await adapter.prepareExpertMcpServer({
+      serverName: "squadflow-browser",
       server: { close: async () => {} } as any,
       serverFactory,
       bindingKey: "expert-browser:flow-expert-1",
@@ -1701,7 +1711,7 @@ describe("Codex runtime adapter", () => {
     });
 
     expect(registerCalls).toEqual([{
-      namePrefix: "browser",
+      namePrefix: "squadflow-browser",
       options: { stableKey: "expert-browser:flow-expert-1", createServer: serverFactory },
     }]);
     expect(binding.mcpServerConfig).toEqual({

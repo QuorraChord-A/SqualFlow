@@ -176,7 +176,7 @@ describe("disabled runtime experts", () => {
     });
   });
 
-  it("fails the task instead of throwing if a disabled expert reaches runtime directly", async () => {
+  it("records the failed execution without changing Task state if a disabled expert reaches runtime directly", async () => {
     const store = await createIsolatedStore();
     const { createExpertRuntime } = await import("../src/runtime/expertRuntime.js");
     const { ChatJournal } = await import("../src/ws/chatJournal.js");
@@ -224,9 +224,9 @@ describe("disabled runtime experts", () => {
     })).resolves.toBeUndefined();
 
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
-      status: "failed",
-      errorMessage: "Runtime role is disabled: research",
-      resultJson: expect.stringContaining("Runtime role is disabled: research"),
+      status: "in_progress",
+      errorMessage: null,
+      resultJson: null,
     }));
     expect(store.getAgentSession(session.id)).toEqual(expect.objectContaining({ status: "failed" }));
     expect(finished).toEqual([

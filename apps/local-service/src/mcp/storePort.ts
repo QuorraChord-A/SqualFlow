@@ -88,7 +88,9 @@ function taskToPlatform(
     subject: task.title,
     description: task.description,
     active_form: task.activeForm,
+    progress: task.progress,
     status: task.status,
+    revision: task.revision,
     expert_id: task.expertId,
     agent_session_id: task.agentSessionId,
     metadata: parseJsonObject(task.metadataJson),
@@ -475,7 +477,10 @@ export function createStorePort(
         title: input.subject,
         description: input.description,
         status: input.status,
+        expectedRevision: input.expectedRevision,
         activeForm: input.activeForm,
+        progress: input.progress,
+        expertId: input.expertId,
         owner: input.owner,
         metadata: input.metadata,
         addBlocks: input.addBlocks,
@@ -639,8 +644,7 @@ export function createStorePort(
 
     async sendMessage(input) {
       const turn = activeCurrentTurn(input.flowId, input.currentTurnInput);
-      const session = store.getAgentSession(input.agentSessionId);
-      if (!turn || !session || session.flowId !== input.flowId || session.userTurnId !== turn.id || session.status !== "streaming" || !agentDispatcher) {
+      if (!turn || !agentDispatcher) {
         return {
           ok: true,
           accepted: false,
@@ -650,7 +654,13 @@ export function createStorePort(
           },
         };
       }
-      const result = await agentDispatcher.sendMessage(input);
+      const result = await agentDispatcher.sendMessage({
+        flowId: input.flowId,
+        userTurnId: turn.id,
+        expertId: input.expertId,
+        content: input.content,
+        summary: input.summary,
+      });
       return { ok: true, ...result };
     },
   };

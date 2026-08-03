@@ -400,6 +400,15 @@ describe("structured orchestration", () => {
     expect(tasks.every((task) => task.status === "pending")).toBe(true);
     expect(run.status).toBe("running");
 
+    // The scheduler is a ledger only: an explicit Expert/Leader blocked state
+    // is reflected in the Plan Run, and an explicit restart clears it.
+    store.updateTask(tasks[0]!.id, { status: "blocked" });
+    await scheduler.advanceForTask(tasks[0]!.id);
+    expect(store.getPlanRun(run.id)?.status).toBe("blocked");
+    store.updateTask(tasks[0]!.id, { status: "in_progress" });
+    await scheduler.advanceForTask(tasks[0]!.id);
+    expect(store.getPlanRun(run.id)?.status).toBe("running");
+
     // 任务失败且无在跑任务 → blocked
     store.setTaskRuntimeStatus(tasks[0]!.id, "in_progress");
     store.failTask(tasks[0]!.id, "boom");

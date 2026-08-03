@@ -59,9 +59,8 @@ export function listUserTurnsNeedingRecovery(store: Store) {
         || flowExpert.flowId !== task.flowId
         || flowExpert.expertId !== task.expertId
       ) return false;
-      return (task.status === "queued_for_expert" && session.status === "queued")
-        || (task.status === "in_progress" && session.status === "streaming")
-        || (task.status === "recovery_pending" && session.status === "interrupted");
+      return task.status === "in_progress"
+        && ["queued", "streaming", "interrupted"].includes(session.status);
     });
     return waiting || running || expertRecovery ? [] : [turn];
   });

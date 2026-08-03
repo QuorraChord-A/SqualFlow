@@ -74,7 +74,7 @@ export function isUserTurnAwaitingPlanFeedback(store: Store, userTurnId: string)
   if (!hasPausedRun) return false;
 
   const hasActiveTask = store.listUserTurnTasks(userTurnId)
-    .some((task) => ["queued_for_expert", "recovery_pending", "in_progress"].includes(task.status));
+    .some((task) => task.status === "in_progress");
   if (hasActiveTask) return false;
 
   return !store.listAgentSessions(turn.flowId).some((session) =>

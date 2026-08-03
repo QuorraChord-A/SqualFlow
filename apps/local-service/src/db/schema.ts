@@ -70,7 +70,10 @@ export const tasks = sqliteTable("tasks", {
   expertId: text("expert_id"),
   flowExpertId: text("flow_expert_id"),
   status: text("status").notNull().default("pending"),
+  revision: integer("revision").notNull().default(1),
   activeForm: text("active_form").notNull().default(""),
+  /** Human-authored current progress; not inferred from provider turn outcomes. */
+  progress: text("progress"),
   agentSessionId: text("agent_session_id"),
   metadataJson: text("metadata_json").notNull().default("{}"),
   acceptanceCriteriaJson: text("acceptance_criteria_json").notNull().default("[]"),

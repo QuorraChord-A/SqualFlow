@@ -148,6 +148,7 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
         owner_name: flowExpert?.displayName ?? ownerSession?.displayName ?? null,
         owner_role: ownerExpertId ? roleTitle(store, ownerExpertId) : null,
         active_form: task.activeForm,
+        progress: task.progress,
         blocked_by: store.listTaskDependencies(task.id),
       };
     }),

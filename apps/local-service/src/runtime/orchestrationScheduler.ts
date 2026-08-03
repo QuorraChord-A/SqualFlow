@@ -51,11 +51,12 @@ export function createOrchestrationScheduler(input: {
       return;
     }
     const hasFailed = tasks.some((task) => task!.status === "failed");
-    const hasActive = tasks.some((task) => ["in_progress", "queued_for_expert", "recovery_pending"].includes(task!.status));
-    if (hasFailed && !hasActive && run.status !== "blocked") {
+    const hasBlocked = tasks.some((task) => task!.status === "blocked");
+    const hasActive = tasks.some((task) => task!.status === "in_progress");
+    if ((hasFailed || hasBlocked) && !hasActive && run.status !== "blocked") {
       const blocked = input.store.updatePlanRunStatus(run.id, "blocked");
       if (blocked) await publishRun(blocked);
-    } else if (run.status === "blocked" && hasActive) {
+    } else if (run.status === "blocked" && !hasFailed && !hasBlocked) {
       const running = input.store.updatePlanRunStatus(run.id, "running");
       if (running) await publishRun(running);
     }

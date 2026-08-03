@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 export const FlowStatusSchema = z.enum(["ready", "active", "idle"]);
-export const TaskStatusSchema = z.enum(["pending", "queued_for_expert", "recovery_pending", "in_progress", "completed", "failed", "cancelled"]);
+export const TaskStatusSchema = z.enum(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]);
 export const WorkSourceSchema = z.enum(["spec", "direct_message"]);
 
 export const UserTurnSchema = z.object({
@@ -44,7 +44,9 @@ export const TaskSchema = z.object({
   description: z.string(),
   expert_id: z.string().nullable(),
   status: TaskStatusSchema,
+  revision: z.number().int().positive(),
   active_form: z.string(),
+  progress: z.string().nullable(),
   agent_session_id: z.string().nullable(),
   metadata_json: z.string(),
   acceptance_criteria_json: z.string(),

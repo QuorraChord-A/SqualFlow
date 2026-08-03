@@ -1,5 +1,5 @@
 export type FlowStatus = "ready" | "active" | "idle";
-export type TaskStatus = "pending" | "queued_for_expert" | "recovery_pending" | "in_progress" | "completed" | "failed" | "cancelled";
+export type TaskStatus = "pending" | "in_progress" | "blocked" | "completed" | "failed" | "cancelled";
 export type WorkSource = "spec" | "direct_message";
 export type SpecApprovalStatus = "pending" | "approved" | "cancelled";
 export type DecisionAnswer = string | string[];
@@ -26,7 +26,9 @@ export interface Task {
   description: string;
   expert_id: string | null;
   status: TaskStatus;
+  revision: number;
   active_form: string;
+  progress: string | null;
   agent_session_id: string | null;
   metadata_json: string;
   acceptance_criteria_json: string;

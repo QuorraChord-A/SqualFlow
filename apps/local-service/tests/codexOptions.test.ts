@@ -81,12 +81,14 @@ describe("buildCodexExpertOptions browser MCP config", () => {
 
   it("configures the mcp_servers key so the resulting mcp__<server>__<tool> toolName matches BROWSER_MCP_TOOL_PREFIX", () => {
     const options = buildCodexExpertOptions(baseInput({
-      mcpServerConfig: {
-        type: "http",
-        name: "squadflow-browser",
-        url: "http://127.0.0.1:8001/api/mcp/bridge/browser-test",
-        bearerToken: "secret-token",
-        bearerTokenEnvVar: "SQUADFLOW_MCP_BRIDGE_TOKEN_TEST",
+      mcpServerConfigs: {
+        "squadflow-browser": {
+          type: "http",
+          name: "squadflow-browser",
+          url: "http://127.0.0.1:8001/api/mcp/bridge/browser-test",
+          bearerToken: "secret-token",
+          bearerTokenEnvVar: "SQUADFLOW_MCP_BRIDGE_TOKEN_TEST",
+        },
       },
     }));
 

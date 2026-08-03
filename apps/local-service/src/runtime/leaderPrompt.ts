@@ -12,7 +12,7 @@ export type LeaderTurnInput = {
   flowId: string;
   userMessage?: string;
   specRequested?: boolean;
-  kind?: "user" | "expert_result" | "decision" | "decision_cancelled" | "spec_run" | "user_turn_recovery" | "plan_approved";
+  kind?: "user" | "expert_result" | "expert_message" | "decision" | "decision_cancelled" | "spec_run" | "user_turn_recovery" | "plan_approved";
   planApprovedTasks?: Array<{
     taskId: string;
     title: string;
@@ -21,6 +21,18 @@ export type LeaderTurnInput = {
   }>;
   expertResult?: {
     taskId: string;
+    agentSessionId: string;
+    expertId: string;
+    /** Current user-maintained Task state; distinct from this provider turn's status. */
+    taskStatus?: string;
+    status?: "completed" | "failed" | "cancelled";
+    turnOutcome: string;
+    summary: string;
+    error: string | null;
+    artifactRefs: string[];
+    completedAt: string;
+  };
+  expertMessage?: {
     agentSessionId: string;
     expertId: string;
     status?: "completed" | "failed" | "cancelled";
@@ -62,12 +74,21 @@ function truncatedSummary(summary: string): string {
 }
 
 function expertResultBody(input: NonNullable<LeaderTurnInput["expertResult"]>): string {
+  const taskStatus = input.taskStatus ?? "unknown";
   const cancelled = input.status === "cancelled" || input.turnOutcome === "cancelled";
   const failed = !cancelled && (input.status === "failed" || input.turnOutcome !== "completed");
-  const prefix = cancelled ? "已取消：" : failed ? "失败：" : "完成：";
+  const taskCompleted = taskStatus === "completed";
+  const prefix = cancelled
+    ? "本次执行已取消："
+    : failed
+      ? "本次执行失败："
+      : taskCompleted
+        ? "Task 已标记完成："
+        : `Expert 本次回复（Task 仍为 ${taskStatus}）：`;
   return [
     `${prefix}${truncatedSummary(input.summary)}`,
     ...(failed && input.error ? [`错误：${input.error}`] : []),
+    `当前 Task 状态：${taskStatus}`,
     ...(input.artifactRefs.length > 0 ? [`产物：${input.artifactRefs.join("、")}`] : []),
   ].join("\n");
 }
@@ -198,6 +219,13 @@ export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInpu
       created_at: createdAt,
     };
   }
+  if (turn.kind === "expert_message") {
+    return {
+      trigger_kind: "expert_message",
+      user_turn_id: turn.userTurnId,
+      created_at: createdAt,
+    };
+  }
   if (turn.kind === "user_turn_recovery") {
     return {
       trigger_kind: "user_turn_recovery",
@@ -235,6 +263,21 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
       type: "expert_result",
       attrs: { task: input.expertResult.taskId },
       body: expertResultBody(input.expertResult),
+    });
+  }
+  if (input.kind === "expert_message" && input.expertMessage) {
+    const failed = input.expertMessage.status === "failed" || input.expertMessage.turnOutcome !== "completed";
+    return buildPlatformEvent({
+      flowId: input.flowId,
+      type: "expert_message",
+      attrs: {
+        expert: input.expertMessage.expertId,
+        session: input.expertMessage.agentSessionId,
+      },
+      body: [
+        failed ? `Expert 普通对话失败：${truncatedSummary(input.expertMessage.summary)}` : truncatedSummary(input.expertMessage.summary),
+        ...(failed && input.expertMessage.error ? [`错误：${input.expertMessage.error}`] : []),
+      ].join("\n"),
     });
   }
   if (input.kind === "decision") {

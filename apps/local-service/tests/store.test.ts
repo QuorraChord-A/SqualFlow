@@ -576,6 +576,7 @@ describe("store", () => {
       description: "New desc",
       status: "failed",
       activeForm: "Fix failed validation",
+      progress: "Validation failed; waiting for a decision.",
       resultJson: JSON.stringify({ summary: "failed" }),
       errorMessage: "validation failed",
     });
@@ -586,12 +587,13 @@ describe("store", () => {
       description: "New desc",
       status: "failed",
       activeForm: "Fix failed validation",
+      progress: "Validation failed; waiting for a decision.",
       resultJson: JSON.stringify({ summary: "failed" }),
       errorMessage: "validation failed",
     }));
   });
 
-  it("rejects invalid status transitions", () => {
+  it("allows explicit actor-owned state changes, rejects stale writes, and only permits terminal reopening via pending", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({
@@ -613,9 +615,27 @@ describe("store", () => {
       dependsOnTaskIds: [],
     })!;
 
-    expect(store.updateTask(task.id, { status: "completed" })).toBeUndefined();
-    expect(store.updateTask(task.id, { status: "failed" })).toBeUndefined();
-    expect(store.updateTask(task.id, { status: "in_progress" })?.status).toBe("in_progress");
+    const completed = store.updateTask(task.id, {
+      status: "completed",
+      progress: "Verified and ready for review.",
+      expectedRevision: task.revision,
+    });
+    expect(completed).toEqual(expect.objectContaining({
+      status: "completed",
+      progress: "Verified and ready for review.",
+      revision: task.revision + 1,
+    }));
+    expect(store.updateTask(task.id, {
+      status: "failed",
+      expectedRevision: task.revision,
+    })).toBeUndefined();
+    expect(store.updateTask(task.id, { status: "in_progress" })).toBeUndefined();
+    const reopened = store.updateTask(task.id, { status: "pending", expectedRevision: completed!.revision });
+    expect(reopened).toEqual(expect.objectContaining({
+      status: "pending",
+      revision: completed!.revision + 1,
+      progress: "Verified and ready for review.",
+    }));
   });
 
   it("rejects adding blocks to a non-pending task", () => {

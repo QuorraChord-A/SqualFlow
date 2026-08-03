@@ -891,7 +891,7 @@ describe("createStorePort", () => {
 
     await expect(port.sendMessage({
       flowId: flow.id,
-      agentSessionId: "ags-offline",
+      expertId: "exp-research",
       content: "ping",
     })).resolves.toEqual({
       ok: true,

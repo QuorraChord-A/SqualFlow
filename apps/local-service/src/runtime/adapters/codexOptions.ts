@@ -267,7 +267,9 @@ export function buildCodexLeaderOptions(input: BuildLeaderRuntimeOptionsInput): 
 
 export function buildCodexExpertOptions(input: BuildExpertRuntimeOptionsInput): CodexRuntimeOptions {
   const options = baseOptions(input);
-  configureHttpMcpServer(options, "squadflow-browser", input.mcpServerConfig, "SQUADFLOW_BROWSER_MCP_TOKEN");
+  for (const [serverName, serverConfig] of Object.entries(input.mcpServerConfigs ?? {})) {
+    configureHttpMcpServer(options, serverName, serverConfig, "SQUADFLOW_MCP_BRIDGE_TOKEN");
+  }
   return {
     ...options,
     sandboxMode: sandboxMode(input.capabilities),
