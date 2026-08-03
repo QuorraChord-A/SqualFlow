@@ -255,6 +255,19 @@ function taskStatusLabel(status: string | undefined) {
   return status || "待执行";
 }
 
+function taskCurrentStep(task: FlowWorkbench["tasks"][number]) {
+  const activeForm = task.active_form?.trim();
+  if (activeForm) return activeForm;
+  const progress = task.progress?.trim();
+  if (progress) return progress;
+  if (task.status === "completed") return "已完成";
+  if (task.status === "failed") return "执行失败";
+  if (task.status === "cancelled") return "已取消";
+  if (task.status === "blocked") return "已阻塞";
+  if (task.status === "in_progress") return "执行中";
+  return "等待执行";
+}
+
 function agentInitial(member: WorkbenchTeamMember) {
   return member.display_name.trim().slice(0, 1).toUpperCase() || "?";
 }
@@ -438,7 +451,7 @@ function TaskProgressSection({ tasks }: { tasks: FlowWorkbench["tasks"] }) {
           <div className="text-xs font-semibold text-primary">
             {[task.owner_name, task.owner_role].filter(Boolean).join(" · ") || "未分配"}
           </div>
-          <div className="text-xs text-muted-foreground">当前步骤：{task.active_form || "等待执行"}</div>
+          <div className="text-xs text-muted-foreground">当前步骤：{taskCurrentStep(task)}</div>
         </div>
       ))}
     </div>

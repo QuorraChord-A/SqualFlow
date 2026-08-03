@@ -233,6 +233,8 @@ describe("Codex runtime adapter", () => {
     const threadStart = requests.find((request) => request.method === "thread/start")?.params as Record<string, unknown>;
     const turnStart = requests.find((request) => request.method === "turn/start")?.params as Record<string, unknown>;
     expect(threadStart.ephemeral).toBe(true);
+    expect(threadStart.developerInstructions).toEqual(expect.stringContaining("namer"));
+    expect(threadStart).not.toHaveProperty("baseInstructions");
     expect(turnStart.effort).toBe("none");
   });
 
@@ -409,6 +411,8 @@ describe("Codex runtime adapter", () => {
     clientOptions?.onStderrLine?.('{"target":"codex_api::endpoint::responses_websocket","fields":{"message":"success","headers":"cookie=private-cookie"}}');
     clientOptions?.onStderrLine?.("responses_websocket reconnecting... 2/5");
     clientOptions?.onStderrLine?.("responses_websocket request timed out; retry 3/5");
+    clientOptions?.onStderrLine?.('{"target":"codex_models_manager::cache","fields":{"message":"models cache: cache is stale","cache_path":"/Users/private/.codex/models_cache.json","fetched_at":"2026-08-03 08:00:00 UTC","cache_ttl_secs":300},"span":{"refresh_strategy":"online_if_uncached","name":"list_models"}}');
+    clientOptions?.onStderrLine?.('\u001b[2mcodex_models_manager::cache: models cache: cache entry applied cache_path=/Users/plain-private/.codex/models_cache.json etag=Some("private-etag")\u001b[0m');
     clientOptions?.onStderrLine?.("codex_models_manager::manager: failed to refresh available models: timeout waiting for child process to exit");
     clientOptions?.onStderrLine?.("falling back to HTTP transport");
     expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
@@ -443,12 +447,37 @@ describe("Codex runtime adapter", () => {
       type: "provider_connection_status",
       message: expect.stringContaining("模型"),
     }));
+    expect(diagnostics).toHaveBeenCalledWith(expect.objectContaining({
+      type: "provider_stderr",
+      message: expect.stringContaining('"message":"models cache: cache is stale"'),
+    }));
+    const cacheDiagnostic = diagnostics.mock.calls
+      .map(([event]) => event)
+      .find((event) => event.type === "provider_stderr" && event.message.includes("models cache: cache is stale"));
+    expect(cacheDiagnostic?.type).toBe("provider_stderr");
+    expect(JSON.parse((cacheDiagnostic as { message: string }).message)).toMatchObject({
+      fields: {
+        message: "models cache: cache is stale",
+        fetched_at: "2026-08-03 08:00:00 UTC",
+        cache_ttl_secs: 300,
+      },
+      span: {
+        name: "list_models",
+        refresh_strategy: "online_if_uncached",
+      },
+    });
     const timeoutStatuses = diagnostics.mock.calls
       .map(([event]) => event)
       .filter((event) => event.type === "provider_connection_status" && event.state === "timeout");
     expect(timeoutStatuses).toHaveLength(1);
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("secret-value");
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private-cookie");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("/Users/private");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("/Users/plain-private");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("private-etag");
+    expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("\\u001b");
+    expect(JSON.stringify(diagnostics.mock.calls)).toContain("cache_path=<redacted>");
+    expect(JSON.stringify(diagnostics.mock.calls)).toContain("etag=<redacted>");
     expect(JSON.stringify(diagnostics.mock.calls)).not.toContain("sensitive payload");
   });
 
@@ -1388,6 +1417,9 @@ describe("Codex runtime adapter", () => {
     }
 
     expect(requests.map((request) => request.method)).toEqual(["thread/resume", "thread/compact/start"]);
+    const threadResume = requests[0]?.params as Record<string, unknown>;
+    expect(threadResume.developerInstructions).toEqual(expect.stringContaining("leader"));
+    expect(threadResume).not.toHaveProperty("baseInstructions");
     const lastEvent = runtimeEvents.at(-1);
     expect(lastEvent?.type).toBe("turn_completed");
     expect(lastEvent?.type === "turn_completed" ? lastEvent.result : null).toEqual(expect.objectContaining({

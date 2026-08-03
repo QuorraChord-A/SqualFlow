@@ -109,5 +109,8 @@ describe("agent runtime connection test", () => {
     expect(requests.find((request) => request.method === "turn/start")?.params).toEqual(expect.objectContaining({
       input: [{ type: "text", text: "Reply with the single word: ok.", text_elements: [] }],
     }));
+    const threadStart = requests.find((request) => request.method === "thread/start")?.params as Record<string, unknown>;
+    expect(threadStart.developerInstructions).toEqual(expect.stringContaining("Reply with a short plain-text message."));
+    expect(threadStart).not.toHaveProperty("baseInstructions");
   });
 });

@@ -58,19 +58,12 @@ export type LeaderTurnInput = {
   startedAt?: string;
 };
 
-const LEADER_SUMMARY_TRUNCATE_LENGTH = 2000;
 const SPEC_REQUESTED_BODY = "本消息明确要求 Spec:先澄清并调用 create_plan 生成可审批 Spec;在 Spec 获批前不要创建执行 Task 或派发 Expert。";
 const PLAN_FEEDBACK_INSTRUCTION = "请把本批评论作为一个整体处理;需要修改时只提交一个完整的新计划版本,不要直接创建或派发 Task。";
 export const DECISION_CANCELLED_BODY = "用户取消了本次澄清卡片。请不要直接执行,用自然语言重新说明问题或给出建议。";
 
 function joinSegments(segments: Array<string | null | undefined>): string {
   return segments.filter((segment): segment is string => typeof segment === "string" && segment.length > 0).join("\n\n");
-}
-
-function truncatedSummary(summary: string): string {
-  return summary.length <= LEADER_SUMMARY_TRUNCATE_LENGTH
-    ? summary
-    : summary.slice(0, LEADER_SUMMARY_TRUNCATE_LENGTH);
 }
 
 function expertResultBody(input: NonNullable<LeaderTurnInput["expertResult"]>): string {
@@ -86,7 +79,7 @@ function expertResultBody(input: NonNullable<LeaderTurnInput["expertResult"]>): 
         ? "Task 已标记完成："
         : `Expert 本次回复（Task 仍为 ${taskStatus}）：`;
   return [
-    `${prefix}${truncatedSummary(input.summary)}`,
+    `${prefix}${input.summary}`,
     ...(failed && input.error ? [`错误：${input.error}`] : []),
     `当前 Task 状态：${taskStatus}`,
     ...(input.artifactRefs.length > 0 ? [`产物：${input.artifactRefs.join("、")}`] : []),
@@ -275,7 +268,7 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
         session: input.expertMessage.agentSessionId,
       },
       body: [
-        failed ? `Expert 普通对话失败：${truncatedSummary(input.expertMessage.summary)}` : truncatedSummary(input.expertMessage.summary),
+        failed ? `Expert 普通对话失败：${input.expertMessage.summary}` : input.expertMessage.summary,
         ...(failed && input.expertMessage.error ? [`错误：${input.expertMessage.error}`] : []),
       ].join("\n"),
     });

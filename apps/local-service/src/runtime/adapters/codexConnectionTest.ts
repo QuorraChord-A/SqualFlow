@@ -130,7 +130,6 @@ async function runCodexSmokeTurn(
     approvalPolicy: "on-request",
     sandbox: "read-only",
     config: options.config,
-    baseInstructions: options.systemPrompt,
     developerInstructions: options.systemPrompt,
     ephemeral: true,
   });

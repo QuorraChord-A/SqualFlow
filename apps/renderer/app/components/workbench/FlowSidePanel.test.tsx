@@ -76,6 +76,7 @@ const workbench: FlowWorkbench = {
       owner_name: "Frontend",
       owner_role: "前端开发",
       active_form: "Writing page",
+      progress: null,
       blocked_by: [],
   }],
   files: {
@@ -361,6 +362,22 @@ describe("FlowSidePanel", () => {
     expect(screen.getByText("Build hello")).toBeInTheDocument();
     expect(screen.getByText("Frontend · 前端开发")).toBeInTheDocument();
     expect(screen.getByText("当前步骤：Writing page")).toBeInTheDocument();
+  });
+
+  it("shows completed Task progress instead of treating an empty active form as waiting", () => {
+    renderPanel(createInitialRightPanelState(), vi.fn(), {
+      ...workbench,
+      tasks: [{
+        ...workbench.tasks[0],
+        status: "completed",
+        active_form: "",
+        progress: "已完成管理系统只读初步评估；未修改文件。",
+      }],
+    });
+
+    expect(screen.getByText("任务 1 · 已完成")).toBeInTheDocument();
+    expect(screen.getByText("当前步骤：已完成管理系统只读初步评估；未修改文件。")).toBeInTheDocument();
+    expect(screen.queryByText("当前步骤：等待执行")).not.toBeInTheDocument();
   });
 
   it("folds overview sections in the current page session", () => {

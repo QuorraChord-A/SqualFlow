@@ -140,15 +140,29 @@ describe("buildCodexExpertOptions browser MCP config", () => {
     );
   });
 
-  it("enables opt-in Codex transport diagnostics without changing normal runs", () => {
+  it("keeps model catalog diagnostics on while detailed transport diagnostics remain opt-in", () => {
+    delete process.env.RUST_LOG;
+    const normalOptions = buildCodexExpertOptions(baseInput());
+    expect(normalOptions.env.RUST_LOG).toBe("warn,codex_models_manager=info");
+    expect(normalOptions.env.RUST_LOG).not.toContain("codex_api=debug");
+
     process.env.SQUADFLOW_CODEX_TRANSPORT_DEBUG = "1";
     process.env.RUST_LOG = "codex_app_server=info";
     const options = buildCodexExpertOptions(baseInput());
 
     expect(options.env.RUST_LOG).toContain("codex_app_server=info");
+    expect(options.env.RUST_LOG).toContain("codex_models_manager=info");
     expect(options.env.RUST_LOG).toContain("codex_api=debug");
     expect(options.env.RUST_LOG).toContain("codex_http_client=debug");
     expect(options.env.RUST_LOG).toContain("codex_app_server_transport=debug");
+  });
+
+  it("respects an explicit Codex model catalog log filter", () => {
+    process.env.RUST_LOG = "codex_models_manager=warn";
+
+    const options = buildCodexExpertOptions(baseInput());
+
+    expect(options.env.RUST_LOG).toBe("codex_models_manager=warn");
   });
 
   it("passes Codex reasoning effort through config", () => {

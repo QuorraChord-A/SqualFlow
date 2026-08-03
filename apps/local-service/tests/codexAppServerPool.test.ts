@@ -123,16 +123,19 @@ describe("CodexAppServerPool", () => {
     expect(cores[0]!.close).toHaveBeenCalledTimes(1);
   });
 
-  it("drops late scoped notifications after their owning lease closes", async () => {
+  it("isolates a pooled Namer thread from Leader and drops its late scoped notifications", async () => {
     const { pool, cores } = createPool();
     const factory = pool.clientFactory("official");
     const namer = factory({ command: "codex", args: ["app-server"] });
     const leader = factory({ command: "codex", args: ["app-server"] });
 
     await Promise.all([namer.start(), leader.start()]);
+    expect(cores).toHaveLength(1);
     const namerThread = await namer.request("thread/start", {}) as { thread: { id: string } };
     const leaderThread = await leader.request("thread/start", {}) as { thread: { id: string } };
+    expect(namerThread.thread.id).not.toBe(leaderThread.thread.id);
     namer.close();
+    expect(cores[0]!.close).not.toHaveBeenCalled();
 
     const leaderEvent = leader.notifications()[Symbol.asyncIterator]().next();
     cores[0]!.push({

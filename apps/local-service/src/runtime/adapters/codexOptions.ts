@@ -85,12 +85,28 @@ export function normalizeCodexBaseUrl(baseUrl: string): string {
 
 const CODEX_TRANSPORT_DEBUG_ENV = "SQUADFLOW_CODEX_TRANSPORT_DEBUG";
 const CODEX_TRANSPORT_LOG_FILTER = "codex_api=debug,codex_http_client=debug,codex_app_server_transport=debug";
+const CODEX_MODEL_CATALOG_LOG_FILTER = "codex_models_manager=info";
+const CODEX_DEFAULT_LOG_FILTER = "warn";
 
-function withCodexTransportDebug(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (env[CODEX_TRANSPORT_DEBUG_ENV]?.trim() !== "1") return env;
+function withCodexModelCatalogLogging(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const current = env.RUST_LOG?.trim();
+  if (current?.split(",").some((directive) => directive.trim().startsWith("codex_models_manager="))) {
+    return env;
+  }
   return {
     ...env,
+    RUST_LOG: current
+      ? `${current},${CODEX_MODEL_CATALOG_LOG_FILTER}`
+      : `${CODEX_DEFAULT_LOG_FILTER},${CODEX_MODEL_CATALOG_LOG_FILTER}`,
+  };
+}
+
+function withCodexTransportDebug(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const diagnosticEnv = withCodexModelCatalogLogging(env);
+  if (diagnosticEnv[CODEX_TRANSPORT_DEBUG_ENV]?.trim() !== "1") return diagnosticEnv;
+  const current = diagnosticEnv.RUST_LOG?.trim();
+  return {
+    ...diagnosticEnv,
     RUST_LOG: current ? `${current},${CODEX_TRANSPORT_LOG_FILTER}` : CODEX_TRANSPORT_LOG_FILTER,
   };
 }

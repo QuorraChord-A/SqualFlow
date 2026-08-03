@@ -54,14 +54,38 @@ describe("buildLeaderPrompt", () => {
     expect(prompt).not.toContain("expertId");
   });
 
-  it("truncates expert summaries to 2000 characters", () => {
+  it("delivers long task-bound Expert summaries to Leader without truncation", () => {
     const prompt = buildLeaderPrompt(expertResultInput("x".repeat(2500)));
     const segment = parseMessageSegments(prompt, "flow-1")[0];
 
     expect(segment).toMatchObject({ kind: "event", type: "expert_result" });
     expect(segment?.kind === "event" ? segment.body : "").toBe(
-      `Expert 本次回复（Task 仍为 in_progress）：${"x".repeat(2000)}\n当前 Task 状态：in_progress`,
+      `Expert 本次回复（Task 仍为 in_progress）：${"x".repeat(2500)}\n当前 Task 状态：in_progress`,
     );
+  });
+
+  it("delivers long taskless Expert messages to Leader without truncation", () => {
+    const summary = "y".repeat(2500);
+    const prompt = buildLeaderPrompt({
+      flowId: "flow-1",
+      kind: "expert_message",
+      expertMessage: {
+        agentSessionId: "ags-expert-message",
+        expertId: "exp-backend",
+        status: "completed",
+        turnOutcome: "completed",
+        summary,
+        error: null,
+        artifactRefs: [],
+        completedAt: "2026-07-03T00:00:00.000Z",
+      },
+      leaderAgentSessionId: "leader-ags",
+      leaderSessionId: "leader-session",
+    });
+    const segment = parseMessageSegments(prompt, "flow-1")[0];
+
+    expect(segment).toMatchObject({ kind: "event", type: "expert_message" });
+    expect(segment?.kind === "event" ? segment.body : "").toBe(summary);
   });
 
   it("reports Task completion only when an actor explicitly marked the Task completed", () => {

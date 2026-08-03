@@ -215,7 +215,8 @@ function proxyPresence(env: NodeJS.ProcessEnv | undefined) {
 }
 
 function scrubDiagnosticText(value: string): string {
-  const withoutSecrets = value
+  const withoutAnsi = value.replace(/\u001B\[[0-9;]*m/gu, "");
+  const withoutSecrets = withoutAnsi
     .replace(
       /(authorization|proxy-authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)(\s*[:=]\s*)("[^"]*"|'[^']*'|[^\s,;}]+)/gi,
       "$1$2<redacted>",
@@ -223,7 +224,9 @@ function scrubDiagnosticText(value: string): string {
     .replace(
       /(authorization|proxy-authorization|cookie|set-cookie)(\s+)([^\s,;}]+)/gi,
       "$1$2<redacted>",
-    );
+    )
+    .replace(/\bcache_path\s*=\s*("[^"]*"|'[^']*'|\S+)/giu, "cache_path=<redacted>")
+    .replace(/\betag\s*=\s*("[^"]*"|'[^']*'|\S+)/giu, "etag=<redacted>");
   const withoutQuery = withoutSecrets.replace(/https?:\/\/[^\s"']+/gi, (value) => {
     try {
       const url = new URL(value);
@@ -242,13 +245,26 @@ function sanitizedStderrLine(line: string): string {
       const fields = isRecord(parsed.fields) ? parsed.fields : {};
       const span = isRecord(parsed.span) ? parsed.span : {};
       const safeFields: Record<string, unknown> = {};
-      for (const key of ["message", "method", "status", "transport", "api.path", "name"]) {
+      for (const key of [
+        "message",
+        "method",
+        "status",
+        "transport",
+        "api.path",
+        "name",
+        "client_version",
+        "expected_version",
+        "cached_version",
+        "fetched_at",
+        "cache_ttl_secs",
+        "models_count",
+      ]) {
         if (fields[key] !== undefined) safeFields[key] = typeof fields[key] === "string"
           ? scrubDiagnosticText(fields[key] as string)
           : fields[key];
       }
       const safeSpan: Record<string, unknown> = {};
-      for (const key of ["api.path", "transport", "name"]) {
+      for (const key of ["api.path", "transport", "name", "refresh_strategy"]) {
         if (span[key] !== undefined) safeSpan[key] = span[key];
       }
       return JSON.stringify({
@@ -266,7 +282,7 @@ function sanitizedStderrLine(line: string): string {
 }
 
 function isUsefulProviderStderr(line: string): boolean {
-  return /responses_(?:websocket|http)|stream_responses|falling back|reconnect|retry|timeout|failed|error|warn|proxy\(|websocket|transport/i.test(line);
+  return /models cache:|responses_(?:websocket|http)|stream_responses|falling back|reconnect|retry|timeout|failed|error|warn|proxy\(|websocket|transport/i.test(line);
 }
 
 function observedProviderTransport(line: string): "responses_websocket" | "responses_http" | null {
@@ -706,7 +722,6 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
       approvalPolicy: "on-request",
       sandbox: this.options.sandboxMode,
       config: this.options.config,
-      baseInstructions: this.options.systemPrompt,
       developerInstructions: this.options.systemPrompt,
       ephemeral: this.options.ephemeral === true,
     };

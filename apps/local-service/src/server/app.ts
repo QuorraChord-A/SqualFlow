@@ -199,7 +199,7 @@ export function createApp(options: CreateAppOptions = {}) {
       });
   const runtimeAdapterFactory = options.runtimeAdapterFactory ?? ((input) => createAgentRuntimeAdapter({
     ...input,
-    codexClientFactory: input.sdk === "codex" && !input.ephemeral && codexAppServerPool
+    codexClientFactory: input.sdk === "codex" && codexAppServerPool
       ? codexAppServerPool.clientFactory(codexPoolKindForRuntimeConfig(input.runtimeConfig))
       : undefined,
   }));

@@ -55,6 +55,7 @@ export interface FlowWorkbench {
     owner_name: string | null;
     owner_role: string | null;
     active_form: string | null;
+    progress: string | null;
     blocked_by: string[];
   }>;
   files: {
