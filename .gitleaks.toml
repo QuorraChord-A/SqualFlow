@@ -10,5 +10,6 @@ paths = [
   '''(^|/)dist/''',
   '''(^|/)apps/desktop/\.staging/''',
   '''(^|/)\.artifacts/''',
+  '''(^|/)output/''',
   '''^apps/desktop/resources/codex-runtime/[^/]+/codex$''',
 ]

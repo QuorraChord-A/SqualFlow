@@ -13,6 +13,7 @@ const { createDesktopUpdater, downloadFileWithResume, configurePrivateGitHubBloc
 const { MacUpdater } = require("electron-updater/out/MacUpdater");
 const releaseConfig = require("../electron-builder.release.cjs");
 const privateTestConfig = require("../electron-builder.private-test.cjs");
+const unsignedPublishConfig = require("../electron-builder.unsigned-publish.cjs");
 
 function createUpdater() {
   const updater = new EventEmitter();
@@ -65,6 +66,17 @@ test("keeps self-signed public update testing separate from the notarized releas
   );
   assert.match(privateEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
   assert.doesNotMatch(releaseEntitlements, /com\.apple\.security\.cs\.disable-library-validation/);
+});
+
+test("requires an explicit unsigned public publish config", () => {
+  assert.deepEqual(unsignedPublishConfig.publish, [{
+    provider: "github",
+    owner: "QuorraChord-A",
+    repo: "SqualFlow",
+  }]);
+  assert.equal(unsignedPublishConfig.forceCodeSigning, false);
+  assert.equal(unsignedPublishConfig.mac.identity, null);
+  assert.equal(unsignedPublishConfig.mac.notarize, false);
 });
 
 test("keeps desktop updates disabled without packaged update configuration", () => {

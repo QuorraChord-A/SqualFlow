@@ -1,6 +1,6 @@
 {
   "name": "squadflow",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "private": true,
   "description": "SquadFlow: a local-first AI agent orchestration desktop app.",
   "license": "Apache-2.0",
@@ -27,6 +27,7 @@
     "build:renderer": "npm --prefix apps/renderer run build",
     "desktop:package": "bash apps/desktop/scripts/desktop-macos.sh package",
     "desktop:smoke": "bash apps/desktop/scripts/desktop-macos.sh smoke",
+    "desktop:unsigned-publish": "bash apps/desktop/scripts/desktop-macos.sh unsigned-publish",
     "desktop:release": "bash apps/desktop/scripts/desktop-macos.sh release",
     "desktop:private-test-package": "bash apps/desktop/scripts/desktop-macos.sh private-test-package",
     "desktop:private-test-publish": "bash apps/desktop/scripts/desktop-macos.sh private-test-publish",

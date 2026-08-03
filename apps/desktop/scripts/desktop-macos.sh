@@ -100,6 +100,31 @@ run_local_smoke() {
   desktop_verify_packaged_runtime
 }
 
+unsigned_publish_preflight() {
+  [[ "${SQUADFLOW_ALLOW_UNSIGNED_RELEASE:-}" = "1" ]] || \
+    release_fail "set SQUADFLOW_ALLOW_UNSIGNED_RELEASE=1 to confirm an unsigned public release."
+  [[ -n "${GH_TOKEN:-}" ]] || release_fail "GH_TOKEN is required to publish a GitHub Release."
+}
+
+run_unsigned_publish() {
+  unsigned_publish_preflight
+  export CSC_IDENTITY_AUTO_DISCOVERY=false
+  desktop_initialize_paths "$ROOT" "$ROOT/dist"
+  desktop_require_packaging_dependencies
+  desktop_build_production_services
+  desktop_prepare_codex_runtime required
+  desktop_clean_output
+
+  echo "Building and publishing completely unsigned public GitHub artifacts..."
+  (
+    cd "$ELECTRON_DIR"
+    ./node_modules/.bin/electron-builder --mac --config electron-builder.unsigned-publish.cjs --publish always
+  )
+
+  desktop_verify_packaged_runtime
+  desktop_print_artifacts
+}
+
 run_release() {
   release_preflight
   desktop_initialize_paths "$ROOT" "$ROOT/dist"
@@ -165,12 +190,13 @@ desktop_require_macos
 case "${1:-}" in
   package) run_local_package ;;
   smoke) run_local_smoke ;;
+  unsigned-publish) run_unsigned_publish ;;
   release) run_release ;;
   private-test-package) run_private_test_package ;;
   private-test-publish) run_private_test_publish ;;
   preflight) release_preflight ;;
   *)
-    echo "Usage: $0 {package|smoke|release|private-test-package|private-test-publish|preflight}" >&2
+    echo "Usage: $0 {package|smoke|unsigned-publish|release|private-test-package|private-test-publish|preflight}" >&2
     exit 2
     ;;
 esac
