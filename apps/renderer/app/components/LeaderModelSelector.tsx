@@ -41,11 +41,16 @@ const OFFICIAL_REASONING_EFFORT_LABELS: Record<string, string> = {
   ultra: '极高',
 };
 
+const CLAUDE_REASONING_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 function runtimeConfigLabel(config: AgentRuntimeConfigDto | null | undefined) {
   return config?.name?.trim() || config?.fileName || '未配置';
 }
 
 function reasoningEffortOptionsForConfig(config: AgentRuntimeConfigDto | null | undefined) {
+  if (config?.sdk === 'claudecode') {
+    return CLAUDE_REASONING_EFFORTS.map((value) => ({ value, label: value }));
+  }
   const values = config?.sdk === 'codex' && config.authMode === 'inherited'
     ? ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']
     : [];
@@ -56,7 +61,11 @@ function defaultReasoningEffortForConfig(
   config: AgentRuntimeConfigDto | null | undefined,
 ) {
   const options = reasoningEffortOptionsForConfig(config);
-  const fallback = config?.sdk === 'codex' && config.authMode === 'inherited' ? 'medium' : '';
+  const fallback = config?.sdk === 'claudecode'
+    ? 'high'
+    : config?.sdk === 'codex' && config.authMode === 'inherited'
+      ? 'medium'
+      : '';
   return options.some((option) => option.value === fallback) ? fallback : '';
 }
 
@@ -338,6 +347,7 @@ export default function LeaderModelSelector({
   const isOfficialCodex = leaderRuntimeConfig?.sdk === 'codex' && leaderRuntimeConfig.authMode === 'inherited';
   const effortOptions = reasoningEffortOptionsForConfig(leaderRuntimeConfig);
   const usesOfficialCodexEffort = isOfficialCodex && effortOptions.length > 0;
+  const usesClaudeEffortMenu = leaderRuntimeConfig?.sdk === 'claudecode' && effortOptions.length > 0;
   const activeReasoningEffort = normalizeReasoningEffortForConfig(leaderRuntimeConfig, leaderModel, selectedReasoningEffort);
   const activeReasoningEffortIndex = Math.max(0, effortOptions.findIndex((option) => option.value === activeReasoningEffort));
   const activeReasoningEffortOption = effortOptions[activeReasoningEffortIndex] ?? null;
@@ -389,7 +399,7 @@ export default function LeaderModelSelector({
     }
   };
 
-  const selectReasoningEffort = async (effort: string) => {
+  const selectReasoningEffort = async (effort: string, closeOnSuccess = false) => {
     if (
       (!flowId && !defaultSelection)
       || isUpdatingEffort
@@ -400,6 +410,7 @@ export default function LeaderModelSelector({
     if (!flowId && defaultSelection) {
       setSelectedReasoningEffort(effort);
       onSelectionReasoningEffortChange?.(effort);
+      if (closeOnSuccess) setEffortPickerOpen(false);
       return;
     }
     if (!flowId) return;
@@ -414,6 +425,7 @@ export default function LeaderModelSelector({
         refreshFlowDetail(flowId),
         refreshFlows(),
       ]);
+      if (closeOnSuccess) setEffortPickerOpen(false);
     } catch (updateError) {
       setSelectedReasoningEffort(previousEffort);
       setRuntimeError(updateError instanceof Error ? updateError.message : '切换推理强度失败');
@@ -506,7 +518,7 @@ export default function LeaderModelSelector({
     <div
       ref={selectorGroupRef}
       data-testid="leader-model-selector"
-      data-effort-layout={usesOfficialCodexEffort ? 'combined' : 'split'}
+      data-effort-layout={usesOfficialCodexEffort ? 'combined' : usesClaudeEffortMenu ? 'claude-menu' : 'split'}
       className={cn(
         'inline-flex h-7 w-fit max-w-[330px] items-center',
         usesOfficialCodexEffort
@@ -676,20 +688,22 @@ export default function LeaderModelSelector({
             ref={effortTriggerRef}
             type="button"
             disabled={(!flowId && !defaultSelection) || reasoningEffortDisabled}
-            aria-label="调整 Codex 推理强度"
+            aria-label={usesClaudeEffortMenu ? '调整 Claude effort' : '调整 Codex 推理强度'}
             data-updating={isUpdatingEffort}
             className={cn(
               'inline-flex h-7 shrink-0 items-center justify-center text-[12px] font-semibold text-foreground transition-colors disabled:cursor-not-allowed disabled:opacity-45',
               usesOfficialCodexEffort
                 ? 'min-w-0 gap-1 rounded-r-full py-0 pl-1 pr-2 hover:bg-ui-control-hover'
-                : 'min-w-[68px] gap-1.5 rounded-lg border px-2',
+                : usesClaudeEffortMenu
+                  ? 'min-w-[78px] gap-1 rounded-lg border border-ui-border-subtle bg-ui-control px-2 hover:bg-ui-control-hover'
+                  : 'min-w-[68px] gap-1.5 rounded-lg border px-2',
             )}
-            style={usesOfficialCodexEffort ? undefined : {
+            style={usesOfficialCodexEffort || usesClaudeEffortMenu ? undefined : {
               borderColor: `color-mix(in srgb, ${triggerEffortColor} 36%, transparent)`,
               background: `color-mix(in srgb, ${triggerEffortColor} 13%, transparent)`,
             }}
           >
-            {!usesOfficialCodexEffort ? <EffortIcon className="size-3.5 shrink-0" style={{ color: triggerEffortColor }} /> : null}
+            {!usesOfficialCodexEffort && !usesClaudeEffortMenu ? <EffortIcon className="size-3.5 shrink-0" style={{ color: triggerEffortColor }} /> : null}
             <span
               data-testid={usesOfficialCodexEffort ? 'codex-effort-trigger-label' : undefined}
               className={usesOfficialCodexEffort ? 'w-7 shrink-0 text-center' : undefined}
@@ -701,7 +715,7 @@ export default function LeaderModelSelector({
                 ? draftReasoningEffortOption?.value
                 : activeReasoningEffortOption?.value)
               : triggerReasoningEffortLabel}</span>
-            {usesOfficialCodexEffort ? <ChevronDown className="size-[15px] shrink-0 text-muted-foreground" /> : null}
+            {usesOfficialCodexEffort || usesClaudeEffortMenu ? <ChevronDown className="size-[15px] shrink-0 text-muted-foreground" /> : null}
           </PopoverTrigger>
           <PopoverContent
             side="top"
@@ -709,14 +723,51 @@ export default function LeaderModelSelector({
             alignOffset={usesOfficialCodexEffort ? officialEffortAlignOffset : 0}
             sideOffset={14}
             collisionAvoidance={{ side: 'shift', align: 'shift', fallbackAxisSide: 'none' }}
-            data-testid="codex-effort-popover"
-            data-effort-variant={usesOfficialCodexEffort ? 'official' : 'classic'}
+            data-testid={usesClaudeEffortMenu ? 'claude-effort-popover' : 'codex-effort-popover'}
+            data-effort-variant={usesOfficialCodexEffort ? 'official' : usesClaudeEffortMenu ? 'claude-menu' : 'classic'}
             className={cn(
               'max-w-[calc(100vw-32px)] rounded-2xl border border-ui-border-subtle bg-ui-overlay shadow-[var(--ui-shadow-overlay)]',
-              usesOfficialCodexEffort ? 'w-[225px] rounded-[13px] px-3 py-3' : 'w-[272px] px-4 py-3.5',
+              usesOfficialCodexEffort
+                ? 'w-[225px] rounded-[13px] px-3 py-3'
+                : usesClaudeEffortMenu
+                  ? 'w-[256px] rounded-xl px-2.5 py-2.5'
+                  : 'w-[272px] px-4 py-3.5',
             )}
           >
             <div className="relative rounded-xl">
+              {usesClaudeEffortMenu ? (
+                <div
+                  data-testid="claude-effort-options"
+                  role="menu"
+                  aria-label="Claude effort levels"
+                  className="space-y-1"
+                >
+                  <div className="px-2 pb-1.5 pt-0.5 text-[14px] font-semibold leading-5 text-foreground">Effort</div>
+                  {effortOptions.map((option) => {
+                    const selected = option.value === activeReasoningEffort;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selected}
+                        disabled={isUpdatingEffort}
+                        onClick={() => void selectReasoningEffort(option.value, true)}
+                        className={cn(
+                          'flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50',
+                          selected ? 'bg-ui-control-hover' : 'hover:bg-ui-control-hover',
+                        )}
+                      >
+                        <span className="min-w-0 flex-1 font-mono text-[13px] font-semibold leading-5 text-foreground">
+                          {option.value}
+                        </span>
+                        {selected ? <Check className="size-[15px] shrink-0 text-foreground" /> : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <>
               {usesOfficialCodexEffort ? (
                 <div className="mb-2 flex h-5 items-center text-[14px] font-medium leading-5 text-muted-foreground">
                   <span
@@ -896,6 +947,8 @@ export default function LeaderModelSelector({
                   </>
                 )}
               </div>
+                </>
+              )}
             </div>
             {runtimeError ? (
               <div className="mt-3 border-t border-ui-border-subtle pt-2 text-xs text-destructive" aria-live="polite">

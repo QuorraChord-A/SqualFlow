@@ -235,6 +235,11 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
       ...providerConfig(runtimeConfig),
       ...reasoningEffortConfig(runtimeConfig, "ephemeral" in input && input.ephemeral === true),
       ...("ephemeral" in input && input.ephemeral === true ? { mcp_servers: {} } : {}),
+      // SquadFlow owns Leader/Expert coordination. Keep Codex's native
+      // multi-agent collaboration tools out of the Leader tool world so it
+      // cannot wait for a different orchestration system (for example,
+      // collaboration.wait_agent) instead of consuming SqualFlow results.
+      ...(isLeader ? { "features.multi_agent": false } : {}),
       model,
       model_provider: modelProvider,
       web_search: "disabled",

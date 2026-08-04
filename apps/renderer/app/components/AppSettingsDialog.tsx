@@ -282,19 +282,8 @@ function uniqueModels<T extends RuntimeModel>(models: T[]): T[] {
   });
 }
 
-function sortRuntimeModelsDescending(models: RuntimeModel[]): RuntimeModel[] {
-  return [...models].sort((left, right) => {
-    const leftName = left.name.trim();
-    const rightName = right.name.trim();
-    if (!leftName && !rightName) return 0;
-    if (!leftName) return -1;
-    if (!rightName) return 1;
-    return rightName.localeCompare(leftName, 'zh-CN', { numeric: true, sensitivity: 'base' });
-  });
-}
-
-function withSortedModels(config: RuntimeConfig): RuntimeConfig {
-  return { ...config, models: sortRuntimeModelsDescending(config.models) };
+function withPreservedModelOrder(config: RuntimeConfig): RuntimeConfig {
+  return { ...config, models: [...config.models] };
 }
 
 function runtimeConfigComparable(config: RuntimeConfig) {
@@ -304,7 +293,10 @@ function runtimeConfigComparable(config: RuntimeConfig) {
     authMode: config.authMode,
     baseUrl: config.baseUrl,
     apiKey: config.apiKey,
-    models: config.models,
+    models: config.models.map((model) => ({
+      ...model,
+      name: model.name.trim(),
+    })),
   };
 }
 
@@ -610,11 +602,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const SelectedRoleIcon = selectedRole.Icon;
 
   const applySnapshot = (snapshot: { roles: RoleRuntimeBindingDto[]; configs: RuntimeConfig[] }) => {
-    const sortedConfigs = snapshot.configs.map(withSortedModels);
-    setPersistedRuntimeConfigs(sortedConfigs);
+    const configs = snapshot.configs.map(withPreservedModelOrder);
+    setPersistedRuntimeConfigs(configs);
     setRuntimeConfigs((current) => {
       const drafts = current.filter((config) => isDraftRuntimeConfig(config));
-      return [...sortedConfigs, ...drafts];
+      return [...configs, ...drafts];
     });
     setRoleConfigs(roleConfigMap(snapshot.roles));
     setRoleModels(roleModelMap(snapshot.roles));
@@ -790,13 +782,13 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     setIsSaving(true);
     try {
       const snapshot = await deleteAgentRuntimeConfig(targetConfig.id);
-      const sortedConfigs = snapshot.configs.map(withSortedModels);
-      setRuntimeConfigs(sortedConfigs);
+      const configs = snapshot.configs.map(withPreservedModelOrder);
+      setRuntimeConfigs(configs);
       setRoleConfigs(roleConfigMap(snapshot.roles));
       setRoleModels(roleModelMap(snapshot.roles));
       setRoleEnabled(roleEnabledMap(snapshot.roles));
-      setPersistedRuntimeConfigs(sortedConfigs);
-      setSelectedConfigId(sortedConfigs[0]?.id ?? "");
+      setPersistedRuntimeConfigs(configs);
+      setSelectedConfigId(configs[0]?.id ?? "");
       setApiKeyVisible(false);
       setLocalAuthStatus(null);
       setConfigPendingDelete(null);
@@ -811,10 +803,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const addModel = () => {
     if (!selectedRuntimeConfig) return;
     const unfinishedModel = selectedRuntimeConfig.models.find((model) => !model.name.trim());
-    if (unfinishedModel) {
-      showModelFeedback("请先填写当前未完成的模型名称，再添加新模型。", "error");
-      return;
-    }
+    if (unfinishedModel) return;
     updateSelectedRuntimeConfig({
       models: [
         {
@@ -853,10 +842,10 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     const normalizedConfig = {
       ...targetConfig,
       name: targetConfig.name.trim(),
-      models: sortRuntimeModelsDescending(targetConfig.models.map((model) => modelForSave(targetConfig, {
+      models: targetConfig.models.map((model) => modelForSave(targetConfig, {
         ...model,
         name: model.name.trim(),
-      }))),
+      })),
     };
     const submittedVersion = runtimeConfigVersion(normalizedConfig);
     setIsSaving(true);
@@ -871,20 +860,20 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
             models: normalizedConfig.models,
           })
         : await updateAgentRuntimeConfig(normalizedConfig.id, normalizedConfig);
-      const sortedSavedConfig = withSortedModels(savedConfig);
+      const savedConfigWithOrder = withPreservedModelOrder(savedConfig);
       setRuntimeConfigs((current) => current.map((config) => {
         if (config.id !== targetConfig.id) return config;
-        if (runtimeConfigVersion(config) === submittedVersion) return sortedSavedConfig;
+        if (runtimeConfigVersion(config) === submittedVersion) return savedConfigWithOrder;
         return isDraftRuntimeConfig(config)
-          ? { ...config, id: sortedSavedConfig.id, fileName: sortedSavedConfig.fileName, filePath: sortedSavedConfig.filePath }
+          ? { ...config, id: savedConfigWithOrder.id, fileName: savedConfigWithOrder.fileName, filePath: savedConfigWithOrder.filePath }
           : config;
       }));
       setPersistedRuntimeConfigs((current) => {
-        const targetIndex = current.findIndex((config) => config.id === targetConfig.id || config.id === sortedSavedConfig.id);
-        if (targetIndex < 0) return [...current, sortedSavedConfig];
-        return current.map((config, index) => index === targetIndex ? sortedSavedConfig : config);
+        const targetIndex = current.findIndex((config) => config.id === targetConfig.id || config.id === savedConfigWithOrder.id);
+        if (targetIndex < 0) return [...current, savedConfigWithOrder];
+        return current.map((config, index) => index === targetIndex ? savedConfigWithOrder : config);
       });
-      setSelectedConfigId((current) => current === targetConfig.id ? sortedSavedConfig.id : current);
+      setSelectedConfigId((current) => current === targetConfig.id ? savedConfigWithOrder.id : current);
       failedAutoSaveVersionsRef.current.delete(targetConfig.id);
       setRuntimeFeedback(null);
       setModelFeedback(null);
@@ -903,7 +892,12 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       if (runtimeConfigHasChanges(selectedRuntimeConfig, persistedSelected)) {
         const validationError = runtimeConfigValidationError(runtimeConfigs, selectedRuntimeConfig);
         if (validationError?.scope === "runtime") setRuntimeFeedback(validationError.message);
-        if (validationError?.scope === "model") showModelFeedback(validationError.message, "error");
+        if (
+          validationError?.scope === "model"
+          && selectedRuntimeConfig.models.every((model) => model.name.trim())
+        ) {
+          showModelFeedback(validationError.message, "error");
+        }
       }
     }
     const nextConfig = runtimeConfigs.find((config) => {
@@ -1003,7 +997,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       showModelFeedback("请至少选择一个模型。", "error");
       return;
     }
-    updateSelectedRuntimeConfig({ models: sortRuntimeModelsDescending(selectedModels) });
+    const existingModelIds = new Set(selectedRuntimeConfig.models.map((model) => model.id));
+    const selectedModelIds = new Set(selectedModels.map((model) => model.id));
+    const addedModels = selectedModels.filter((model) => !existingModelIds.has(model.id));
+    const retainedModels = selectedRuntimeConfig.models.filter((model) => selectedModelIds.has(model.id));
+    updateSelectedRuntimeConfig({ models: [...addedModels, ...retainedModels] });
     setAvailableModelsDialogOpen(false);
     setAvailableModelChoices(null);
     showModelFeedback(`已加入 ${selectedModels.length} 个模型。`, "success");

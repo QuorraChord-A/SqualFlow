@@ -181,6 +181,28 @@ function flowStateMessage(flowId: string, store: Store, logId?: string): ServerW
   });
 }
 
+function leaderRuntimeState(flowId: string, store: Store, leaderRuntime: LeaderRuntime): "idle" | "starting" | "streaming" {
+  if (leaderRuntime.getState) return leaderRuntime.getState(flowId);
+  return store.listAgentSessions(flowId)
+    .some((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "streaming")
+    ? "streaming"
+    : "idle";
+}
+
+function leaderRuntimeStateMessage(flowId: string, store: Store, leaderRuntime: LeaderRuntime, logId?: string): ServerWsMessage {
+  const leaderAgentSessionId = store.listAgentSessions(flowId)
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null)?.id ?? null;
+  return ServerWsMessageSchema.parse({
+    type: "leader:runtime_state",
+    flow_id: flowId,
+    ...(logId ? { log_id: logId } : {}),
+    data: {
+      status: leaderRuntimeState(flowId, store, leaderRuntime),
+      leader_agent_session_id: leaderAgentSessionId,
+    },
+  });
+}
+
 function queueClientPayload(itemPayload: Record<string, unknown>): Record<string, unknown> {
   const clientPayload = isRecord(itemPayload.client_payload) ? itemPayload.client_payload : {};
   const attachments = Array.isArray(itemPayload.attachments)
@@ -632,6 +654,24 @@ async function handleFlowMessage(
     return false;
   }
 
+  // A client message is the single Leader input entry point. If the real
+  // Leader runtime is active, deliver it as an in-turn guide; Expert/Task
+  // activity alone must never force the message into the user-visible queue.
+  if (leaderRuntimeState(message.flow_id, connection.store, connection.leaderRuntime) === "streaming") {
+    return handleFlowGuide(
+      { ...message, type: "flow:guide" },
+      connection,
+      onMaterialized,
+      {
+        fallbackToNormal: true,
+        submissionType: "normal",
+        ackType: "flow:message_ack",
+        payload: flowMessageSubmissionPayload(message),
+        eventType: "flow.user_message",
+      },
+    );
+  }
+
   const openUserTurn = connection.store.getOpenUserTurn(message.flow_id);
   const leaderRunning = connection.store
     .listAgentSessions(message.flow_id)
@@ -900,7 +940,17 @@ async function handleFlowGuide(
   message: ClientWsMessage & { type: "flow:guide" },
   connection: WsConnection,
   onMaterialized?: (messageId: string) => void,
+  options: {
+    fallbackToNormal?: boolean;
+    submissionType?: "guide" | "normal";
+    ackType?: "flow:guide_ack" | "flow:message_ack";
+    payload?: Record<string, unknown>;
+    eventType?: "flow.guide_message" | "flow.user_message";
+  } = {},
 ): Promise<boolean> {
+  const submissionType = options.submissionType ?? "guide";
+  const ackType = options.ackType ?? "flow:guide_ack";
+  const eventType = options.eventType ?? "flow.guide_message";
   const flow = connection.store.getFlow(message.flow_id);
   if (!flow) {
     await connection.send(errorMessage("not_found", "Flow not found", message.flow_id, message.log_id));
@@ -920,17 +970,21 @@ async function handleFlowGuide(
     return false;
   }
 
+  if (options.fallbackToNormal && leaderRuntimeState(message.flow_id, connection.store, connection.leaderRuntime) !== "streaming") {
+    return handleFlowMessage({ ...message, type: "flow:message" }, connection, onMaterialized);
+  }
+
   const messageId = message.client_message_id ?? `msg-user-guided-${randomUUID()}`;
-  const submissionPayload = guideSubmissionPayload(message);
+  const submissionPayload = options.payload ?? guideSubmissionPayload(message);
   const payloadHash = submissionPayloadHash(submissionPayload);
   const existingSubmission = connection.store.getSubmission(message.flow_id, messageId);
   if (existingSubmission && (
-    existingSubmission.submissionType !== "guide"
+    existingSubmission.submissionType !== submissionType
     || existingSubmission.payloadHash !== payloadHash
   )) {
     await connection.send(errorMessage(
       "MESSAGE_ID_CONFLICT",
-      "The same Guide id was already used with different content.",
+      "The same Leader message id was already used with different content.",
       message.flow_id,
       message.log_id,
     ));
@@ -939,7 +993,7 @@ async function handleFlowGuide(
   if (existingSubmission?.receiptState === "materialized") {
     onMaterialized?.(existingSubmission.messageId ?? messageId);
     await connection.send(ServerWsMessageSchema.parse({
-      type: "flow:guide_ack",
+      type: ackType,
       flow_id: message.flow_id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
@@ -967,7 +1021,7 @@ async function handleFlowGuide(
     : connection.store.acceptSubmission({
         flowId: message.flow_id,
         clientMessageId: messageId,
-        submissionType: "guide",
+        submissionType,
         payloadHash,
         payload: submissionPayload,
       });
@@ -1001,6 +1055,7 @@ async function handleFlowGuide(
       leaderAgentSessionId: leader.id,
       messageId,
       attachments: message.attachments,
+      specRequested: message.spec_requested === true,
       beforeDeliver: () => {
         connection.store.sqlite.transaction(() => {
           if (feedbackInput && !connection.store.recordPlanFeedback(feedbackInput)) {
@@ -1047,7 +1102,7 @@ async function handleFlowGuide(
       flowId: message.flow_id,
       userTurnId: connection.store.getOpenUserTurn(message.flow_id)?.id,
       agentSessionId: leader.id,
-      eventType: "flow.guide_message",
+      eventType,
       payload: {
         message_id: messageId,
         created_at: createdAt,
@@ -1055,7 +1110,7 @@ async function handleFlowGuide(
       },
     });
     await connection.send(ServerWsMessageSchema.parse({
-      type: "flow:guide_ack",
+      type: ackType,
       flow_id: message.flow_id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
@@ -1909,6 +1964,7 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
       connection.subscriptions.add(message.flow_id);
       connection.eventBus.subscribe(message.flow_id, connection.clientId, connection.send);
       await connection.send(flowStateMessage(message.flow_id, connection.store, message.log_id));
+      await connection.send(leaderRuntimeStateMessage(message.flow_id, connection.store, connection.leaderRuntime, message.log_id));
       connection.logger?.info({
         event: "flow_snapshot_sent",
         runId: connection.runId,

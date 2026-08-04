@@ -91,10 +91,11 @@ function leaderGuideMessage(
   content: string,
   attachments?: MessageImageAttachment[],
   planFeedback?: LeaderPlanFeedback[],
+  specRequested?: boolean,
 ): CodexRuntimeInput {
   return {
     type: "text",
-    text: buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback }),
+    text: buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback, specRequested }),
     flowId,
     attachments,
     attachmentPlacement: "trailing",
@@ -858,7 +859,9 @@ class CodexRuntimeQuery implements RuntimeRawQueryLike {
         await this.answerServerRequest(event);
         continue;
       }
-      await this.refreshMcpServerStatusForToolEvent(event, threadId);
+      // MCP server icon discovery is intentionally disabled. Do not query
+      // mcpServerStatus/list on the tool-event path: it is optional UI metadata
+      // and can block the actual MCP tool call while remote servers initialize.
       const completedTurn = method(event) === "turn/completed"
         && stringValue(params(event)?.threadId) === threadId;
       const eventTurn = completedTurn && isRecord(params(event)?.turn)

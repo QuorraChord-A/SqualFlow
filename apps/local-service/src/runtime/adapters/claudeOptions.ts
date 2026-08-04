@@ -158,6 +158,11 @@ function normalizeCanUseTool(canUseTool: Options["canUseTool"]): Options["canUse
 
 export function buildClaudeBaseOptions(input: BuildClaudeBaseOptionsInput): Options {
   const inlineSettings = buildInlineSettings(input.settingsPath, input.runtimeConfig, input.modelName, input.scratchDir);
+  // Claude Agent SDK consumes effort as a top-level query option. Flow Namer is
+  // intentionally excluded because it is a one-shot extraction request.
+  const configuredEffort = input.ephemeral === true
+    ? null
+    : parseRuntimeReasoningEffort("claudecode", input.runtimeConfig?.reasoningEffort);
   return {
     systemPrompt: input.systemPrompt,
     cwd: input.cwd,
@@ -202,9 +207,7 @@ export function buildClaudeBaseOptions(input: BuildClaudeBaseOptionsInput): Opti
     resume: input.resume,
     sessionId: input.sessionId,
     pathToClaudeCodeExecutable: input.pathToClaudeCodeExecutable,
-    ...(input.ephemeral !== true && parseRuntimeReasoningEffort("claudecode", input.runtimeConfig?.reasoningEffort)
-      ? { effort: parseRuntimeReasoningEffort("claudecode", input.runtimeConfig?.reasoningEffort) as Options["effort"] }
-      : {}),
+    ...(configuredEffort ? { effort: configuredEffort as Options["effort"] } : {}),
   };
 }
 

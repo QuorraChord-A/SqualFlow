@@ -11,6 +11,8 @@ import {
 import type { AgentRuntimeConnectionTestInput, AgentRuntimeConnectionTestResult } from "./runtimeConnectionTest.js";
 import { inheritedProcessEnv } from "./claudeOptions.js";
 
+const CLAUDE_CONNECTION_TEST_TIMEOUT_MS = 30_000;
+
 function testModel(runtimeConfig: RuntimeConfig, input: AgentRuntimeConnectionTestInput) {
   const bodyModel = input.model?.trim();
   const firstConfigModel = runtimeConfig.models.find((model) => model.name.trim())?.name.trim();
@@ -55,9 +57,9 @@ function resultErrorCode(message: SDKMessage) {
   return "GENERATION_TEST_FAILED";
 }
 
-function errorCode(error: unknown) {
+function errorCode(error: unknown, timedOut: boolean) {
   const message = error instanceof Error ? error.message : String(error);
-  if (/aborted|abort/i.test(message)) return "TIMEOUT";
+  if (timedOut || /timed out|timeout/i.test(message)) return "TIMEOUT";
   if (/auth|api key|unauthorized|401|403/i.test(message)) return "AUTH_FAILED";
   if (/model|not_found|not found|404/i.test(message)) return "MODEL_UNAVAILABLE";
   if (/rate|429/i.test(message)) return "RATE_LIMITED";
@@ -96,7 +98,11 @@ export async function testClaudeRuntimeConnection(
   const runtimeModel = claudeRuntimeModelName(configuredModel, contextWindowK);
   const startedAt = Date.now();
   const abortController = new AbortController();
-  const timeout = setTimeout(() => abortController.abort(), 15_000);
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    abortController.abort();
+  }, CLAUDE_CONNECTION_TEST_TIMEOUT_MS);
   const claudeConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "squadflow-claude-test-"));
 
   try {
@@ -124,7 +130,10 @@ export async function testClaudeRuntimeConnection(
 
     let finalResult: SDKMessage | null = null;
     for await (const message of stream) {
-      if (message.type === "result") finalResult = message;
+      if (message.type === "result") {
+        finalResult = message;
+        break;
+      }
     }
 
     const latencyMs = Date.now() - startedAt;
@@ -154,8 +163,10 @@ export async function testClaudeRuntimeConnection(
       sdk: runtimeConfig.sdk,
       model: configuredModel,
       latencyMs: Date.now() - startedAt,
-      code: errorCode(error),
-      message: error instanceof Error ? error.message : String(error),
+      code: errorCode(error, timedOut),
+      message: timedOut
+        ? "连接测试超时（30 秒），请检查 Base URL、模型和网络。"
+        : error instanceof Error ? error.message : String(error),
     };
   } finally {
     clearTimeout(timeout);

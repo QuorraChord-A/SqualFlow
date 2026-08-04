@@ -109,8 +109,9 @@ function leaderGuideMessage(
   content: string,
   attachments?: MessageImageAttachment[],
   planFeedback?: LeaderPlanFeedback[],
+  specRequested?: boolean,
 ): SDKUserMessage {
-  const message = buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback });
+  const message = buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback, specRequested });
   return {
     type: "user",
     message: {

@@ -32,6 +32,7 @@ export type TranscriptActiveTurn = {
 };
 
 export type WsInMessage =
+  | { type: "leader:runtime_state"; flow_id: string; log_id?: string; data: { status: "idle" | "starting" | "streaming"; leader_agent_session_id: string | null } }
   | { type: "flow:state"; flow_id: string; data: any }
   | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
   | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }

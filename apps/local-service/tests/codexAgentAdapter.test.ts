@@ -120,7 +120,7 @@ describe("Codex runtime adapter", () => {
     });
   });
 
-  it("refreshes MCP status after Codex starts a ready MCP tool", async () => {
+  it("does not refresh MCP status when Codex starts an MCP tool", async () => {
     const requests: Array<{ method: string; params: unknown }> = [];
     const observedStatuses: unknown[] = [];
     const clientFactory: CodexClientFactory = () => ({
@@ -181,15 +181,8 @@ describe("Codex runtime adapter", () => {
       if (event.type === "turn_completed") break;
     }
 
-    expect(requests.filter((request) => request.method === "mcpServerStatus/list")).toHaveLength(1);
-    expect(observedStatuses).toEqual([expect.objectContaining({
-      data: [expect.objectContaining({
-        name: "context7",
-        serverInfo: expect.objectContaining({
-          icons: [expect.objectContaining({ src: "https://context7.com/context7-icon-green.png" })],
-        }),
-      })],
-    })]);
+    expect(requests.filter((request) => request.method === "mcpServerStatus/list")).toHaveLength(0);
+    expect(observedStatuses).toEqual([]);
   });
 
   it("sets no reasoning effort on the ephemeral Flow Namer turn", async () => {

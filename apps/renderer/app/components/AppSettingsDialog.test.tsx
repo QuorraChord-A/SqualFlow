@@ -360,7 +360,7 @@ describe("AppSettingsDialog", () => {
     expect(await screen.findByRole("button", { name: "已复制路径" })).toBeInTheDocument();
   });
 
-  it("orders provider models descending and inserts a new model on the first row", async () => {
+  it("keeps provider model order and inserts a new model on the first row", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
 
@@ -381,10 +381,60 @@ describe("AppSettingsDialog", () => {
       within(label.closest("label") as HTMLLabelElement).getByRole("textbox") as HTMLInputElement
     ).value);
 
-    expect(modelValues()).toEqual(["opus", "mimo-v2.5"]);
+    expect(modelValues()).toEqual(["mimo-v2.5", "opus"]);
 
     await user.click(screen.getByRole("button", { name: "添加模型" }));
-    expect(modelValues()).toEqual(["", "opus", "mimo-v2.5"]);
+    expect(modelValues()).toEqual(["", "mimo-v2.5", "opus"]);
+    expect(screen.queryByText("请填写所有模型名称。")).not.toBeInTheDocument();
+  });
+
+  it("does not keep auto-saving or reorder a newly added model", async () => {
+    const user = userEvent.setup();
+    const snapshot = {
+      ...runtimeSnapshot,
+      configs: runtimeSnapshot.configs.map((config, index) => index === 0
+        ? {
+            ...config,
+            models: config.models.map((model) => ({ ...model, contextWindowK: 1_000 })),
+          }
+        : config),
+    };
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(snapshot);
+    apiMocks.updateAgentRuntimeConfig.mockImplementation(async (_configId, config) => config);
+
+    render(
+      <AppSettingsDialog
+        open
+        onOpenChange={vi.fn()}
+        initialSection="agents"
+        initialAgentTab="runtime_configs"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText("正在加载智能体配置...")).not.toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    const firstModelInput = within(screen.getAllByText("模型名称")[0].closest("label") as HTMLLabelElement)
+      .getByRole("textbox");
+    await user.type(firstModelInput, "aaa");
+
+    await waitFor(() => {
+      expect(apiMocks.updateAgentRuntimeConfig).toHaveBeenCalledTimes(1);
+    }, { timeout: 3_000 });
+    await new Promise((resolve) => setTimeout(resolve, 1_200));
+    expect(apiMocks.updateAgentRuntimeConfig).toHaveBeenCalledTimes(1);
+    expect(apiMocks.updateAgentRuntimeConfig).toHaveBeenCalledWith(
+      "default-agent-sdk",
+      expect.objectContaining({
+        models: [
+          expect.objectContaining({ name: "aaa" }),
+          expect.objectContaining({ name: "mimo-v2.5" }),
+          expect.objectContaining({ name: "opus" }),
+        ],
+      }),
+    );
   });
 
   it("refreshes Claude API-key models and surfaces missing metadata", async () => {

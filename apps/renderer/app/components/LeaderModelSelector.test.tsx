@@ -312,6 +312,48 @@ describe("LeaderModelSelector", () => {
     }));
   });
 
+  it("uses a distinct Claude SDK effort menu and persists the selected SDK value", async () => {
+    const user = userEvent.setup();
+    useFlowStore.setState({
+      flows: [{
+        id: "flow-1",
+        name: "Flow 1",
+        description: "",
+        type: "full",
+        status: "ready",
+        current_stage: null,
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        leader_runtime_sdk: "claudecode",
+        leader_runtime_config_id: "default-agent-sdk",
+        leader_runtime_model_id: "qwen-plus",
+        leader_runtime_reasoning_effort: "high",
+      }],
+    });
+
+    render(<LeaderModelSelector flowId="flow-1" />);
+
+    const trigger = await screen.findByRole("button", { name: "调整 Claude effort" });
+    expect(trigger).toHaveTextContent("high");
+    await user.click(trigger);
+
+    const popover = screen.getByTestId("claude-effort-popover");
+    expect(popover).toHaveAttribute("data-effort-variant", "claude-menu");
+    expect(screen.getByTestId("leader-model-selector")).toHaveAttribute("data-effort-layout", "claude-menu");
+    expect(screen.getAllByRole("menuitemradio")).toHaveLength(5);
+    expect(screen.getByRole("menuitemradio", { name: /xhigh/ })).toBeInTheDocument();
+    expect(popover).not.toHaveTextContent("Claude Agent SDK");
+    expect(popover).not.toHaveTextContent("更快，适合简单任务");
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("menuitemradio", { name: /xhigh/ }));
+
+    await waitFor(() => expect(apiMocks.updateFlowLeaderRuntimeSelection).toHaveBeenCalledWith("flow-1", {
+      reasoningEffort: "xhigh",
+    }));
+    await waitFor(() => expect(screen.queryByTestId("claude-effort-popover")).not.toBeInTheDocument());
+  });
+
   it("shows the fixed Codex effort scale when model metadata omits it", async () => {
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
       ...runtimeSnapshot,

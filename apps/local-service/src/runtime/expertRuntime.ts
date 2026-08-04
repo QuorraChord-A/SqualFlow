@@ -51,7 +51,6 @@ import {
 import { createExpertTaskStorePort } from "../mcp/expertTaskStorePort.js";
 import { buildPlatformEvent, computeFlowSig, parseMessageSegments } from "../protocol/platformEvent.js";
 import {
-  refreshMcpServerIcons,
   type McpServerIconRegistry,
 } from "./mcpServerIcons.js";
 
@@ -502,7 +501,8 @@ class FlowExpertWorker {
       this.query.setMcpServerStatusObserver?.((status) => {
         this.active?.adapter?.captureMcpServerStatus?.(status);
       });
-      void refreshMcpServerIcons(this.query, this.active?.adapter);
+      // MCP server icon discovery is intentionally disabled. The renderer uses
+      // the built-in MCP fallback icon so status probes cannot delay a Flow.
       void this.consume();
     } catch (error) {
       await this.failOutstanding(error instanceof Error ? error : new Error(String(error)));

@@ -52,6 +52,7 @@ export const ClientWsMessageSchema = z.discriminatedUnion("type", [
     type: z.literal("flow:guide"),
     flow_id: z.string(),
     content: z.string(),
+    spec_requested: z.boolean().optional(),
     attachments: MessageImageAttachmentsSchema,
     plan_feedback: z.array(PlanFeedbackSchema).max(40).optional(),
     client_message_id: z.string().optional(),
@@ -162,6 +163,15 @@ const ActiveTurnSchema = z.object({
 }).strict();
 
 export const ServerWsMessageSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("leader:runtime_state"),
+    flow_id: z.string(),
+    log_id: z.string().optional(),
+    data: z.object({
+      status: z.enum(["idle", "starting", "streaming"]),
+      leader_agent_session_id: z.string().nullable(),
+    }).strict(),
+  }).strict(),
   z.object({ type: z.literal("flow:state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:status"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:name_updated"), flow_id: z.string(), log_id: z.string().optional(), data: z.object({ name: z.string(), name_generation_status: z.enum(["pending", "generated", "fallback", "manual"]) }).strict() }).strict(),

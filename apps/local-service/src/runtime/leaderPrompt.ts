@@ -150,9 +150,13 @@ export function buildLeaderGuidePrompt(input: {
   content: string;
   attachments?: MessageImageAttachment[];
   planFeedback?: LeaderPlanFeedback[];
+  specRequested?: boolean;
 }): string {
   return joinSegments([
     input.content ? buildPlatformEvent({ flowId: input.flowId, type: "guide", body: input.content }) : null,
+    input.specRequested === true
+      ? buildPlatformEvent({ flowId: input.flowId, type: "spec_requested", body: SPEC_REQUESTED_BODY })
+      : null,
     buildPlanFeedbackEvent(input.flowId, input.planFeedback),
     ...buildBrowserCommentEvents(input.flowId, input.attachments),
   ]);

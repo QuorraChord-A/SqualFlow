@@ -179,4 +179,28 @@ describe("claude options env isolation", () => {
     expect(namerOptions.thinking).toEqual({ type: "disabled" });
     expect(namerOptions.effort).toBeUndefined();
   });
+
+  it("passes every supported Claude SDK effort level to the top-level options", () => {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+      const options = buildClaudeBaseOptions(baseOptionsInput({
+        runtimeConfig: {
+          ...apiKeyConfig(),
+          reasoningEffort: effort,
+        } as RuntimeConfig & { reasoningEffort: string },
+      }));
+
+      expect(options.effort).toBe(effort);
+    }
+  });
+
+  it("does not pass Claude Code-only ultracode as an SDK effort", () => {
+    const options = buildClaudeBaseOptions(baseOptionsInput({
+      runtimeConfig: {
+        ...apiKeyConfig(),
+        reasoningEffort: "ultracode",
+      } as RuntimeConfig & { reasoningEffort: string },
+    }));
+
+    expect(options.effort).toBeUndefined();
+  });
 });

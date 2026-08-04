@@ -283,6 +283,20 @@ describe("buildCodexExpertOptions browser MCP config", () => {
 });
 
 describe("buildCodexLeaderOptions MCP config", () => {
+  it("disables Codex native multi-agent collaboration for the Leader runtime", () => {
+    const leader = buildCodexLeaderOptions({
+      role: "leader",
+      systemPrompt: "system",
+      cwd: "/tmp/cwd",
+      capabilities: ["read"],
+      mcpTools: [],
+    });
+    const expert = buildCodexExpertOptions(baseInput());
+
+    expect(leader.config["features.multi_agent"]).toBe(false);
+    expect(expert.config["features.multi_agent"]).toBeUndefined();
+  });
+
   it("gives a writable Leader the project and slash tmp without changing Expert sandbox defaults", () => {
     const options = buildCodexLeaderOptions({
       role: "leader",

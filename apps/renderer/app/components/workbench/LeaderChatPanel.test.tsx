@@ -146,7 +146,7 @@ const pendingCard: DecisionCardData = {
 };
 
 function renderPanel(overrides: Partial<React.ComponentProps<typeof LeaderChatPanel>> = {}) {
-  return render(
+  const rendered = render(
     <LeaderChatPanel
       flowId="flow-1"
       leaderAgentSessionId="leader-session-1"
@@ -159,6 +159,30 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof LeaderChatPa
       {...overrides}
     />,
   );
+  if (overrides.userTurns?.some((turn) => turn.status === "active")) {
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "leader:runtime_state",
+          flow_id: overrides.flowId ?? "flow-1",
+          data: { status: "streaming", leader_agent_session_id: overrides.leaderAgentSessionId ?? "leader-session-1" },
+        } as unknown as WsInMessage);
+      }
+    });
+  }
+  return rendered;
+}
+
+function emitLeaderRuntimeState(status: "idle" | "starting" | "streaming", flowId = "flow-1", leaderAgentSessionId = "leader-session-1") {
+  act(() => {
+    for (const handler of wsMessageHandlers) {
+      handler({
+        type: "leader:runtime_state",
+        flow_id: flowId,
+        data: { status, leader_agent_session_id: leaderAgentSessionId },
+      } as unknown as WsInMessage);
+    }
+  });
 }
 
 describe("LeaderChatPanel", () => {
@@ -467,6 +491,8 @@ describe("LeaderChatPanel", () => {
 
     render(<Harness />);
 
+    emitLeaderRuntimeState("streaming");
+
     const stopButton = screen.getByRole("button", { name: "停止本轮" });
     expect(stopButton).toBeVisible();
     expect(stopButton).toHaveClass("size-9", "rounded-full", "dark:bg-foreground", "dark:text-background");
@@ -510,6 +536,46 @@ describe("LeaderChatPanel", () => {
       content: "继续执行",
     }));
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
+  });
+
+  it("sends directly when Leader is idle even if an old queue item remains", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+    renderPanel({
+      userTurns: [{
+        id: "turn-expert-active",
+        triggerMessageId: "msg-expert-active",
+        status: "active",
+        startedAt: "2026-06-29T07:00:00.000Z",
+        activeStartedAt: "2026-06-29T07:00:00.000Z",
+        activeDurationMs: 1200,
+        completedAt: null,
+      }],
+    });
+    emitLeaderRuntimeState("idle");
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "flow:queue_state",
+          flow_id: "flow-1",
+          data: { messages: [{ id: "old-queued-message", content: "旧排队消息", status: "accepted" }] },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox", { name: "输入消息..." }), "新的直接消息");
+    await user.keyboard("{Enter}");
+
+    expect(wsClient.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:message",
+      flow_id: "flow-1",
+      content: "新的直接消息",
+    }));
+    expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: "flow:queue_add",
+      content: "新的直接消息",
+    }));
   });
 
   it("offers stopping the active user turn beside a pending permission decision", async () => {
@@ -1359,6 +1425,8 @@ describe("LeaderChatPanel", () => {
         </div>
       </>,
     );
+
+    emitLeaderRuntimeState("streaming");
 
     await user.type(within(screen.getByTestId("compact-panel")).getByRole("textbox", { name: "继续输入以排队后续修改" }), "共享排队消息");
     await user.keyboard("{Enter}");

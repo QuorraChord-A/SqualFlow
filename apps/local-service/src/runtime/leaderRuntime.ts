@@ -67,11 +67,12 @@ import { errorDiagnostic, type OperationalLogger } from "../observability/operat
 import { reportRuntimeDiagnostic } from "./runtimeDiagnosticReporter.js";
 import { queryWaitFinishedMs } from "./queryLifecyclePolicy.js";
 import {
-  refreshMcpServerIcons,
   type McpServerIconRegistry,
 } from "./mcpServerIcons.js";
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
+
+export type LeaderRuntimeState = "idle" | "starting" | "streaming";
 
 export class LeaderInputRejectedError extends Error {
   readonly code = "PENDING_DECISION";
@@ -82,6 +83,7 @@ export class LeaderInputRejectedError extends Error {
 }
 
 export type LeaderRuntime = {
+  getState?: (flowId: string) => LeaderRuntimeState;
   runLeaderTurn: (input: LeaderTurnInput) => Promise<void>;
   guideLeaderTurn: (input: {
     flowId: string;
@@ -90,6 +92,7 @@ export type LeaderRuntime = {
     leaderAgentSessionId: string;
     messageId?: string;
     attachments?: MessageImageAttachment[];
+    specRequested?: boolean;
     beforeDeliver?: () => void;
   }) => Promise<{ accepted: true; messageId: string }>;
   getContextUsage: (flowId: string) => Promise<ContextUsageSnapshot | null>;
@@ -353,6 +356,7 @@ class LeaderFlowStream {
     leaderAgentSessionId: string;
     messageId?: string;
     attachments?: MessageImageAttachment[];
+    specRequested?: boolean;
     beforeDeliver?: () => void;
   }) {
     if (!this.acceptsInput || !this.active) {
@@ -367,6 +371,7 @@ class LeaderFlowStream {
       input.content,
       input.attachments,
       input.planFeedback,
+      input.specRequested,
     ));
     return {
       accepted: true as const,
@@ -384,7 +389,8 @@ class LeaderFlowStream {
       this.query.setMcpServerStatusObserver?.((status) => {
         this.active?.adapter?.captureMcpServerStatus?.(status);
       });
-      void refreshMcpServerIcons(this.query, this.active?.adapter);
+      // MCP server icon discovery is intentionally disabled. The renderer uses
+      // the built-in MCP fallback icon so status probes cannot delay a Flow.
       await this.consume();
     } catch (error) {
       if (!this.closed) await this.fail(error instanceof Error ? error : new Error(String(error)));
@@ -876,6 +882,35 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   const browserTurnContexts = new Map<string, { agentSessionId: string | null }>();
   const contextCompactions = input.contextCompactions ?? new ContextCompactionState();
 
+  function getState(flowId: string): LeaderRuntimeState {
+    const stream = streams.get(flowId);
+    if (stream) {
+      return stream.acceptsInput && stream.activeLeaderAgentSessionId ? "streaming" : "starting";
+    }
+    return pendingStarts.has(flowId) ? "starting" : "idle";
+  }
+
+  function leaderAgentSessionId(flowId: string): string | null {
+    const stream = streams.get(flowId);
+    if (stream?.activeLeaderAgentSessionId) return stream.activeLeaderAgentSessionId;
+    return input.store.listAgentSessions(flowId)
+      .find((session) => session.expertId === "exp-leader" && session.taskId === null)?.id ?? null;
+  }
+
+  function publishRuntimeState(flowId: string) {
+    void input.eventBus.publish(flowId, {
+      type: "leader:runtime_state",
+      flow_id: flowId,
+      data: {
+        status: getState(flowId),
+        leader_agent_session_id: leaderAgentSessionId(flowId),
+      },
+    }).catch(() => {
+      // Runtime state is also re-sent on flow subscription; a transient socket
+      // failure must not affect the Leader turn.
+    });
+  }
+
   async function publishFlowName(flowId: string, name: string, status: "generated" | "fallback") {
     await input.eventBus.publish(flowId, {
       type: "flow:name_updated",
@@ -1336,7 +1371,10 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       scheduleFlowNameGeneration,
       input,
       () => {
-        if (streams.get(turn.flowId) === stream) streams.delete(turn.flowId);
+        if (streams.get(turn.flowId) === stream) {
+          streams.delete(turn.flowId);
+          publishRuntimeState(turn.flowId);
+        }
         void leaderMcpBinding.close();
         void browserMcpBinding?.close();
       },
@@ -1346,6 +1384,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       modelName,
     );
     streams.set(turn.flowId, stream);
+    publishRuntimeState(turn.flowId);
     return stream;
   }
 
@@ -1550,6 +1589,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   }
 
   return {
+    getState,
     async runLeaderTurn(turn) {
       const enrichedTurn = enrichSpecRequestedTurn(turn);
       const cancelledTurnId = cancelledTurnByFlow.get(enrichedTurn.flowId);
@@ -1605,6 +1645,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       }
       const start = createPendingLeaderStart();
       pendingStarts.set(enrichedTurn.flowId, start);
+      publishRuntimeState(enrichedTurn.flowId);
       try {
         const stream = await createStream(enrichedTurn);
         if (start.cancelled) {
@@ -1617,6 +1658,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       } finally {
         if (pendingStarts.get(enrichedTurn.flowId) === start) pendingStarts.delete(enrichedTurn.flowId);
         start.settle();
+        publishRuntimeState(enrichedTurn.flowId);
       }
     },
     async guideLeaderTurn(guide) {
@@ -1641,6 +1683,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         void stream.cancel();
         streams.delete(flowId);
       }
+      publishRuntimeState(flowId);
       return Boolean(userTurnId || pendingStart || stream);
     },
     async close() {

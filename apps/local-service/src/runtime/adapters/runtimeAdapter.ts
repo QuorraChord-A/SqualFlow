@@ -219,6 +219,7 @@ export type AgentRuntimeAdapter = {
     content: string,
     attachments?: MessageImageAttachment[],
     planFeedback?: LeaderPlanFeedback[],
+    specRequested?: boolean,
   ) => unknown;
   createLeaderFlowNameMessage: (flowId: string) => unknown;
   createSingleTextInput: (text: string) => AsyncIterable<unknown>;

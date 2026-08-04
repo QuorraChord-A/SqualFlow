@@ -54,11 +54,20 @@ function nextWsMessage(ws: any): Promise<unknown> {
   ensureWsBuffer(ws);
   const buffered = wsBuffers.get(ws);
   const message = buffered?.shift();
-  if (message) return Promise.resolve(message);
+  if (message) {
+    if ((message as { type?: string })?.type === "leader:runtime_state") return nextWsMessage(ws);
+    return Promise.resolve(message);
+  }
 
   return Promise.race([
     new Promise((resolve) => {
-      wsWaiters.get(ws)?.push(resolve);
+      wsWaiters.get(ws)?.push((message) => {
+        if ((message as { type?: string })?.type === "leader:runtime_state") {
+          void nextWsMessage(ws).then(resolve);
+          return;
+        }
+        resolve(message);
+      });
     }),
     new Promise((_, reject) => {
       setTimeout(() => reject(new Error("timed out waiting for websocket message")), 500);
@@ -1877,6 +1886,15 @@ describe("Fastify app and websocket gateway", () => {
           ],
         }),
       }),
+      expect.objectContaining({
+        type: "leader:runtime_state",
+        flow_id: flow.id,
+        log_id: "log-stale-user-turn",
+        data: {
+          status: "idle",
+          leader_agent_session_id: expect.any(String),
+        },
+      }),
     ]);
   });
 
@@ -1960,6 +1978,144 @@ describe("Fastify app and websocket gateway", () => {
     expect(store.listEventLog(flow.id).find((event) => event.eventType === "flow.guide_message")).toEqual(
       expect.objectContaining({ userTurnId: userTurn.id }),
     );
+  });
+
+  it("sends directly to Leader when Expert work keeps the Flow active but Leader is idle", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-expert-active-leader-idle",
+      workspaceId: "ws-default",
+      name: "Expert Active",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-original" })!;
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: null,
+      taskId: null,
+      expertId: "exp-leader",
+      sessionId: "sdk-leader-idle",
+      displayName: "Leader",
+      status: "completed",
+    });
+    store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: userTurn.id,
+      taskId: "task-expert-active",
+      expertId: "exp-coder",
+      sessionId: "sdk-expert-active",
+      displayName: "Expert",
+      status: "streaming",
+    });
+    const sent: unknown[] = [];
+    const turns: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-1",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(),
+      leaderRuntime: {
+        getState: () => "idle",
+        runLeaderTurn: async (turn) => { turns.push(turn); },
+      },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({
+      data: {
+        type: "flow:message",
+        flow_id: flow.id,
+        content: "继续处理 Expert 的结果",
+        client_message_id: "client-direct-while-expert-active",
+        log_id: "log-direct-while-expert-active",
+      },
+    }), connection);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toEqual(expect.objectContaining({
+      kind: "user",
+      userMessage: "继续处理 Expert 的结果",
+      userTurnId: userTurn.id,
+      leaderAgentSessionId: leader.id,
+    }));
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "flow:message_ack",
+      flow_id: flow.id,
+      log_id: "log-direct-while-expert-active",
+      data: expect.objectContaining({ accepted: true }),
+    }));
+    expect(store.listQueuedMessages(flow.id)).toHaveLength(0);
+  });
+
+  it("routes the normal Leader input through the active runtime as an in-turn guide", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({
+      id: "flow-active-leader-runtime-message",
+      workspaceId: "ws-default",
+      name: "Active Leader Runtime",
+      description: "",
+      projectId: null,
+      ...testLeaderRuntimeBinding,
+    });
+    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-original" })!;
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      userTurnId: null,
+      taskId: null,
+      expertId: "exp-leader",
+      sessionId: "sdk-leader-streaming",
+      displayName: "Leader",
+      status: "streaming",
+    });
+    const sent: unknown[] = [];
+    const guideTurns: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-active-leader-runtime",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(),
+      leaderRuntime: {
+        getState: () => "streaming",
+        runLeaderTurn: async () => { throw new Error("normal input must not start a second Leader turn"); },
+        guideLeaderTurn: async (guide) => {
+          guideTurns.push(guide);
+          guide.beforeDeliver?.();
+          return { accepted: true, messageId: guide.messageId ?? "client-active-runtime" };
+        },
+      },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "flow:message",
+      flow_id: flow.id,
+      content: "补充当前 Leader turn",
+      client_message_id: "client-active-runtime",
+      log_id: "log-active-runtime",
+    } }), connection);
+
+    expect(guideTurns).toEqual([expect.objectContaining({
+      flowId: flow.id,
+      content: "补充当前 Leader turn",
+      leaderAgentSessionId: leader.id,
+      messageId: "client-active-runtime",
+    })]);
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "flow:message_ack",
+      flow_id: flow.id,
+      log_id: "log-active-runtime",
+      data: expect.objectContaining({ accepted: true, client_message_id: "client-active-runtime" }),
+    }));
+    expect(store.listUserTurns(flow.id).map((turn) => turn.id)).toEqual([userTurn.id]);
+    expect(store.listQueuedMessages(flow.id)).toHaveLength(0);
   });
 
   it("passes decision answers into current turn input via flow:decision", async () => {

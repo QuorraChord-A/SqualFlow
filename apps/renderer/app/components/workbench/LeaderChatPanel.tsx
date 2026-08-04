@@ -519,6 +519,7 @@ export default function LeaderChatPanel({
   onOpenModelSettings,
 }: LeaderChatPanelProps) {
   const [status, setStatus] = useState<"idle" | "submitted" | "streaming" | "ready">("idle");
+  const [leaderRuntimeStatus, setLeaderRuntimeStatus] = useState<"idle" | "starting" | "streaming">("idle");
   // The project directory is fixed when the task is created.
   const [optimisticMessages, setOptimisticMessages] = useState<UIMessage[]>([]);
   const [userTurns, setUserTurns] = useState<UserTurnDisplay[]>([]);
@@ -642,6 +643,7 @@ export default function LeaderChatPanel({
     setLocalComposerValue("");
     setUserTurns([]);
     setStatus("idle");
+    setLeaderRuntimeStatus("idle");
     setIsCompactingContext(false);
     setContextUsage(null);
     setContextCompaction(null);
@@ -800,10 +802,32 @@ export default function LeaderChatPanel({
         const logId = msg.log_id;
         if (!logId) return;
         const pendingGuide = pendingGuidesRef.current.get(logId);
-        if (!pendingGuide) return;
-        pendingGuidesRef.current.delete(logId);
-        setGuidedMessages((messages) => messages.filter((message) => message.id !== pendingGuide.clientMessageId));
+        if (pendingGuide) {
+          pendingGuidesRef.current.delete(logId);
+          setGuidedMessages((messages) => messages.filter((message) => message.id !== pendingGuide.clientMessageId));
+        } else {
+          const pendingMessageId = pendingMessagesRef.current.get(logId);
+          if (pendingMessageId) {
+            pendingMessagesRef.current.delete(logId);
+            setOptimisticMessages((messages) => messages.filter((message) => message.id !== pendingMessageId));
+          }
+        }
         setFollowRequestKey((value) => value + 1);
+        return;
+      }
+
+      if (msg.type === "leader:runtime_state") {
+        if (msg.flow_id !== flowId) return;
+        setLeaderRuntimeStatus(msg.data.status);
+        return;
+      }
+
+      if (msg.type === "session:event") {
+        if (msg.flow_id !== flowId) return;
+        const data = msg.data as { agent_session_id?: string; expert_id?: string; status?: string } | undefined;
+        if (data?.expert_id !== "exp-leader" && data?.agent_session_id !== leaderAgentSessionId) return;
+        if (data.status === "streaming") setLeaderRuntimeStatus("streaming");
+        else if (data.status === "completed" || data.status === "failed" || data.status === "interrupted") setLeaderRuntimeStatus("idle");
         return;
       }
 
@@ -925,8 +949,10 @@ export default function LeaderChatPanel({
         if (eventType === "turn-started") {
           setSessionRecoveryError(null);
           setLeaderRuntimeError(null);
+          setLeaderRuntimeStatus("streaming");
           setStatus("streaming");
         } else if (eventType === "turn-finished") {
+          setLeaderRuntimeStatus("idle");
           setStatus("ready");
         }
       } else if (msg.type === "session:transcript_snapshot") {
@@ -949,17 +975,16 @@ export default function LeaderChatPanel({
     [guidedMessages, initialOptimisticMessages, optimisticMessages],
   );
   const isAuthoritativelyIdle = flowStateConfirmed && flowStatus === "idle" && !knownRunningFlow;
-  const isStreaming = status === "streaming" && !isAuthoritativelyIdle;
+  const isStreaming = leaderRuntimeStatus === "streaming";
   const activeUserTurn = isAuthoritativelyIdle
     ? null
     : mergedUserTurns.find((turn) => turn.status === "active" || turn.status === "waiting_user") ?? null;
   const canStopCurrentTurn = activeUserTurn?.status === "active";
-  const isWaiting = activeUserTurn?.status === "active" || status === "submitted" || isStreaming;
-  const isFlowStatePendingForKnownRunningFlow = Boolean(flowId && knownRunningFlow && !flowStateConfirmed);
-  const shouldQueueNewMessage =
-    isWaiting
-    || queuedMessages.length > 0
-    || isFlowStatePendingForKnownRunningFlow;
+  const isWaiting = leaderRuntimeStatus !== "idle" || status === "submitted";
+  // A persisted queue does not make a now-idle Leader busy. New input must go
+  // through the normal Leader message path; queued items can still be dispatched
+  // individually from their own controls.
+  const shouldQueueNewMessage = leaderRuntimeStatus !== "idle";
   const pendingDecisionCards = decisionCards.filter((card) => decisionCardStatuses[card.card_id] === "pending" || card.status === "pending");
   const hasPendingDecisionCards = pendingDecisionCards.length > 0;
   const compactionDividerLabel = contextCompaction?.status === "running"
@@ -975,6 +1000,7 @@ export default function LeaderChatPanel({
 
   useEffect(() => {
     if (!flowId || !flowStateConfirmed || flowStatus !== "idle") return;
+    setLeaderRuntimeStatus("idle");
     setKnownRunningFlow(flowId, false);
     setStatus("ready");
   }, [flowId, flowStateConfirmed, flowStatus, setKnownRunningFlow]);
@@ -1156,7 +1182,7 @@ export default function LeaderChatPanel({
           : undefined,
       } as UIMessage;
       setOptimisticMessages((prev) => [...prev, userMessage]);
-      if (activeUserTurn && (options.reuseActiveUserTurn || activeUserTurn.status === "waiting_user")) {
+      if (activeUserTurn && (options.reuseActiveUserTurn || activeUserTurn.status === "waiting_user" || leaderRuntimeStatus === "streaming")) {
         setUserTurns((prev) => mergeUserTurn(prev, {
           ...activeUserTurn,
           status: "active",
@@ -1190,7 +1216,7 @@ export default function LeaderChatPanel({
       });
       return true;
     },
-    [activeUserTurn, enterPlanMode, flowId, leaderModelConfigured, setKnownRunningFlow],
+    [activeUserTurn, enterPlanMode, flowId, leaderModelConfigured, leaderRuntimeStatus, setKnownRunningFlow],
   );
 
   const enqueueMessage = useCallback((content: string, options: LeaderMessageOptions = {}) => {
