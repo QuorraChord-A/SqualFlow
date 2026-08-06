@@ -5,11 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
 import {
   beginControlledEditReview,
-  clearUserTurnReview,
+  clearWorkRunReview,
   consumeControlledEditToolResults,
-  finalizeUserTurnReview,
-  latestUserTurnReview,
-} from "../src/domain/userTurnReview.js";
+  finalizeWorkRunReview,
+  latestWorkRunReview,
+} from "../src/domain/workRunReview.js";
 
 const flowId = "flow-review-test";
 let databaseDir: string;
@@ -38,19 +38,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  clearUserTurnReview(flowId, store);
+  clearWorkRunReview(flowId, store);
   store.sqlite.close();
   fs.rmSync(databaseDir, { recursive: true, force: true });
 });
 
-describe("userTurnReview", () => {
+describe("workRunReview", () => {
   it("aggregates Write then Edit into one final per-file review", () => {
     const root = tempProject();
     const target = path.join(root, "probe.txt");
 
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-1",
+      workRunId: "utn-1",
       rootPath: root,
       toolName: "Write",
       capability: "write",
@@ -62,7 +62,7 @@ describe("userTurnReview", () => {
 
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-1",
+      workRunId: "utn-1",
       rootPath: root,
       toolName: "Edit",
       capability: "edit",
@@ -72,7 +72,7 @@ describe("userTurnReview", () => {
     fs.writeFileSync(target, "alpha\ngamma\n", "utf8");
     consumeControlledEditToolResults(toolResult("tool-edit"));
 
-    const review = finalizeUserTurnReview(store, flowId, "utn-1", "2026-06-14T01:00:00.000Z");
+    const review = finalizeWorkRunReview(store, flowId, "utn-1", "2026-06-14T01:00:00.000Z");
 
     expect(review?.totals).toMatchObject({ files: 1, additions: 2, deletions: 0, added: 1 });
     expect(review?.files[0]).toMatchObject({
@@ -81,7 +81,7 @@ describe("userTurnReview", () => {
       additions: 2,
       deletions: 0,
     });
-    expect(latestUserTurnReview(store, flowId)?.user_turn_id).toBe("utn-1");
+    expect(latestWorkRunReview(store, flowId)?.work_run_id).toBe("utn-1");
   });
 
   it("ignores non-controlled tools and paths outside the root", () => {
@@ -89,7 +89,7 @@ describe("userTurnReview", () => {
 
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-2",
+      workRunId: "utn-2",
       rootPath: root,
       toolName: "Bash",
       capability: "shell",
@@ -98,7 +98,7 @@ describe("userTurnReview", () => {
     });
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-2",
+      workRunId: "utn-2",
       rootPath: root,
       toolName: "Write",
       capability: "write",
@@ -108,8 +108,8 @@ describe("userTurnReview", () => {
     consumeControlledEditToolResults(toolResult("tool-bash"));
     consumeControlledEditToolResults(toolResult("tool-outside"));
 
-    expect(finalizeUserTurnReview(store, flowId, "utn-2", null)).toBeNull();
-    expect(latestUserTurnReview(store, flowId)).toBeNull();
+    expect(finalizeWorkRunReview(store, flowId, "utn-2", null)).toBeNull();
+    expect(latestWorkRunReview(store, flowId)).toBeNull();
   });
 
   it("clears the latest review when the latest completed turn has no controlled edits", () => {
@@ -117,7 +117,7 @@ describe("userTurnReview", () => {
     const target = path.join(root, "probe.txt");
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-3",
+      workRunId: "utn-3",
       rootPath: root,
       toolName: "Write",
       capability: "write",
@@ -126,10 +126,10 @@ describe("userTurnReview", () => {
     });
     fs.writeFileSync(target, "alpha\n", "utf8");
     consumeControlledEditToolResults(toolResult("tool-write"));
-    expect(finalizeUserTurnReview(store, flowId, "utn-3", null)).not.toBeNull();
+    expect(finalizeWorkRunReview(store, flowId, "utn-3", null)).not.toBeNull();
 
-    expect(finalizeUserTurnReview(store, flowId, "utn-4", null)).toBeNull();
-    expect(latestUserTurnReview(store, flowId)).toBeNull();
+    expect(finalizeWorkRunReview(store, flowId, "utn-4", null)).toBeNull();
+    expect(latestWorkRunReview(store, flowId)).toBeNull();
   });
 
   it("restores the latest review after reopening the database", () => {
@@ -137,7 +137,7 @@ describe("userTurnReview", () => {
     const target = path.join(root, "probe.txt");
     beginControlledEditReview({
       flowId,
-      userTurnId: "utn-restart",
+      workRunId: "utn-restart",
       rootPath: root,
       toolName: "Write",
       capability: "write",
@@ -146,15 +146,15 @@ describe("userTurnReview", () => {
     });
     fs.writeFileSync(target, "persisted\n", "utf8");
     consumeControlledEditToolResults(toolResult("tool-restart"));
-    finalizeUserTurnReview(store, flowId, "utn-restart", "2026-07-21T12:00:00.000Z");
+    finalizeWorkRunReview(store, flowId, "utn-restart", "2026-07-21T12:00:00.000Z");
 
     store.sqlite.close();
     store = createStore(databasePath);
     store.migrate();
 
-    expect(latestUserTurnReview(store, flowId)).toMatchObject({
+    expect(latestWorkRunReview(store, flowId)).toMatchObject({
       flow_id: flowId,
-      user_turn_id: "utn-restart",
+      work_run_id: "utn-restart",
       completed_at: "2026-07-21T12:00:00.000Z",
       totals: { files: 1, additions: 1, deletions: 0 },
     });

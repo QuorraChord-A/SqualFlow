@@ -35,7 +35,7 @@ export type ExpertTaskAssignment = {
 /** The read-only Task projection exposed to an Expert. */
 export type ExpertTask = {
   task_id: string;
-  user_turn_id: string;
+  work_run_id: string;
   subject: string;
   description: string;
   active_form: string;

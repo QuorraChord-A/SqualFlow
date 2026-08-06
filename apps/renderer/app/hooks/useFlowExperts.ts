@@ -6,12 +6,12 @@ import { wsClient } from "../lib/ws";
 export interface AgentSession {
   id: string;
   flow_id: string;
-  user_turn_id: string | null;
+  work_run_id: string | null;
   task_id: string | null;
   expert_id: string;
   session_id: string | null;
   display_name: string;
-  status: "idle" | "streaming" | "completed" | "failed" | string;
+  status: "queued" | "streaming" | "completed" | "failed" | "interrupted" | string;
   resume_from_agent_session_id?: string;
   created_at?: string;
   updated_at?: string;
@@ -43,12 +43,12 @@ function normalizeAgentSessionPayload(msg: {
   return {
     id,
     flow_id: flowId,
-    user_turn_id: typeof payload.user_turn_id === "string" ? payload.user_turn_id : null,
+    work_run_id: typeof payload.work_run_id === "string" ? payload.work_run_id : null,
     task_id: typeof payload.task_id === "string" ? payload.task_id : null,
     expert_id: expertId,
     session_id: typeof payload.session_id === "string" ? payload.session_id : null,
     display_name: String(payload.display_name || expertId),
-    status: String(payload.status || "idle"),
+    status: String(payload.status || "queued"),
     resume_from_agent_session_id: typeof payload.resume_from_agent_session_id === "string"
       ? payload.resume_from_agent_session_id
       : "",
@@ -107,7 +107,7 @@ export function useAgentSessions(flowId: string | null) {
               item.id === session.id
                 ? {
                     ...item,
-                    user_turn_id: session.user_turn_id,
+                    work_run_id: session.work_run_id,
                     task_id: session.task_id,
                     expert_id: session.expert_id,
                     status: session.status,

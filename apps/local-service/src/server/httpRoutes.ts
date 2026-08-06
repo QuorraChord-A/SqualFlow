@@ -41,7 +41,7 @@ import {
   defaultRuntimeReasoningEffortForSdk,
   normalizeRuntimeReasoningEffort,
   parseRuntimeReasoningEffort,
-} from "../runtime/codexReasoningEffort.js";
+} from "../config/runtimeReasoningEffort.js";
 
 type RegisterHttpRoutesDeps = {
   store: Store;
@@ -138,7 +138,7 @@ function agentSessionToApi(row: ReturnType<Store["listAgentSessions"]>[number]) 
     id: row.id,
     agent_session_id: row.id,
     flow_id: row.flowId,
-    user_turn_id: row.userTurnId,
+    work_run_id: row.workRunId,
     task_id: row.taskId,
     expert_id: row.expertId,
     session_id: row.sessionId,
@@ -243,6 +243,9 @@ async function defaultLeaderRuntimeSelection() {
     leaderRuntimeSdk: runtimeConfig?.sdk ?? null,
     leaderRuntimeConfigId: runtimeConfig?.id ?? null,
     leaderRuntimeModelId: model?.id ?? null,
+    leaderRuntimeReasoningEffort: runtimeConfig
+      ? normalizeRuntimeReasoningEffort(runtimeConfig.sdk, leaderRole?.reasoningEffort)
+      : null,
   };
 }
 
@@ -400,8 +403,8 @@ async function resolveFlowWorkspacePath(
   }
 
   const project = flow.projectId ? store.getProject(flow.projectId) : null;
-  const openUserTurn = store.getOpenUserTurn(flowId);
-  const rootPath = openUserTurn?.workRootPath || project?.localPath || "";
+  const openWorkRun = store.getOpenWorkRun(flowId);
+  const rootPath = openWorkRun?.workRootPath || project?.localPath || "";
   if (!rootPath) return { ok: false, statusCode: 404, detail: "Project root not found" };
 
   let root: string;
@@ -687,11 +690,16 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
         leaderRuntimeSdk: resolved.config.sdk,
         leaderRuntimeConfigId,
         leaderRuntimeModelId,
+        leaderRuntimeReasoningEffort: normalizeRuntimeReasoningEffort(
+          resolved.config.sdk,
+          runtimeSelection.leaderRuntimeReasoningEffort,
+        ),
       };
     }
-    let leaderRuntimeReasoningEffort: string | null = runtimeSelection.leaderRuntimeSdk
-      ? defaultRuntimeReasoningEffortForSdk(runtimeSelection.leaderRuntimeSdk)
-      : null;
+    let leaderRuntimeReasoningEffort: string | null = runtimeSelection.leaderRuntimeReasoningEffort
+      ?? (runtimeSelection.leaderRuntimeSdk
+        ? defaultRuntimeReasoningEffortForSdk(runtimeSelection.leaderRuntimeSdk)
+        : null);
     if (
       Object.prototype.hasOwnProperty.call(body, "leader_runtime_reasoning_effort")
       && body.leader_runtime_reasoning_effort !== null
@@ -742,7 +750,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: RegisterHttpRoute
     const flowId = paramsId(request, "flowId");
     const flow = store.getFlow(flowId);
     if (!flow) return reply.code(404).send({ detail: "Flow not found" });
-    if (store.getOpenUserTurn(flowId)) return reply.code(409).send({ detail: "Flow is not idle" });
+    if (store.getOpenWorkRun(flowId)) return reply.code(409).send({ detail: "Flow is not idle" });
     try {
       await leaderRuntime.compactContext(flowId);
     } catch (error) {

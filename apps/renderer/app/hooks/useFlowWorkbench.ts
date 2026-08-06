@@ -47,7 +47,7 @@ export interface FlowWorkbench {
   };
   tasks: Array<{
     id: string;
-    user_turn_id: string;
+    work_run_id: string;
     subject: string;
     status: string;
     owner_flow_expert_id: string | null;
@@ -62,29 +62,29 @@ export interface FlowWorkbench {
     root_path: string | null;
     tree_available: boolean;
   };
-  review: UserTurnReview | null;
+  review: WorkRunReview | null;
 }
 
 export type WorkbenchTeamMember = FlowWorkbench["team"][number];
 
-export type UserTurnReviewLine = {
+export type WorkRunReviewLine = {
   kind: "context" | "added" | "removed";
   old_line: number | null;
   new_line: number | null;
   text: string;
 };
 
-export type UserTurnReviewFile = {
+export type WorkRunReviewFile = {
   path: string;
   status: "modified" | "added" | "deleted";
   additions: number;
   deletions: number;
-  lines: UserTurnReviewLine[];
+  lines: WorkRunReviewLine[];
 };
 
-export type UserTurnReview = {
+export type WorkRunReview = {
   flow_id: string;
-  user_turn_id: string;
+  work_run_id: string;
   completed_at: string | null;
   totals: {
     files: number;
@@ -94,7 +94,7 @@ export type UserTurnReview = {
     added: number;
     deleted: number;
   };
-  files: UserTurnReviewFile[];
+  files: WorkRunReviewFile[];
 };
 
 export const emptyWorkbench: FlowWorkbench = {
@@ -147,7 +147,7 @@ export function useFlowWorkbench(flowId: string | null) {
     };
     const unsubs = [
       wsClient.onEvent("flow:state", reloadForFlow),
-      wsClient.onEvent("user_turn:event", reloadForFlow),
+      wsClient.onEvent("work_run:event", reloadForFlow),
       wsClient.onEvent("task:event", reloadForFlow),
       wsClient.onEvent("session:event", reloadForFlow),
       wsClient.onEvent("flow_expert:event", reloadForFlow),

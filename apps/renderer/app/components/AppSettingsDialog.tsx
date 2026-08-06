@@ -42,6 +42,11 @@ import { useModalStore } from "../stores/useModalStore";
 import { getDesktopUpdateBridge, type DesktopUpdateState } from "../lib/desktopUpdate";
 import { AGENT_META, AGENT_ORDER, AgentIcon, runtimeSdkLabel } from "../lib/agentMeta";
 import {
+  normalizeReasoningEffortForSdk,
+  reasoningEffortLabelForSdk,
+  reasoningEffortOptionsForSdk,
+} from "../lib/runtimeReasoningEffort";
+import {
   createAgentRuntimeConfig,
   deleteAgentRuntimeConfig,
   fetchAgentRuntimeConfig,
@@ -175,6 +180,14 @@ const INITIAL_ROLE_ENABLED: Record<AgentRole, boolean> = {
   codereview: true,
 };
 
+const INITIAL_ROLE_REASONING_EFFORTS: Record<AgentRole, string> = {
+  leader: "high",
+  coder: "high",
+  research: "high",
+  verify: "high",
+  codereview: "high",
+};
+
 function sectionButtonClass(active: boolean) {
   return [
     "flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors",
@@ -208,6 +221,10 @@ function roleModelMap(bindings: RoleRuntimeBindingDto[]) {
 
 function roleEnabledMap(bindings: RoleRuntimeBindingDto[]) {
   return Object.fromEntries(bindings.map((binding) => [binding.role, binding.enabled])) as Record<AgentRole, boolean>;
+}
+
+function roleReasoningEffortMap(bindings: RoleRuntimeBindingDto[]) {
+  return Object.fromEntries(bindings.map((binding) => [binding.role, binding.reasoningEffort])) as Record<AgentRole, string>;
 }
 
 function modelFeedbackClass(tone: "info" | "success" | "error") {
@@ -566,6 +583,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const [roleConfigs, setRoleConfigs] = useState<Record<AgentRole, string>>(INITIAL_ROLE_CONFIGS);
   const [roleModels, setRoleModels] = useState<Record<AgentRole, string>>(INITIAL_ROLE_MODELS);
   const [roleEnabled, setRoleEnabled] = useState<Record<AgentRole, boolean>>(INITIAL_ROLE_ENABLED);
+  const [roleReasoningEfforts, setRoleReasoningEfforts] = useState<Record<AgentRole, string>>(INITIAL_ROLE_REASONING_EFFORTS);
   const [experts, setExperts] = useState<ExpertDto[]>([]);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
@@ -598,6 +616,9 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const savedRuntimeConfigs = runtimeConfigs.filter((config) => !isDraftRuntimeConfig(config));
   const selectedRoleConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[selectedRole.role]) ?? savedRuntimeConfigs[0];
   const selectedRoleModel = boundModelOf(selectedRoleConfig, roleModels[selectedRole.role]);
+  const selectedRoleReasoningEffort = selectedRoleConfig
+    ? normalizeReasoningEffortForSdk(selectedRoleConfig.sdk, roleReasoningEfforts[selectedRole.role])
+    : null;
   const selectedRuntimeConfig = runtimeConfigs.find((config) => config.id === selectedConfigId) ?? runtimeConfigs[0];
   const SelectedRoleIcon = selectedRole.Icon;
 
@@ -611,6 +632,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     setRoleConfigs(roleConfigMap(snapshot.roles));
     setRoleModels(roleModelMap(snapshot.roles));
     setRoleEnabled(roleEnabledMap(snapshot.roles));
+    setRoleReasoningEfforts(roleReasoningEffortMap(snapshot.roles));
   };
 
   useEffect(() => {
@@ -787,6 +809,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       setRoleConfigs(roleConfigMap(snapshot.roles));
       setRoleModels(roleModelMap(snapshot.roles));
       setRoleEnabled(roleEnabledMap(snapshot.roles));
+      setRoleReasoningEfforts(roleReasoningEffortMap(snapshot.roles));
       setPersistedRuntimeConfigs(configs);
       setSelectedConfigId(configs[0]?.id ?? "");
       setApiKeyVisible(false);
@@ -1075,16 +1098,25 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const applyRoleSelection = async (role: AgentRole, config: RuntimeConfig, model: RuntimeModel) => {
     const previousConfigId = roleConfigs[role];
     const previousModelId = roleModels[role];
+    const previousReasoningEffort = roleReasoningEfforts[role];
+    const nextReasoningEffort = normalizeReasoningEffortForSdk(config.sdk, previousReasoningEffort);
     setRoleConfigs((current) => ({ ...current, [role]: config.id }));
     setRoleModels((current) => ({ ...current, [role]: model.id }));
+    setRoleReasoningEfforts((current) => ({ ...current, [role]: nextReasoningEffort }));
     setOpenPickerRole(null);
     setPreviewConfigId(null);
     try {
-      await updateAgentRuntimeRole(role, { configId: config.id, modelId: model.id, enabled: roleEnabled[role] });
+      await updateAgentRuntimeRole(role, {
+        configId: config.id,
+        modelId: model.id,
+        enabled: roleEnabled[role],
+        reasoningEffort: nextReasoningEffort,
+      });
       setRuntimeFeedback(null);
     } catch (error) {
       setRoleConfigs((current) => ({ ...current, [role]: previousConfigId }));
       setRoleModels((current) => ({ ...current, [role]: previousModelId }));
+      setRoleReasoningEfforts((current) => ({ ...current, [role]: previousReasoningEffort }));
       setRuntimeFeedback(error instanceof Error ? error.message : "更新角色配置失败");
     }
   };
@@ -1094,11 +1126,34 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
     setRoleEnabled((current) => ({ ...current, [role]: enabled }));
     selectRole(role);
     try {
-      await updateAgentRuntimeRole(role, { enabled, configId: roleConfigs[role], modelId: roleModels[role] });
+      await updateAgentRuntimeRole(role, {
+        enabled,
+        configId: roleConfigs[role],
+        modelId: roleModels[role],
+        reasoningEffort: roleReasoningEfforts[role],
+      });
       setRuntimeFeedback(null);
     } catch (error) {
       setRoleEnabled((current) => ({ ...current, [role]: previousEnabled }));
       setRuntimeFeedback(error instanceof Error ? error.message : "更新角色状态失败");
+    }
+  };
+
+  const updateRoleReasoningEffort = async (role: AgentRole, reasoningEffort: string) => {
+    const previousReasoningEffort = roleReasoningEfforts[role];
+    setRoleReasoningEfforts((current) => ({ ...current, [role]: reasoningEffort }));
+    selectRole(role);
+    try {
+      await updateAgentRuntimeRole(role, {
+        enabled: roleEnabled[role],
+        configId: roleConfigs[role],
+        modelId: roleModels[role],
+        reasoningEffort,
+      });
+      setRuntimeFeedback(null);
+    } catch (error) {
+      setRoleReasoningEfforts((current) => ({ ...current, [role]: previousReasoningEffort }));
+      setRuntimeFeedback(error instanceof Error ? error.message : "更新角色 Effort 失败");
     }
   };
 
@@ -1136,9 +1191,10 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       {!isLoading && agentTab === "role_assignment" ? (
         <div className="grid min-h-0 gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <section className="self-start overflow-hidden rounded-lg border border-border bg-card">
-            <div className="grid grid-cols-[minmax(150px,1fr)_minmax(230px,300px)_96px] gap-3 border-b border-border bg-muted/40 px-4 py-3 text-xs font-semibold text-muted-foreground">
+            <div className="grid grid-cols-[minmax(150px,1fr)_minmax(210px,280px)_112px_88px] gap-3 border-b border-border bg-muted/40 px-4 py-3 text-xs font-semibold text-muted-foreground">
               <span>角色</span>
               <span>默认模型（供应商 / 模型）</span>
+              <span>Effort</span>
               <span className="text-right">状态</span>
             </div>
             {runtimeFeedback ? (
@@ -1149,12 +1205,17 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
             {roleDefinitions.map((role) => {
               const boundConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[role.role]) ?? savedRuntimeConfigs[0];
               const boundModel = boundModelOf(boundConfig, roleModels[role.role]);
+              const effortOptions = reasoningEffortOptionsForSdk(boundConfig?.sdk ?? "claudecode");
+              const boundReasoningEffort = normalizeReasoningEffortForSdk(
+                boundConfig?.sdk ?? "claudecode",
+                roleReasoningEfforts[role.role],
+              );
               const pickerOpen = openPickerRole === role.role;
               return (
                 <div key={role.id} className="border-b border-border last:border-b-0">
                   <div
                     data-selected={selectedRole.role === role.role}
-                    className="grid grid-cols-[minmax(150px,1fr)_minmax(230px,300px)_96px] items-center gap-3 border-l-2 border-l-transparent px-4 py-4 transition-colors hover:border-l-primary/50 hover:bg-muted/30 data-[selected=true]:border-l-primary data-[selected=true]:bg-primary/10"
+                    className="grid grid-cols-[minmax(150px,1fr)_minmax(210px,280px)_112px_88px] items-center gap-3 border-l-2 border-l-transparent px-4 py-4 transition-colors hover:border-l-primary/50 hover:bg-muted/30 data-[selected=true]:border-l-primary data-[selected=true]:bg-primary/10"
                   >
                     <button
                       type="button"
@@ -1192,6 +1253,23 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                         ? <ChevronUp className="size-3.5 shrink-0 text-muted-foreground" />
                         : <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />}
                     </button>
+                    <Select
+                      value={boundReasoningEffort}
+                      onValueChange={(value) => {
+                        if (value) void updateRoleReasoningEffort(role.role, value);
+                      }}
+                    >
+                      <SelectTrigger className="h-9 w-full px-2.5 text-xs" aria-label={`选择 ${role.label} Effort`}>
+                        <SelectValue>
+                          {reasoningEffortLabelForSdk(boundConfig?.sdk ?? "claudecode", boundReasoningEffort)}
+                        </SelectValue>
+                      </SelectTrigger>
+                      <SelectContent>
+                        {effortOptions.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
                     <div className="flex justify-end">
                       {role.fixedEnabled ? (
                         <Badge variant="secondary">固定启用</Badge>
@@ -1269,6 +1347,12 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                 <span className="truncate text-xs text-foreground">{configDisplayName(selectedRoleConfig)}</span>
                 <span className="text-xs text-muted-foreground">默认模型</span>
                 <span className="truncate font-mono text-xs text-foreground">{selectedRoleModel?.name ?? "未配置"}</span>
+                <span className="text-xs text-muted-foreground">Effort</span>
+                <span className="text-xs text-foreground">
+                  {selectedRoleConfig && selectedRoleReasoningEffort
+                    ? reasoningEffortLabelForSdk(selectedRoleConfig.sdk, selectedRoleReasoningEffort)
+                    : "未配置"}
+                </span>
                 <span className="text-xs text-muted-foreground">配置文件</span>
                 <span className="truncate font-mono text-xs text-foreground">{selectedRoleConfig?.fileName ?? "未配置"}</span>
               </div>

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createAgentDispatcher } from "../src/runtime/agentDispatcher.js";
 
 function setup() {
@@ -13,11 +13,11 @@ function setup() {
   store.seedExperts();
   const project = store.createProject({ name: "p", localPath: "/tmp/p" });
   const flow = store.createFlow({ projectId: project.id, name: "flow" });
-  const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+  const workRun = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
   return {
     store,
     flow,
-    userTurn,
+    workRun,
     cleanup: () => {
       store.sqlite.close();
       rmSync(dir, { recursive: true, force: true });
@@ -27,13 +27,13 @@ function setup() {
 
 describe("AgentDispatcher Flow Expert reuse", () => {
   it("reuses one Flow Expert while AgentSessions queue independently of Task state", async () => {
-    const { store, flow, userTurn, cleanup } = setup();
+    const { store, flow, workRun, cleanup } = setup();
     const runTask = vi.fn(async () => undefined);
     const eventBus = { publish: vi.fn(async () => undefined) };
     try {
       const dispatcher = createAgentDispatcher({ store, eventBus: eventBus as any, expertRuntime: { runTask } });
-      const task1 = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "t1", description: "one", expertId: null, activeForm: "", dependsOnTaskIds: [] })!;
-      const task2 = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "t2", description: "two", expertId: null, activeForm: "", dependsOnTaskIds: [] })!;
+      const task1 = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "t1", description: "one", expertId: null, activeForm: "", dependsOnTaskIds: [] })!;
+      const task2 = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "t2", description: "two", expertId: null, activeForm: "", dependsOnTaskIds: [] })!;
 
       const first = await dispatcher.dispatchAgent({ flowId: flow.id, taskId: task1.id, expertId: "exp-coder", prompt: "one", resumeAgentSessionId: "" });
       const second = await dispatcher.dispatchAgent({ flowId: flow.id, taskId: task2.id, expertId: "exp-coder", prompt: "two", resumeAgentSessionId: "" });

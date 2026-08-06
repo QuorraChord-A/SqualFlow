@@ -57,12 +57,24 @@ describe("claude options env isolation", () => {
     }
   });
 
-  it("apiKey mode: config wins and inherited auth vars are stripped", () => {
+  it("custom gateway apiKey mode: config wins through bearer auth and inherited vars are stripped", () => {
     const options = buildClaudeBaseOptions(baseOptionsInput({ runtimeConfig: apiKeyConfig() }));
-    expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
-    expect(options.env?.ANTHROPIC_API_KEY).toBe("configured-key");
+    expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBe("configured-key");
+    expect(options.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(options.env?.ANTHROPIC_BASE_URL).toBe("https://configured.example.com");
     expect(options.env?.ANTHROPIC_MODEL).toBe("model-one");
+  });
+
+  it("official Anthropic apiKey mode keeps x-api-key authentication", () => {
+    const options = buildClaudeBaseOptions(baseOptionsInput({
+      runtimeConfig: {
+        ...apiKeyConfig(),
+        baseUrl: "https://api.anthropic.com/v1",
+      },
+    }));
+    expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(options.env?.ANTHROPIC_API_KEY).toBe("configured-key");
+    expect(options.env?.ANTHROPIC_BASE_URL).toBe("https://api.anthropic.com/v1");
   });
 
   it("inherited mode: no leaked auth or routing vars reach the subprocess", () => {
@@ -101,6 +113,19 @@ describe("claude options env isolation", () => {
     expect(options.settingSources).toEqual([]);
     expect(options.skills).toBe("all");
     expect(options.strictMcpConfig).toBe(true);
+  });
+
+  it("preserves an out-of-band null permission response supported by the upgraded SDK", async () => {
+    const options = buildClaudeBaseOptions({
+      ...baseOptionsInput(),
+      canUseTool: async () => null,
+    });
+
+    await expect(options.canUseTool?.(
+      "Read",
+      { file_path: "/tmp/example.txt" },
+      { signal: new AbortController().signal },
+    )).resolves.toBeNull();
   });
 
   it("loads and pre-authorizes every user-native MCP server", () => {

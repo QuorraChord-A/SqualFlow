@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 
 function createTempStore() {
   const dir = mkdtempSync(path.join(tmpdir(), "squadflow-flow-expert-"));
@@ -61,10 +61,10 @@ describe("flow expert persistence", () => {
     try {
       const project = store.createProject({ name: "p", localPath: "/tmp/p" });
       const flow = store.createFlow({ projectId: project.id, name: "flow" });
-      const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+      const workRun = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
       const task = store.createTask({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         title: "实现 Hello World",
         description: "create page",
         expertId: null,
@@ -78,7 +78,7 @@ describe("flow expert persistence", () => {
       });
       const session = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: task.id,
         expertId: "exp-coder",
         flowExpertId: flowExpert.id,

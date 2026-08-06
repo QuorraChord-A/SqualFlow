@@ -2,10 +2,8 @@ import path from "node:path";
 import type { RuntimeConfig } from "../../config/agentRuntimeConfig.js";
 import { runtimeModelContextWindowK } from "../../config/runtimeModelContext.js";
 import type { MessageImageAttachment } from "../../protocol/wsMessages.js";
-import type { RuntimeCapability } from "../capabilities.js";
 import {
   codexAppServerBaseArgs,
-  codexPoolTempDir,
   resolveCodexRuntimeProfile,
   withCodexRuntimeProfileEnv,
   type CodexRuntimeProfile,
@@ -44,9 +42,9 @@ export type CodexRuntimeOptions = {
   diagnostics?: RuntimeDiagnosticSink;
 };
 
-const MANAGED_SANDBOX_INSTRUCTIONS = [
-  "SquadFlow 已提供受管理的工作区沙箱。调用命令工具时不得请求额外权限、不得关闭或绕过沙箱。",
-  "禁止设置 sandbox_permissions=require_escalated 或任何等价的提权参数；风险确认由 SquadFlow 后端处理，请始终在现有沙箱内提交原始命令。",
+const MANAGED_PERMISSION_INSTRUCTIONS = [
+  "SquadFlow 负责工具授权和风险确认。调用命令工具时请直接提交原始命令，不要尝试修改运行时权限配置。",
+  "禁止设置 sandbox_permissions=require_escalated 或任何等价的提权参数；风险确认由 SquadFlow 后端处理。",
 ].join("\n");
 
 export function renderCodexTomlValue(value: unknown): string {
@@ -166,12 +164,6 @@ function providerConfig(runtimeConfig: RuntimeConfig | undefined): Record<string
   };
 }
 
-function sandboxMode(capabilities: RuntimeCapability[]): CodexRuntimeOptions["sandboxMode"] {
-  return capabilities.some((capability) => capability === "write" || capability === "edit")
-    ? "workspace-write"
-    : "read-only";
-}
-
 type CodexRuntimeConfigOverrides = {
   reasoningEffort?: string | null;
 };
@@ -227,7 +219,7 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
   }
   return {
     role: input.role,
-    systemPrompt: `${input.systemPrompt}\n\n${MANAGED_SANDBOX_INSTRUCTIONS}`,
+    systemPrompt: `${input.systemPrompt}\n\n${MANAGED_PERMISSION_INSTRUCTIONS}`,
     cwd: input.cwd,
     model,
     modelProvider,
@@ -239,7 +231,10 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
       // multi-agent collaboration tools out of the Leader tool world so it
       // cannot wait for a different orchestration system (for example,
       // collaboration.wait_agent) instead of consuming SqualFlow results.
-      ...(isLeader ? { "features.multi_agent": false } : {}),
+      ...(isLeader ? {
+        "features.multi_agent": false,
+        "features.multi_agent_v2": false,
+      } : {}),
       model,
       model_provider: modelProvider,
       web_search: "disabled",
@@ -247,21 +242,17 @@ function baseOptions(input: BuildLeaderRuntimeOptionsInput | BuildExpertRuntimeO
         model_context_window: contextWindow,
         model_auto_compact_token_limit: modelAutoCompactTokenLimit(contextWindow),
       }),
-      "sandbox_workspace_write.exclude_tmpdir_env_var": true,
-      "sandbox_workspace_write.exclude_slash_tmp": !isLeader,
-      "sandbox_workspace_write.writable_roots": [
-        path.resolve(input.cwd),
-        ...(scratchDir ? [scratchDir] : []),
-        codexPoolTempDir(runtimeConfig?.authMode === "inherited" ? "official" : "custom"),
-        ...(isLeader ? ["/tmp"] : []),
-      ],
     },
     env,
     runtimeProfile,
     appServerCommand: runtimeProfile.command,
     ...('ephemeral' in input && input.ephemeral === true ? { ephemeral: true } : {}),
     resume: input.resume,
-    sandboxMode: sandboxMode(input.capabilities),
+    // Claude Code already runs with its provider-native sandbox disabled.
+    // Keep Codex behavior provider-independent and let SquadFlow own tool
+    // authorization and risk confirmation instead of applying a second,
+    // runtime-specific command boundary.
+    sandboxMode: "danger-full-access",
     canUseTool: input.canUseTool,
     diagnostics: input.diagnostics,
   };
@@ -291,9 +282,5 @@ export function buildCodexExpertOptions(input: BuildExpertRuntimeOptionsInput): 
   for (const [serverName, serverConfig] of Object.entries(input.mcpServerConfigs ?? {})) {
     configureHttpMcpServer(options, serverName, serverConfig, "SQUADFLOW_MCP_BRIDGE_TOKEN");
   }
-  return {
-    ...options,
-    sandboxMode: sandboxMode(input.capabilities),
-    config: options.config,
-  };
+  return options;
 }

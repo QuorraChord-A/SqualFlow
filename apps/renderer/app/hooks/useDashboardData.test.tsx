@@ -21,7 +21,7 @@ vi.mock("../lib/ws", () => {
   };
 });
 
-describe("useDashboardData UserTurn model", () => {
+describe("useDashboardData WorkRun model", () => {
   it("registers Flow listeners before requesting the initial snapshot", () => {
     const client = wsClient as typeof wsClient & { __emit: (type: string, message: unknown) => void };
     vi.mocked(wsClient.sendFlowSubscribe).mockImplementationOnce((flowId) => {
@@ -31,7 +31,7 @@ describe("useDashboardData UserTurn model", () => {
         data: {
           status: "active",
           orchestration_plan_history: [{ revision: { plan_revision_id: "prev-1" } }],
-          user_turns: [],
+          work_runs: [],
           tasks: [],
           agent_sessions: [],
           spec_revisions: [],
@@ -48,7 +48,7 @@ describe("useDashboardData UserTurn model", () => {
     expect(result.current.orchestrationPlans).toHaveLength(1);
   });
 
-  it("hydrates UserTurns and flat tasks without phases", () => {
+  it("hydrates WorkRuns and flat tasks without phases", () => {
     const { result } = renderHook(() => useDashboardData("flow-1"));
 
     act(() => {
@@ -57,14 +57,15 @@ describe("useDashboardData UserTurn model", () => {
         flow_id: "flow-1",
         data: {
           status: "active",
-          active_user_turn_id: "utn-1",
+          current_work_run_id: "utn-1",
           leader_session_id: "leader-sdk",
-          leader_agent_session_id: "ags-leader",
-          user_turns: [{
+          latest_leader_agent_session_id: "ags-leader",
+          active_leader_agent_session_id: "ags-leader",
+          work_runs: [{
             id: "utn-1",
-            user_turn_id: "utn-1",
+            work_run_id: "utn-1",
             trigger_message_id: "msg-1",
-            status: "active",
+            status: "executing",
             started_at: "2026-01-01T00:00:00.000Z",
             active_started_at: "2026-01-01T00:00:00.000Z",
             active_duration_ms: 0,
@@ -72,7 +73,7 @@ describe("useDashboardData UserTurn model", () => {
           }],
           tasks: [{
             id: "task-1",
-            user_turn_id: "utn-1",
+            work_run_id: "utn-1",
             title: "Build",
             description: "Build",
             status: "pending",
@@ -88,10 +89,10 @@ describe("useDashboardData UserTurn model", () => {
       });
     });
 
-    expect(result.current.activeUserTurnId).toBe("utn-1");
+    expect(result.current.activeWorkRunId).toBe("utn-1");
     expect(result.current.isFlowStateLoaded).toBe(true);
     expect(result.current.flowStateLoadedFlowId).toBe("flow-1");
-    expect(result.current.userTurns).toHaveLength(1);
+    expect(result.current.workRuns).toHaveLength(1);
     expect(result.current.tasks[0]?.title).toBe("Build");
     expect(result.current).not.toHaveProperty("phases");
     expect(result.current).not.toHaveProperty("runs");
@@ -117,7 +118,7 @@ describe("useDashboardData UserTurn model", () => {
             overview: "Create page.",
             actions: ["run"],
           },
-          user_turns: [],
+          work_runs: [],
           tasks: [],
           agent_sessions: [],
           spec_revisions: [],
@@ -143,7 +144,7 @@ describe("useDashboardData UserTurn model", () => {
     expect(result.current).not.toHaveProperty("agentModeLocked");
   });
 
-  it("upserts multiple Tasks in one UserTurn without losing prior task fields", () => {
+  it("upserts multiple Tasks in one WorkRun without losing prior task fields", () => {
     const { result } = renderHook(() => useDashboardData("flow-1"));
     const emit = (data: Record<string, unknown>) => act(() => {
       (wsClient as typeof wsClient & { __emit: (type: string, message: unknown) => void }).__emit("task:event", {
@@ -153,17 +154,17 @@ describe("useDashboardData UserTurn model", () => {
       });
     });
 
-    emit({ task: { task_id: "task-1", user_turn_id: "utn-1", subject: "Build", description: "Build", status: "pending" } });
-    emit({ task: { task_id: "task-2", user_turn_id: "utn-1", subject: "Verify", description: "Verify", status: "pending" } });
-    emit({ task_id: "task-1", user_turn_id: "utn-1", status: "failed", error_message: "failed" });
+    emit({ task: { task_id: "task-1", work_run_id: "utn-1", subject: "Build", description: "Build", status: "pending" } });
+    emit({ task: { task_id: "task-2", work_run_id: "utn-1", subject: "Verify", description: "Verify", status: "pending" } });
+    emit({ task_id: "task-1", work_run_id: "utn-1", status: "failed", error_message: "failed" });
 
     expect(result.current.tasks).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: "task-1", user_turn_id: "utn-1", title: "Build", status: "failed" }),
-      expect.objectContaining({ id: "task-2", user_turn_id: "utn-1", title: "Verify", status: "pending" }),
+      expect.objectContaining({ id: "task-1", work_run_id: "utn-1", title: "Build", status: "failed" }),
+      expect.objectContaining({ id: "task-2", work_run_id: "utn-1", title: "Verify", status: "pending" }),
     ]));
   });
 
-  it("clears the previous Flow UserTurn and Tasks when switching Flows", () => {
+  it("clears the previous Flow WorkRun and Tasks when switching Flows", () => {
     const { result, rerender } = renderHook(({ flowId }) => useDashboardData(flowId), {
       initialProps: { flowId: "flow-1" as string | null },
     });
@@ -175,9 +176,9 @@ describe("useDashboardData UserTurn model", () => {
           status: "active",
           risk_mode: "full_access",
           plan_approval: "off",
-          active_user_turn_id: "utn-1",
-          user_turns: [{ id: "utn-1", trigger_message_id: "msg-1", status: "active" }],
-          tasks: [{ id: "task-1", user_turn_id: "utn-1", title: "Build", status: "pending" }],
+          current_work_run_id: "utn-1",
+          work_runs: [{ id: "utn-1", trigger_message_id: "msg-1", status: "executing" }],
+          tasks: [{ id: "task-1", work_run_id: "utn-1", title: "Build", status: "pending" }],
         },
       });
     });
@@ -187,9 +188,9 @@ describe("useDashboardData UserTurn model", () => {
 
     rerender({ flowId: "flow-2" });
 
-    expect(result.current.activeUserTurnId).toBeNull();
+    expect(result.current.activeWorkRunId).toBeNull();
     expect(result.current.tasks).toEqual([]);
-    expect(result.current.userTurns).toEqual([]);
+    expect(result.current.workRuns).toEqual([]);
     expect(result.current.riskMode).toBe("auto_edit");
     expect(result.current.planApproval).toBe("on");
 
@@ -201,7 +202,7 @@ describe("useDashboardData UserTurn model", () => {
           status: "ready",
           risk_mode: "auto_edit",
           plan_approval: "on",
-          user_turns: [],
+          work_runs: [],
           tasks: [],
           agent_sessions: [],
           spec_revisions: [],
@@ -230,8 +231,8 @@ describe("useDashboardData UserTurn model", () => {
         flow_id: "flow-1",
         data: {
           status: "ready",
-          leader_agent_session_id: "ags-flow-1",
-          user_turns: [],
+          latest_leader_agent_session_id: "ags-flow-1",
+          work_runs: [],
           tasks: [],
           agent_sessions: [],
           spec_revisions: [],
@@ -265,8 +266,9 @@ describe("useDashboardData UserTurn model", () => {
         data: {
           status: "ready",
           leader_session_id: "leader-sdk",
-          leader_agent_session_id: "ags-leader",
-          user_turns: [],
+          latest_leader_agent_session_id: "ags-leader",
+          active_leader_agent_session_id: null,
+          work_runs: [],
           tasks: [],
           agent_sessions: [],
           spec_revisions: [],
@@ -350,7 +352,7 @@ describe("useDashboardData UserTurn model", () => {
       data: {
         plan_id: "plan-1",
         flow_id: "flow-1",
-        user_turn_id: "turn-1",
+        work_run_id: "turn-1",
         revision: { plan_revision_id: "revision-1" },
         run: { plan_run_id: "run-1", status: "running" },
         nodes: [],

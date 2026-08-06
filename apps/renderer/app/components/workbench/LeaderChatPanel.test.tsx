@@ -3,6 +3,7 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { within } from "@testing-library/react";
 import type { DecisionCardData } from "../../hooks/useDashboardData";
+import type { AgentSession } from "../../hooks/useFlowExperts";
 import type { WsInMessage } from "../../lib/ws";
 import { useBrowserSelectionStore } from "../../stores/useBrowserSelectionStore";
 import { useFlowStore } from "../../stores/useFlowStore";
@@ -86,7 +87,8 @@ vi.mock("../../lib/ws", () => ({
   wsClient: {
     genLogId: vi.fn(() => "log-1"),
     send: vi.fn(),
-    sendUserTurnCancel: vi.fn(),
+    sendWorkRunInterrupt: vi.fn(),
+    sendAgentSessionInterrupt: vi.fn(),
     sendSessionGet: vi.fn(),
     sendRunSpec: vi.fn(),
     sendFlowGuide: vi.fn(),
@@ -146,7 +148,7 @@ const pendingCard: DecisionCardData = {
 };
 
 function renderPanel(overrides: Partial<React.ComponentProps<typeof LeaderChatPanel>> = {}) {
-  const rendered = render(
+  return render(
     <LeaderChatPanel
       flowId="flow-1"
       leaderAgentSessionId="leader-session-1"
@@ -159,27 +161,33 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof LeaderChatPa
       {...overrides}
     />,
   );
-  if (overrides.userTurns?.some((turn) => turn.status === "active")) {
-    act(() => {
-      for (const handler of wsMessageHandlers) {
-        handler({
-          type: "leader:runtime_state",
-          flow_id: overrides.flowId ?? "flow-1",
-          data: { status: "streaming", leader_agent_session_id: overrides.leaderAgentSessionId ?? "leader-session-1" },
-        } as unknown as WsInMessage);
-      }
-    });
-  }
-  return rendered;
+}
+
+function activeExpertAgentSession(overrides: Partial<AgentSession> = {}): AgentSession {
+  return {
+    id: "expert-session-1",
+    flow_id: "flow-1",
+    work_run_id: "work-run-expert",
+    task_id: "task-1",
+    expert_id: "exp-coder",
+    session_id: "provider-session-1",
+    display_name: "Coder",
+    status: "streaming",
+    ...overrides,
+  };
 }
 
 function emitLeaderRuntimeState(status: "idle" | "starting" | "streaming", flowId = "flow-1", leaderAgentSessionId = "leader-session-1") {
   act(() => {
     for (const handler of wsMessageHandlers) {
       handler({
-        type: "leader:runtime_state",
+        type: "session:event",
         flow_id: flowId,
-        data: { status, leader_agent_session_id: leaderAgentSessionId },
+        data: {
+          status: status === "idle" ? "completed" : status === "starting" ? "queued" : "streaming",
+          agent_session_id: leaderAgentSessionId,
+          expert_id: "exp-leader",
+        },
       } as unknown as WsInMessage);
     }
   });
@@ -191,7 +199,8 @@ describe("LeaderChatPanel", () => {
     const { wsClient } = await import("../../lib/ws");
     vi.mocked(wsClient.genLogId).mockClear();
     vi.mocked(wsClient.send).mockClear();
-    vi.mocked(wsClient.sendUserTurnCancel).mockClear();
+    vi.mocked(wsClient.sendWorkRunInterrupt).mockClear();
+    vi.mocked(wsClient.sendAgentSessionInterrupt).mockClear();
     vi.mocked(wsClient.sendSessionGet).mockClear();
     vi.mocked(wsClient.sendRunSpec).mockClear();
     vi.mocked(wsClient.sendFlowGuide).mockClear();
@@ -432,37 +441,42 @@ describe("LeaderChatPanel", () => {
     }));
   });
 
-  it("turns the composer send button into stop while a user turn is running", async () => {
+  it("turns the composer send button into stop while the Leader AgentSession is running", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
       completedAt: null,
     };
 
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
+    emitLeaderRuntimeState("streaming");
 
     await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "不要继续了");
     await user.click(screen.getByRole("button", { name: "停止本轮" }));
 
-    expect(wsClient.sendUserTurnCancel).toHaveBeenCalledWith("flow-1", activeTurn.id);
+    expect(wsClient.sendAgentSessionInterrupt).toHaveBeenCalledWith(
+      "flow-1",
+      "leader-session-1",
+      expect.stringMatching(/^leader-stop-/),
+    );
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({
       type: "flow:message",
     }));
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
   });
 
-  it("lets an authoritative idle Flow clear a stale active turn and queueing composer", async () => {
+  it("keeps the stop button tied to the Leader AgentSession instead of Flow status", async () => {
     const user = userEvent.setup();
     const staleActiveTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 10_000,
@@ -482,7 +496,7 @@ describe("LeaderChatPanel", () => {
             decisionCardAnswers={{}}
             decisionCards={[]}
             specCards={{}}
-            userTurns={[staleActiveTurn]}
+            workRuns={[staleActiveTurn]}
             onOpenSpecPreview={vi.fn()}
           />
         </>
@@ -501,18 +515,20 @@ describe("LeaderChatPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "settle flow" }));
 
-    await waitFor(() => {
-      expect(screen.queryByRole("button", { name: "停止本轮" })).not.toBeInTheDocument();
-      expect(screen.getByRole("textbox", { name: "输入消息开始新的讨论..." })).toBeVisible();
-    });
-    expect(useRunningMessageQueueStore.getState().knownRunningByFlow["flow-1"]).toBe(false);
+    expect(screen.getByRole("button", { name: "停止本轮" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "继续输入以排队后续修改" })).toBeVisible();
+
+    emitLeaderRuntimeState("idle");
+
+    expect(screen.queryByRole("button", { name: "停止本轮" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "输入消息开始新的讨论..." })).toBeVisible();
   });
 
-  it("sends directly instead of showing stop or queueing while a user turn waits for input", async () => {
+  it("sends directly instead of showing stop or queueing while a WorkRun waits for input", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
     renderPanel({
-      userTurns: [{
+      workRuns: [{
         id: "turn-flow-1",
         triggerMessageId: "msg-user-1",
         status: "waiting_user",
@@ -538,14 +554,165 @@ describe("LeaderChatPanel", () => {
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
   });
 
+  it("keeps the composer sendable while an Expert AgentSession is streaming", () => {
+    renderPanel({
+      workRuns: [{
+        id: "work-run-expert",
+        triggerMessageId: "msg-expert",
+        status: "executing",
+        startedAt: "2026-06-29T07:00:00.000Z",
+        activeStartedAt: "2026-06-29T07:00:00.000Z",
+        activeDurationMs: 1200,
+        completedAt: null,
+        executionStartedAt: "2026-06-29T07:00:00.000Z",
+        revision: 3,
+      }],
+      agentSessions: [activeExpertAgentSession()],
+    });
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "session:event",
+          flow_id: "flow-1",
+          data: {
+            status: "streaming",
+            agent_session_id: "expert-session-1",
+            expert_id: "exp-coder",
+          },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    expect(screen.getByRole("textbox", { name: "输入消息..." })).toBeVisible();
+    expect(screen.getByRole("button", { name: "发送消息" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "停止本轮" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "中断协作" })).toBeVisible();
+  });
+
+  it("confirms and sends an idempotent WorkRun interrupt action", async () => {
+    const user = userEvent.setup();
+    const { wsClient } = await import("../../lib/ws");
+    const executingWorkRun = {
+      id: "work-run-interrupt",
+      triggerMessageId: "msg-work-run",
+      status: "executing" as const,
+      startedAt: "2026-06-29T07:00:00.000Z",
+      activeStartedAt: "2026-06-29T07:00:00.000Z",
+      activeDurationMs: 1200,
+      completedAt: null,
+      executionStartedAt: "2026-06-29T07:00:00.000Z",
+      revision: 7,
+    };
+
+    renderPanel({
+      workRuns: [executingWorkRun],
+      agentSessions: [activeExpertAgentSession({
+        work_run_id: "work-run-interrupt",
+        status: "queued",
+      })],
+    });
+
+    const interruptButton = screen.getByRole("button", { name: "中断协作" });
+    expect(interruptButton).toHaveAttribute("data-testid", "interrupt-work-run-button");
+    expect(interruptButton.previousElementSibling).toHaveAttribute("aria-hidden", "true");
+    await user.click(interruptButton);
+
+    expect(screen.getByRole("alertdialog")).toHaveTextContent(
+      "正在运行的 Agent 会停止；任务进度和上下文将保留，之后可以让 Leader 恢复。",
+    );
+    await user.click(screen.getByTestId("confirm-interrupt-work-run"));
+
+    expect(wsClient.sendWorkRunInterrupt).toHaveBeenCalledWith(
+      "flow-1",
+      "work-run-interrupt",
+      7,
+      expect.stringMatching(/^work-run-interrupt-/),
+    );
+
+    act(() => {
+      for (const handler of wsMessageHandlers) {
+        handler({
+          type: "work_run:event",
+          flow_id: "flow-1",
+          data: {
+            work_run_id: "work-run-interrupt",
+            trigger_message_id: "msg-work-run",
+            status: "interrupted",
+            revision: 8,
+            execution_started_at: "2026-06-29T07:00:00.000Z",
+          },
+        } as unknown as WsInMessage);
+      }
+    });
+
+    expect(screen.queryByRole("button", { name: "中断协作" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("hides the collaboration interrupt control before execution starts", () => {
+    renderPanel({
+      workRuns: [{
+        id: "work-run-ready",
+        triggerMessageId: "msg-ready",
+        status: "ready",
+        startedAt: "2026-06-29T07:00:00.000Z",
+        activeStartedAt: null,
+        activeDurationMs: 0,
+        completedAt: null,
+        executionStartedAt: null,
+        revision: 1,
+      }],
+    });
+
+    expect(screen.queryByRole("button", { name: "中断协作" })).not.toBeInTheDocument();
+  });
+
+  it("hides the collaboration interrupt control after resume until a task-backed Expert is dispatched", () => {
+    renderPanel({
+      workRuns: [{
+        id: "work-run-resumed",
+        triggerMessageId: "msg-resumed",
+        status: "executing",
+        startedAt: "2026-06-29T07:00:00.000Z",
+        activeStartedAt: "2026-06-29T07:00:00.000Z",
+        activeDurationMs: 1200,
+        completedAt: null,
+        executionStartedAt: "2026-06-29T07:00:00.000Z",
+        revision: 8,
+      }],
+      agentSessions: [
+        activeExpertAgentSession({
+          id: "completed-expert-session",
+          work_run_id: "work-run-resumed",
+          status: "completed",
+        }),
+        activeExpertAgentSession({
+          id: "taskless-expert-session",
+          work_run_id: "work-run-resumed",
+          task_id: null,
+          status: "streaming",
+        }),
+        activeExpertAgentSession({
+          id: "leader-session",
+          work_run_id: "work-run-resumed",
+          expert_id: "exp-leader",
+          status: "streaming",
+        }),
+      ],
+    });
+
+    expect(screen.queryByRole("button", { name: "中断协作" })).not.toBeInTheDocument();
+  });
+
   it("sends directly when Leader is idle even if an old queue item remains", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
     renderPanel({
-      userTurns: [{
+      workRuns: [{
         id: "turn-expert-active",
         triggerMessageId: "msg-expert-active",
-        status: "active",
+        status: "executing",
         startedAt: "2026-06-29T07:00:00.000Z",
         activeStartedAt: "2026-06-29T07:00:00.000Z",
         activeDurationMs: 1200,
@@ -578,13 +745,13 @@ describe("LeaderChatPanel", () => {
     }));
   });
 
-  it("offers stopping the active user turn beside a pending permission decision", async () => {
+  it("offers stopping the active Leader AgentSession beside a pending permission decision", async () => {
     const user = userEvent.setup();
     const { wsClient } = await import("../../lib/ws");
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 1200,
@@ -592,17 +759,22 @@ describe("LeaderChatPanel", () => {
     };
 
     renderPanel({
-      userTurns: [activeTurn],
+      workRuns: [activeTurn],
       decisionCards: [pendingCard],
       decisionCardStatuses: { [pendingCard.card_id]: "pending" },
     });
+    emitLeaderRuntimeState("streaming");
 
     expect(screen.getByTestId("pending-decision-dock")).toBeVisible();
     expect(screen.queryByRole("button", { name: "发送消息" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "停止本轮" }));
 
-    expect(wsClient.sendUserTurnCancel).toHaveBeenCalledWith("flow-1", activeTurn.id);
+    expect(wsClient.sendAgentSessionInterrupt).toHaveBeenCalledWith(
+      "flow-1",
+      "leader-session-1",
+      expect.stringMatching(/^leader-stop-/),
+    );
     expect(wsClient.send).not.toHaveBeenCalledWith(expect.objectContaining({
       type: "flow:decision_cancel",
     }));
@@ -856,7 +1028,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -868,7 +1040,8 @@ describe("LeaderChatPanel", () => {
       triggerMessageId: "msg-user-2",
     };
 
-    const { rerender } = renderPanel({ userTurns: [activeTurn] });
+    const { rerender } = renderPanel({ workRuns: [activeTurn] });
+    emitLeaderRuntimeState("streaming");
 
     await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "切换后还在的排队消息");
     await user.keyboard("{Enter}");
@@ -884,7 +1057,7 @@ describe("LeaderChatPanel", () => {
         decisionCardAnswers={{}}
         decisionCards={[]}
         specCards={{}}
-        userTurns={[flowTwoTurn]}
+        workRuns={[flowTwoTurn]}
         onOpenSpecPreview={vi.fn()}
       />,
     );
@@ -902,7 +1075,7 @@ describe("LeaderChatPanel", () => {
         decisionCardAnswers={{}}
         decisionCards={[]}
         specCards={{}}
-        userTurns={[activeTurn]}
+        workRuns={[activeTurn]}
         onOpenSpecPreview={vi.fn()}
       />,
     );
@@ -917,7 +1090,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -939,7 +1112,8 @@ describe("LeaderChatPanel", () => {
       attributes: { id: "task-open", className: "", href: "", name: "", type: "button" },
     });
 
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
+    emitLeaderRuntimeState("streaming");
 
     await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "那这也发出来吧");
     await user.keyboard("{Enter}");
@@ -964,10 +1138,10 @@ describe("LeaderChatPanel", () => {
     act(() => {
       for (const handler of wsMessageHandlers) {
         handler({
-          type: "user_turn:event",
+          type: "work_run:event",
           flow_id: "flow-1",
           data: {
-            user_turn_id: "turn-flow-1",
+            work_run_id: "turn-flow-1",
             trigger_message_id: "msg-user-1",
             status: "completed",
             started_at: "2026-06-29T07:00:00.000Z",
@@ -1099,7 +1273,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active" as const,
+      status: "executing" as const,
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -1122,7 +1296,8 @@ describe("LeaderChatPanel", () => {
       attributes: { id: "current-directory", className: "", href: "", name: "", type: "button" },
     });
 
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
+    emitLeaderRuntimeState("streaming");
 
     await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "排队带注释");
     await user.keyboard("{Enter}");
@@ -1170,7 +1345,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active" as const,
+      status: "executing" as const,
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -1193,7 +1368,8 @@ describe("LeaderChatPanel", () => {
       attributes: { id: "page-a", className: "", href: "", name: "", type: "button" },
     });
 
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
+    emitLeaderRuntimeState("streaming");
 
     await user.type(screen.getByRole("textbox", { name: "继续输入以排队后续修改" }), "跨页排队消息");
     await user.keyboard("{Enter}");
@@ -1262,7 +1438,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-flow-1",
       triggerMessageId: "msg-user-1",
-      status: "active" as const,
+      status: "executing" as const,
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -1285,7 +1461,7 @@ describe("LeaderChatPanel", () => {
       attributes: { id: "", className: "", href: "", name: "", type: "" },
     });
 
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
     act(() => {
       for (const handler of wsMessageHandlers) {
         handler({
@@ -1386,7 +1562,7 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-shared",
       triggerMessageId: "msg-user-shared",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T07:00:00.000Z",
       activeStartedAt: "2026-06-29T07:00:00.000Z",
       activeDurationMs: 0,
@@ -1404,7 +1580,7 @@ describe("LeaderChatPanel", () => {
             decisionCardAnswers={{}}
             decisionCards={[]}
             specCards={{}}
-            userTurns={[activeTurn]}
+            workRuns={[activeTurn]}
             onOpenSpecPreview={vi.fn()}
           />
         </div>
@@ -1417,7 +1593,7 @@ describe("LeaderChatPanel", () => {
             decisionCardAnswers={{}}
             decisionCards={[]}
             specCards={{}}
-            userTurns={[activeTurn]}
+            workRuns={[activeTurn]}
             onOpenSpecPreview={vi.fn()}
             composerOnly
             composerVariant="compactFloating"
@@ -2168,7 +2344,7 @@ describe("LeaderChatPanel", () => {
     expect(onInitialPlanModeResolved).toHaveBeenCalledTimes(1);
   });
 
-  it("restores Plan mode from an active spec-requested UserTurn before a card exists", async () => {
+  it("restores Plan mode from an active spec-requested WorkRun before a card exists", async () => {
     renderPanel({ riskMode: "full_access" });
 
     act(() => {
@@ -2177,10 +2353,10 @@ describe("LeaderChatPanel", () => {
           type: "flow:state",
           flow_id: "flow-1",
           data: {
-            user_turns: [{
-              user_turn_id: "turn-plan-refresh",
+            work_runs: [{
+              work_run_id: "turn-plan-refresh",
               trigger_message_id: "msg-plan-refresh",
-              status: "active",
+              status: "ready",
               started_at: "2026-07-18T05:00:00.000Z",
               active_started_at: "2026-07-18T05:00:00.000Z",
               active_duration_ms: 0,
@@ -2200,7 +2376,7 @@ describe("LeaderChatPanel", () => {
         "spec-approval-1": {
           spec_approval_id: "spec-approval-1",
           spec_revision_id: "spec-revision-1",
-          user_turn_id: "turn-1",
+          work_run_id: "turn-1",
           status: "pending",
           file_name: "plan.md",
           overview: "先确认范围",
@@ -2240,13 +2416,13 @@ describe("LeaderChatPanel", () => {
     const activeTurn = {
       id: "turn-spec-queue",
       triggerMessageId: "msg-running",
-      status: "active" as const,
+      status: "executing" as const,
       startedAt: "2026-07-11T10:00:00.000Z",
       activeStartedAt: "2026-07-11T10:00:00.000Z",
       activeDurationMs: 0,
       completedAt: null,
     };
-    renderPanel({ userTurns: [activeTurn] });
+    renderPanel({ workRuns: [activeTurn] });
     act(() => {
       for (const handler of wsMessageHandlers) {
         handler({
@@ -2420,8 +2596,8 @@ describe("LeaderChatPanel", () => {
           type: "flow:state",
           flow_id: "flow-1",
           data: {
-            user_turns: [{
-              user_turn_id: "utn-1",
+            work_runs: [{
+              work_run_id: "utn-1",
               trigger_message_id: "msg-user-1",
               status: "completed",
               started_at: "2026-06-26T10:00:00.000Z",
@@ -2476,9 +2652,9 @@ describe("LeaderChatPanel", () => {
     expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
   });
 
-  it("uses dashboard user turns for historical flows even if the panel missed flow:state", async () => {
+  it("uses dashboard WorkRuns for historical flows even if the panel missed flow:state", async () => {
     renderPanel({
-      userTurns: [{
+      workRuns: [{
         id: "utn-1",
         triggerMessageId: "msg-user-1",
         status: "completed",
@@ -2538,9 +2714,9 @@ describe("LeaderChatPanel", () => {
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
   });
 
-  it("groups canonical messages by the stable UserTurn trigger id", async () => {
+  it("groups canonical messages by the stable WorkRun trigger id", async () => {
     renderPanel({
-      userTurns: [{
+      workRuns: [{
         id: "utn-1",
         triggerMessageId: "msg-user-original",
         status: "completed",
@@ -2615,10 +2791,10 @@ describe("LeaderChatPanel", () => {
           type: "flow:state",
           flow_id: "flow-1",
           data: {
-            user_turns: [{
-              user_turn_id: "utn-1",
+            work_runs: [{
+              work_run_id: "utn-1",
               trigger_message_id: "msg-user-1",
-              status: "active",
+              status: "executing",
               started_at: "2026-06-26T10:00:00.000Z",
               active_started_at: "2026-06-26T10:00:01.000Z",
               active_duration_ms: 1000,
@@ -2667,8 +2843,8 @@ describe("LeaderChatPanel", () => {
           type: "flow:state",
           flow_id: "flow-1",
           data: {
-            user_turns: [{
-              user_turn_id: "utn-1",
+            work_runs: [{
+              work_run_id: "utn-1",
               trigger_message_id: "msg-user-1",
               status: "waiting_user",
               started_at: "2026-06-26T10:00:00.000Z",

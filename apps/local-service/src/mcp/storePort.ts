@@ -2,20 +2,21 @@ import type { Store } from "../db/store.js";
 import type { AgentDispatcher } from "../runtime/agentDispatcher.js";
 import { isExpertRuntimeEnabled, readAgentRuntimeConfigSnapshotSync } from "../config/agentRuntimeConfig.js";
 import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
-import type { StorePort } from "./leaderServer.js";
+import type { CurrentTurnInput, StorePort } from "./leaderServer.js";
 import { DeclarativeOrchestrationRuleSchema, diffPlanNodes, evaluateDeclarativeRules, lintOrchestrationPlan } from "../domain/orchestration.js";
 import type { PlanLintIssue, SubmitOrchestrationPlanInput } from "../domain/orchestration.js";
 import { normalizeFlowName } from "../domain/flowName.js";
+import { workRunDto } from "../domain/workRun.js";
 
 type AgentDispatchResult = {
   agent_session_id: string;
   status: string;
   expert_id?: string;
   task_id?: string | null;
-  user_turn_id?: string | null;
+  work_run_id?: string | null;
   task?: {
     task_id: string;
-    user_turn_id: string;
+    work_run_id: string;
     subject: string;
     description: string;
     active_form: string;
@@ -84,7 +85,7 @@ function taskToPlatform(
 ) {
   return {
     task_id: task.id,
-    user_turn_id: task.userTurnId,
+    work_run_id: task.workRunId,
     subject: task.title,
     description: task.description,
     active_form: task.activeForm,
@@ -117,20 +118,102 @@ export function createStorePort(
         .map((expert) => expert.id),
     );
   });
-  function activeCurrentTurn(flowId: string, currentTurnInput: { user_turn_id?: string } | undefined) {
-    const userTurnId = currentTurnInput?.user_turn_id;
-    const turn = userTurnId ? store.getUserTurn(userTurnId) : undefined;
-    return turn && turn.flowId === flowId && turn.status === "active" ? turn : null;
+  function activeCurrentTurn(flowId: string, currentTurnInput: { work_run_id?: string } | undefined) {
+    const workRunId = currentTurnInput?.work_run_id;
+    const turn = workRunId ? store.getWorkRun(workRunId) : undefined;
+    return turn && turn.flowId === flowId && ["ready", "executing"].includes(turn.status) ? turn : null;
+  }
+
+  function ensureCurrentWorkRun(flowId: string, currentTurnInput: CurrentTurnInput | undefined) {
+    const existing = activeCurrentTurn(flowId, currentTurnInput);
+    if (existing) return existing;
+    if (!currentTurnInput || !["user_message", "decision_resolved", "spec_run", "plan_approved"].includes(currentTurnInput.trigger_kind)) return null;
+    const open = store.getOpenWorkRun(flowId);
+    if (open) {
+      if (open.status === "interrupted" || open.status === "waiting_user") return null;
+      currentTurnInput.work_run_id = open.id;
+      return open;
+    }
+    const created = store.createWorkRun({
+      flowId,
+      triggerMessageId: currentTurnInput.message_id ?? `msg-work-${Date.now()}`,
+      specRequested: currentTurnInput.spec_requested === true,
+    });
+    if (!created) return null;
+    currentTurnInput.work_run_id = created.id;
+    return created;
+  }
+
+  function ensureCreatePlanWorkRun(flowId: string, currentTurnInput: CurrentTurnInput | undefined) {
+    const workRunError = (code: string, message: string) => ({ error: { code, message } });
+    const resolveStatus = (turn: ReturnType<Store["getWorkRun"]>) => {
+      if (!turn || turn.flowId !== flowId) {
+        return workRunError(
+          "WORK_RUN_NOT_EXECUTABLE",
+          "当前 WorkRun 状态不允许创建计划。请重新读取上下文后决定下一步。",
+        );
+      }
+      if (turn.status === "interrupted") {
+        return workRunError(
+          "WORK_RUN_INTERRUPTED",
+          "当前协作已中断，不能创建计划。请等待用户明确要求继续。",
+        );
+      }
+      if (turn.status === "waiting_user") {
+        return workRunError(
+          "WORK_RUN_WAITING_USER",
+          "当前正在等待用户操作，不能创建新计划。请等待用户处理。",
+        );
+      }
+      if (!["ready", "executing"].includes(turn.status)) {
+        return workRunError(
+          "WORK_RUN_NOT_EXECUTABLE",
+          "当前 WorkRun 状态不允许创建计划。请重新读取上下文后决定下一步。",
+        );
+      }
+      return { turn };
+    };
+
+    if (currentTurnInput?.work_run_id) {
+      return resolveStatus(store.getWorkRun(currentTurnInput.work_run_id));
+    }
+    if (!currentTurnInput || !["user_message", "decision_resolved", "spec_run", "plan_approved"].includes(currentTurnInput.trigger_kind)) {
+      return workRunError(
+        "WORK_RUN_NOT_EXECUTABLE",
+        "当前 WorkRun 状态不允许创建计划。请重新读取上下文后决定下一步。",
+      );
+    }
+
+    const open = store.getOpenWorkRun(flowId);
+    if (open) {
+      const resolved = resolveStatus(open);
+      if ("turn" in resolved) currentTurnInput.work_run_id = resolved.turn.id;
+      return resolved;
+    }
+
+    const created = store.createWorkRun({
+      flowId,
+      triggerMessageId: currentTurnInput.message_id ?? `msg-work-${Date.now()}`,
+      specRequested: currentTurnInput.spec_requested === true,
+    });
+    if (!created) {
+      return workRunError(
+        "WORK_RUN_NOT_EXECUTABLE",
+        "当前 WorkRun 状态不允许创建计划。请重新读取上下文后决定下一步。",
+      );
+    }
+    currentTurnInput.work_run_id = created.id;
+    return { turn: created };
   }
 
   function taskForCurrentTurn(
     flowId: string,
     taskId: string,
-    currentTurnInput: { user_turn_id?: string } | undefined,
+    currentTurnInput: { work_run_id?: string } | undefined,
   ) {
     const turn = activeCurrentTurn(flowId, currentTurnInput);
     const task = store.getTask(taskId);
-    return turn && task && task.flowId === flowId && task.userTurnId === turn.id ? task : null;
+    return turn && task && task.flowId === flowId && task.workRunId === turn.id ? task : null;
   }
 
   function listBlocks(taskId: string): string[] {
@@ -185,9 +268,17 @@ export function createStorePort(
     },
 
     createPlan(input) {
-      const userTurnId = input.currentTurnInput?.user_turn_id;
-      const turn = userTurnId ? store.getUserTurn(userTurnId) : undefined;
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") return null;
+      const currentWorkRun = ensureCreatePlanWorkRun(input.flowId, input.currentTurnInput);
+      if ("error" in currentWorkRun) return currentWorkRun;
+      const { turn } = currentWorkRun;
+      if (input.mode === "rewrite" && store.listSpecRevisions(input.flowId).length === 0) {
+        return {
+          error: {
+            code: "SPEC_REVISION_NOT_FOUND",
+            message: "没有可重写的旧计划。请改用 write 模式创建新计划。",
+          },
+        };
+      }
       const created = store.createSpecPlan({
         flowId: input.flowId,
         mode: input.mode,
@@ -195,9 +286,16 @@ export function createStorePort(
         overview: input.overview,
         content: input.plan,
         sourceAgentSessionId: input.sourceAgentSessionId,
-        userTurnId: turn.id,
+        workRunId: turn.id,
       });
-      if (!created) return null;
+      if (!created) {
+        return {
+          error: {
+            code: "SPEC_PERSISTENCE_FAILED",
+            message: "计划保存失败。不要假设计划已创建，请向用户说明失败。",
+          },
+        };
+      }
       const { spec, approval } = created;
 
       return {
@@ -210,7 +308,7 @@ export function createStorePort(
         },
         spec_approval: {
           spec_approval_id: approval.id,
-          user_turn_id: approval.userTurnId,
+          work_run_id: approval.workRunId,
           status: approval.status,
           actions: ["run"],
         },
@@ -218,28 +316,27 @@ export function createStorePort(
     },
 
     askUser(input) {
-      const userTurnId = input.currentTurnInput?.user_turn_id;
-      if (!userTurnId) return undefined;
+      const turn = ensureCurrentWorkRun(input.flowId, input.currentTurnInput);
+      if (!turn) return undefined;
       const card = store.createDecisionCard({
         ...input,
-        userTurnId,
+        workRunId: turn.id,
         cardType: "clarification",
       });
-      return card && card.userTurnId ? { id: card.id, status: card.status, userTurnId: card.userTurnId } : undefined;
+      return card && card.workRunId ? { id: card.id, status: card.status, workRunId: card.workRunId } : undefined;
     },
 
     createTask(input) {
       const createTaskError = (code: string, message: string) => ({ error: { code, message } });
-      const userTurnId = input.currentTurnInput?.user_turn_id;
-      const turn = userTurnId ? store.getUserTurn(userTurnId) : undefined;
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") {
-        return createTaskError("ACTIVE_USER_TURN_REQUIRED", "Task could not be created for the current UserTurn.");
+      const turn = ensureCurrentWorkRun(input.flowId, input.currentTurnInput);
+      if (!turn) {
+        return createTaskError("WORK_RUN_REQUIRED", "Task could not be created for the current WorkRun.");
       }
       if (input.currentTurnInput?.spec_requested === true) {
         return createTaskError("SPEC_REQUEST_ACTIVE", "本消息要求 Spec：先 create_plan 并等待批准，不要直接创建任务。");
       }
       // Multi-expert orchestration owns task creation for this turn.
-      if (store.listOrchestrationPlans(input.flowId).some((plan) => plan.userTurnId === turn.id)) {
+      if (store.listOrchestrationPlans(input.flowId).some((plan) => plan.workRunId === turn.id)) {
         return createTaskError("ORCHESTRATION_PLAN_ACTIVE", "本轮已有编排计划，计划节点已物化为任务；用 dispatch_agent 派发它们，不要再 create_task。");
       }
 
@@ -257,7 +354,7 @@ export function createStorePort(
         if (!current || (current.trigger_kind !== "user_message" && current.trigger_kind !== "decision_resolved")) {
           return createTaskError("INVALID_TRIGGER", "当前触发类型不能开启新工作；仅用户消息或决策解决可创建本轮首个任务。");
         }
-        const created = store.createDirectUserTurnTask({
+        const created = store.createDirectWorkRunTask({
           flowId: input.flowId,
           subject: input.subject,
           description: input.description,
@@ -265,21 +362,21 @@ export function createStorePort(
           currentTurnInput: current,
         });
         return created ? {
-          user_turn_id: created.userTurn.id,
+          work_run_id: created.workRun.id,
           task: taskToPlatform(created.task, store.listTaskDependencies(created.task.id)),
-        } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current UserTurn.");
+        } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current WorkRun.");
       }
 
       if (turn.workSource === "spec") {
         const hasPlan = store.listArtifacts(input.flowId)
-          .some((artifact) => artifact.userTurnId === turn.id && artifact.type === "execution_plan");
+          .some((artifact) => artifact.workRunId === turn.id && artifact.type === "execution_plan");
         if (!hasPlan) {
           return createTaskError("EXECUTION_PLAN_REQUIRED", "Spec 轮次需先 save_execution_plan，再创建任务。");
         }
       }
       const task = store.createTask({
         flowId: input.flowId,
-        userTurnId: turn.id,
+        workRunId: turn.id,
         title: input.subject,
         description: input.description,
         expertId: null,
@@ -287,21 +384,21 @@ export function createStorePort(
         dependsOnTaskIds: [],
       });
       return task ? {
-        user_turn_id: turn.id,
+        work_run_id: turn.id,
         task: taskToPlatform(task, store.listTaskDependencies(task.id)),
-      } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current UserTurn.");
+      } : createTaskError("TASK_CREATE_FAILED", "Task could not be created for the current WorkRun.");
     },
 
     saveExecutionPlan(input) {
-      const turn = activeCurrentTurn(input.flowId, input.currentTurnInput);
+      const turn = ensureCurrentWorkRun(input.flowId, input.currentTurnInput);
       if (!turn) return null;
       if (input.currentTurnInput?.spec_requested === true) return null;
       if (!turn.workSource) {
         const flow = store.getFlow(input.flowId);
         if (!flow?.projectId) return null;
-        const initialized = store.startUserTurnWork({
+        const initialized = store.startWorkRunWork({
           flowId: input.flowId,
-          userTurnId: turn.id,
+          workRunId: turn.id,
           workSource: "direct_message",
           targetProjectId: flow.projectId,
           inputSnapshotJson: JSON.stringify({ type: "direct_message", message_id: turn.triggerMessageId }),
@@ -310,7 +407,7 @@ export function createStorePort(
       }
       const artifact = store.createArtifact({
         flowId: input.flowId,
-        userTurnId: turn.id,
+        workRunId: turn.id,
         taskId: null,
         type: "execution_plan",
         title: input.title,
@@ -321,7 +418,7 @@ export function createStorePort(
       return {
         id: artifact.id,
         flow_id: artifact.flowId,
-        user_turn_id: artifact.userTurnId,
+        work_run_id: artifact.workRunId,
         task_id: artifact.taskId,
         type: artifact.type,
         title: artifact.title,
@@ -333,7 +430,7 @@ export function createStorePort(
     },
 
     submitOrchestrationPlan(input) {
-      const turn = activeCurrentTurn(input.flow_id, input.currentTurnInput);
+      const turn = ensureCurrentWorkRun(input.flow_id, input.currentTurnInput);
       if (!turn) return null;
       const flow = store.getFlow(input.flow_id);
       if (!flow?.projectId) return null;
@@ -386,9 +483,9 @@ export function createStorePort(
       const blocking = lint.filter((issue) => issue.severity === "block");
       if (blocking.length > 0) return { error: { code: "PLAN_LINT_REJECTED", issues: lint } };
       if (!turn.workSource) {
-        const initialized = store.startUserTurnWork({
+        const initialized = store.startWorkRunWork({
           flowId: input.flow_id,
-          userTurnId: turn.id,
+          workRunId: turn.id,
           workSource: "direct_message",
           specRevisionId: turn.specRevisionId,
           targetProjectId: flow.projectId,
@@ -400,7 +497,7 @@ export function createStorePort(
       }
 
       const feedbackApproval = store.listPlanApprovals(input.flow_id)
-        .find((approval) => approval.userTurnId === turn.id && approval.status === "feedback_pending");
+        .find((approval) => approval.workRunId === turn.id && approval.status === "feedback_pending");
       const basedOnRevisionId = input.based_on_revision_id ?? feedbackApproval?.planRevisionId;
       const sourceFeedbackMessageId = input.source_feedback_message_id ?? input.currentTurnInput?.message_id;
       let previousNodes: Array<{
@@ -410,7 +507,7 @@ export function createStorePort(
       if (basedOnRevisionId) {
         const previousRevision = store.getPlanRevision(basedOnRevisionId);
         const plan = previousRevision ? store.getOrchestrationPlan(previousRevision.planId) : undefined;
-        if (!previousRevision || !plan || plan.userTurnId !== turn.id) return { error: { code: "INVALID_BASE_REVISION" } };
+        if (!previousRevision || !plan || plan.workRunId !== turn.id) return { error: { code: "INVALID_BASE_REVISION" } };
         const nodes = store.listPlanNodes(previousRevision.id);
         const keyById = new Map(nodes.map((node) => [node.id, node.stableKey]));
         previousNodes = nodes.map((node) => ({
@@ -429,7 +526,7 @@ export function createStorePort(
       const diff = diffPlanNodes(previousNodes, resolvedInput.nodes);
       const created = store.createOrchestrationPlanRevision({
         flowId: input.flow_id,
-        userTurnId: turn.id,
+        workRunId: turn.id,
         specRevisionId: turn.specRevisionId,
         title: input.title,
         objective: input.objective,
@@ -459,11 +556,11 @@ export function createStorePort(
     resolvePlanFeedback(input) {
       const turn = activeCurrentTurn(input.flowId, input.currentTurnInput);
       const approval = store.getPlanApproval(input.planApprovalId);
-      if (!turn || !approval || approval.flowId !== input.flowId || approval.userTurnId !== turn.id) return null;
+      if (!turn || !approval || approval.flowId !== input.flowId || approval.workRunId !== turn.id) return null;
       const restoredApproval = store.restorePlanApprovalAfterFeedback(approval.id, input.resolutionNote);
       if (restoredApproval) return restoredApproval;
       const run = store.getPlanRunForRevision(approval.planRevisionId);
-      if (!run || run.userTurnId !== turn.id || run.status !== "paused_for_feedback") return null;
+      if (!run || run.workRunId !== turn.id || run.status !== "paused_for_feedback") return null;
       const resumed = store.resumePlanRunAfterFeedback(run.id, input.resolutionNote);
       return resumed
         ? { approval: store.getPlanApproval(approval.id) ?? approval, run: resumed }
@@ -494,7 +591,7 @@ export function createStorePort(
     listTasks({ flowId, currentTurnInput }) {
       const turn = activeCurrentTurn(flowId, currentTurnInput);
       if (!turn) return [];
-      return store.listUserTurnTasks(turn.id)
+      return store.listWorkRunTasks(turn.id)
         .map((task) => taskToPlatform(task, store.listTaskDependencies(task.id), listBlocks(task.id)));
     },
 
@@ -531,8 +628,10 @@ export function createStorePort(
                     ? "INVALID_TASK"
                     : result.error === "expert does not match task expert"
                       ? "EXPERT_MISMATCH"
-                      : result.error === "task user turn is not active"
-                        ? "USER_TURN_NOT_ACTIVE"
+                      : result.error === "WORK_RUN_INTERRUPTED"
+                        ? "WORK_RUN_INTERRUPTED"
+                        : result.error === "WORK_RUN_NOT_EXECUTABLE"
+                          ? "WORK_RUN_NOT_EXECUTABLE"
                         : result.error === "task is blocked by incomplete dependencies"
                           ? "TASK_BLOCKED"
                           : result.error === "plan is paused for feedback"
@@ -570,7 +669,7 @@ export function createStorePort(
             status: session.status,
             expert_id: session.expertId,
             task_id: session.taskId,
-            user_turn_id: session.userTurnId,
+            work_run_id: session.workRunId,
             resume_from_agent_session_id: session.resumeFromAgentSessionId ?? null,
           } : {
             agent_session_id: result.agent_session_id,
@@ -599,7 +698,7 @@ export function createStorePort(
       if (
         !session
         || session.flowId !== input.flowId
-        || session.userTurnId !== task.userTurnId
+        || session.workRunId !== task.workRunId
         || session.taskId !== task.id
         || session.status !== "streaming"
       ) {
@@ -616,7 +715,7 @@ export function createStorePort(
       }
       return agentDispatcher.cancelAgent({
         flowId: input.flowId,
-        userTurnId: task.userTurnId,
+        workRunId: task.workRunId,
         taskId: task.id,
         agentSessionId: session.id,
       }).then((result) => {
@@ -632,7 +731,7 @@ export function createStorePort(
                 status: cancelledSession.status,
                 expert_id: cancelledSession.expertId,
                 task_id: cancelledSession.taskId,
-                user_turn_id: cancelledSession.userTurnId,
+                work_run_id: cancelledSession.workRunId,
               },
             }
           : {
@@ -644,7 +743,7 @@ export function createStorePort(
 
     async sendMessage(input) {
       const turn = activeCurrentTurn(input.flowId, input.currentTurnInput);
-      if (!turn || !agentDispatcher) {
+      if (!agentDispatcher) {
         return {
           ok: true,
           accepted: false,
@@ -656,12 +755,51 @@ export function createStorePort(
       }
       const result = await agentDispatcher.sendMessage({
         flowId: input.flowId,
-        userTurnId: turn.id,
+        workRunId: turn?.id,
         expertId: input.expertId,
         content: input.content,
         summary: input.summary,
       });
       return { ok: true, ...result };
+    },
+
+    interruptWorkRun(input) {
+      const turn = store.getWorkRun(input.workRunId);
+      if (!turn || turn.flowId !== input.flowId) {
+        return { ok: false as const, error: { code: "WORK_RUN_NOT_FOUND", message: "WorkRun not found." } };
+      }
+      const result = store.interruptWorkRun({ flowId: input.flowId, workRunId: turn.id, expectedRevision: turn.revision });
+      if (!result.workRun || !["interrupted", "already_interrupted"].includes(result.outcome)) {
+        return { ok: false as const, error: { code: result.outcome === "revision_conflict" ? "WORK_RUN_REVISION_CONFLICT" : "WORK_RUN_NOT_INTERRUPTIBLE", message: "WorkRun could not be interrupted." } };
+      }
+      return { ok: true as const, work_run: workRunDto(result.workRun) };
+    },
+
+    resumeWorkRun(input) {
+      const turn = store.getWorkRun(input.workRunId);
+      if (!turn || turn.flowId !== input.flowId) {
+        return { ok: false as const, error: { code: "WORK_RUN_NOT_FOUND", message: "WorkRun not found." } };
+      }
+      if (turn.status !== "interrupted") {
+        return { ok: false as const, error: { code: "WORK_RUN_NOT_INTERRUPTED", message: "Only an interrupted WorkRun can be resumed." } };
+      }
+      const resumed = store.resumeWorkRun(turn.id);
+      return resumed
+        ? { ok: true as const, work_run: workRunDto(resumed) }
+        : { ok: false as const, error: { code: "WORK_RUN_RESUME_FAILED", message: "WorkRun could not be resumed." } };
+    },
+
+    cancelWorkRun(input) {
+      const turn = store.getWorkRun(input.workRunId);
+      if (!turn || turn.flowId !== input.flowId) {
+        return { ok: false as const, error: { code: "WORK_RUN_NOT_FOUND", message: "WorkRun not found." } };
+      }
+      for (const task of store.listWorkRunTasks(turn.id)) store.cancelTask(task.id);
+      store.cancelWorkRunPendingActions(turn.id);
+      const cancelled = store.failWorkRun(turn.id, "cancelled");
+      return cancelled
+        ? { ok: true as const, work_run: workRunDto(cancelled) }
+        : { ok: false as const, error: { code: "WORK_RUN_CANCEL_FAILED", message: "WorkRun could not be cancelled." } };
     },
   };
 }

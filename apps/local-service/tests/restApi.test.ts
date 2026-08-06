@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { config } from "../src/config.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createApp } from "../src/server/app.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
 
@@ -31,7 +31,7 @@ function tempRuntimeConfigRoot() {
   fs.writeFileSync(path.join(root, "index.json"), `${JSON.stringify({
     version: 1,
     roles: {
-      leader: { enabled: true, configId: "default-agent-sdk" },
+      leader: { enabled: true, configId: "default-agent-sdk", reasoningEffort: "max" },
       frontend: { enabled: true, configId: "default-agent-sdk" },
       backend: { enabled: true, configId: "default-agent-sdk" },
       research: { enabled: true, configId: "default-agent-sdk" },
@@ -320,8 +320,7 @@ describe("REST API", () => {
         name: "hello-flow",
         name_generation_status: "pending",
         type: "full",
-        status: "ready",
-        active_user_turn_id: null,
+        status: "idle",
         project_id: project.id,
         agent_type: "claude_code",
         leader_session_id: null,
@@ -330,6 +329,7 @@ describe("REST API", () => {
         has_unread_messages: false,
         leader_runtime_config_id: "default-agent-sdk",
         leader_runtime_model_id: "model-1",
+        leader_runtime_reasoning_effort: "max",
         risk_mode: "auto_edit",
         plan_approval: "on",
       }));
@@ -464,14 +464,14 @@ describe("REST API", () => {
         leaderRuntimeModelId: "model-1",
       }));
 
-      const userTurn = beginUserTurn(store, {
+      const workRun = beginWorkRun(store, {
         flowId: flow.id,
         inputSnapshotJson: "{}",
         createdBy: "user",
       })!;
       store.createDecisionCard({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         cardId: "dc-pending",
         sessionId: "session-pending",
         cardType: "generic",
@@ -489,7 +489,7 @@ describe("REST API", () => {
 
       const leader = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId: "leader-session",
@@ -528,7 +528,7 @@ describe("REST API", () => {
       });
       const task = store.createTask({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         title: "Build hello",
         description: "Create hello",
         expertId: "exp-coder",
@@ -536,7 +536,7 @@ describe("REST API", () => {
       })!;
       const expertSession = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: task.id,
         expertId: "exp-coder",
         displayName: "Coder",
@@ -545,7 +545,7 @@ describe("REST API", () => {
       store.assignTaskAgentSession(task.id, expertSession.id);
       const changedFiles = store.createArtifact({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: task.id,
         type: "changed_files",
         title: "Changed files",
@@ -560,7 +560,7 @@ describe("REST API", () => {
       })!;
       const reportArtifact = store.createArtifact({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: task.id,
         type: "verify_report",
         title: "Verify report",
@@ -568,7 +568,7 @@ describe("REST API", () => {
       });
       const planArtifact = store.createArtifact({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: null,
         type: "execution_plan",
         title: "Execution plan",
@@ -756,7 +756,7 @@ describe("REST API", () => {
 
       store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId: "leader-sdk-session",
@@ -907,7 +907,7 @@ describe("REST API", () => {
       });
       const leader = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId: "leader-sdk-session",
@@ -986,7 +986,7 @@ describe("REST API", () => {
       });
       const leader = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId: "leader-sdk-session",
@@ -1054,7 +1054,7 @@ describe("REST API", () => {
       const flow = store.createFlow({ name: "Recovered Compact Flow", description: "", projectId: project.id });
       const leader = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId,
@@ -1372,11 +1372,11 @@ describe("REST API", () => {
     const app = createApp({ logger: false, store } as any);
     try {
       const flow = store.createFlow({ id: "flow-rest-flow-expert", workspaceId: "ws-default", projectId: null, name: "Flow Expert REST", description: "" });
-      const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+      const workRun = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
       const expert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-      const task = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "实现页面", description: "", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
-      const first = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: task.id, expertId: "exp-coder", flowExpertId: expert.id, displayName: "Frontend 2482", sessionId: "sdk-frontend", status: "completed" });
-      const second = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: task.id, expertId: "exp-coder", flowExpertId: expert.id, displayName: "Frontend 5924", sessionId: "sdk-frontend", status: "completed" });
+      const task = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "实现页面", description: "", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
+      const first = store.createAgentSession({ flowId: flow.id, workRunId: workRun.id, taskId: task.id, expertId: "exp-coder", flowExpertId: expert.id, displayName: "Frontend 2482", sessionId: "sdk-frontend", status: "completed" });
+      const second = store.createAgentSession({ flowId: flow.id, workRunId: workRun.id, taskId: task.id, expertId: "exp-coder", flowExpertId: expert.id, displayName: "Frontend 5924", sessionId: "sdk-frontend", status: "completed" });
       store.assignTaskFlowExpert(task.id, expert.id, second.id);
       store.updateFlowExpertSession(expert.id, "sdk-frontend");
 

@@ -13,7 +13,7 @@ import { buildFlowWorkbench } from "../src/domain/workbench.js";
 import { buildFlowSnapshot } from "../src/domain/flowSnapshot.js";
 import { createStorePort } from "../src/mcp/storePort.js";
 import { createLeaderMcpServer, createLeaderToolHandlers } from "../src/mcp/leaderServer.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 
 function tempStore() {
   const dir = mkdtempSync(path.join(tmpdir(), "squadflow-verify-roster-"));
@@ -98,7 +98,7 @@ describe("verify: on-demand team + dual expert path", () => {
         name: "plan-flow",
         planApproval: "off",
       });
-      const turn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+      const turn = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
       const port = createStorePort(store);
       const ok = await port.submitOrchestrationPlan({
         flow_id: flow.id,
@@ -132,7 +132,7 @@ describe("verify: on-demand team + dual expert path", () => {
         ],
         sourceAgentSessionId: "ags-leader",
         currentTurnInput: {
-          user_turn_id: turn.id,
+          work_run_id: turn.id,
           flow_id: flow.id,
           trigger_kind: "user_message",
         },
@@ -157,13 +157,16 @@ describe("verify: on-demand team + dual expert path", () => {
         expect(tools).toEqual([
           "ask_user",
           "cancel_agent",
+          "cancel_work_run",
           "create_plan",
           "create_task",
           "dispatch_agent",
           "get_context",
           "get_task",
+          "interrupt_work_run",
           "list_tasks",
           "resolve_plan_feedback",
+          "resume_work_run",
           "save_execution_plan",
           "send_message",
           "submit_orchestration_plan",

@@ -66,7 +66,7 @@ export const parityAssistantMessage: UIMessage = {
       results: [{ title: "Trend 1" }],
     }),
     toolPart("tc-getcontext-1", "mcp__squadflow-leader__get_context", {}, {
-      active_user_turn_id: null,
+      current_work_run_id: null,
       pending_action: null,
     }),
     toolPart("tc-askuser-1", "mcp__squadflow-leader__ask_user", {

@@ -395,5 +395,7 @@ export function deriveLeaderAgentSessionId(
   if (dashboardLeaderAgentSessionId && !agentSessions.some((session) => session.id === dashboardLeaderAgentSessionId)) {
     return dashboardLeaderAgentSessionId;
   }
-  return agentSessions.find((session) => session.expert_id === "exp-leader")?.id ?? null;
+  return agentSessions
+    .filter((session) => session.expert_id === "exp-leader")
+    .sort((left, right) => String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")))[0]?.id ?? null;
 }

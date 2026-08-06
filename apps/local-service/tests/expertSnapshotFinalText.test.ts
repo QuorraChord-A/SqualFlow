@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createApp } from "../src/server/app.js";
 import { ChatJournal } from "../src/ws/chatJournal.js";
 
@@ -46,12 +46,12 @@ describe("expert snapshot uses the canonical transcript", () => {
     store.migrate();
     store.seedExperts();
     const flow = store.createFlow({ id: "flow-stale-disk", workspaceId: "ws-default", name: "S", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-research" });
     store.updateFlowExpertSession(flowExpert.id, "sdk-expert-stale");
-    const task = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "Research", description: "R", expertId: "exp-research", dependsOnTaskIds: [] })!;
+    const task = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "Research", description: "R", expertId: "exp-research", dependsOnTaskIds: [] })!;
     store.createAgentSession({
-      id: "ags-stale", flowId: flow.id, userTurnId: userTurn.id, taskId: task.id, expertId: "exp-research",
+      id: "ags-stale", flowId: flow.id, workRunId: workRun.id, taskId: task.id, expertId: "exp-research",
       flowExpertId: flowExpert.id, sessionId: "sdk-expert-stale", displayName: "Research", status: "completed",
     });
 

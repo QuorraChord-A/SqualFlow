@@ -68,7 +68,7 @@ const workbench: FlowWorkbench = {
   },
   tasks: [{
       id: "task-1",
-      user_turn_id: "utn-1",
+      work_run_id: "utn-1",
       subject: "Build hello",
       status: "in_progress",
       owner_flow_expert_id: "fexp-frontend",
@@ -202,7 +202,7 @@ describe("FlowSidePanel", () => {
         ...workbench,
         review: {
           flow_id: "flow-1",
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           completed_at: "2026-06-14T01:03:00.000Z",
           totals: { files: 1, additions: 1, deletions: 1, modified: 1, added: 0, deleted: 0 },
           files: [{

@@ -34,7 +34,7 @@ function toExpertTask(store: Store, task: NonNullable<ReturnType<Store["getTask"
   const flowExpert = task.flowExpertId ? store.getFlowExpert(task.flowExpertId) : null;
   return {
     task_id: task.id,
-    user_turn_id: task.userTurnId,
+    work_run_id: task.workRunId,
     subject: task.title,
     description: task.description,
     active_form: task.activeForm,
@@ -137,7 +137,7 @@ export function createExpertTaskStorePort(
       const task = toExpertTask(store, updated);
       store.appendEventLog({
         flowId: input.flowId,
-        userTurnId: updated.userTurnId,
+        workRunId: updated.workRunId,
         taskId: updated.id,
         agentSessionId: input.agentSessionId,
         eventType: "expert_task.updated",

@@ -24,6 +24,46 @@ function messageText(message: UIMessage | undefined): string {
 }
 
 describe("transcriptReducer guide boundaries", () => {
+  it("requests a canonical snapshot when committed transcript cursors have a gap", () => {
+    let state = transcriptReducer(emptyTranscriptState, {
+      type: "load-snapshot",
+      streamEpoch: "epoch-1",
+      cursor: 5,
+      messages: [textMessage("msg-current", "user", "当前内容")],
+      historyBoundaries: [],
+    });
+
+    state = apply(state, 7, {
+      type: "message-added",
+      message: textMessage("msg-after-gap", "assistant", "断档后的内容"),
+    });
+
+    expect(state.cursor).toBe(5);
+    expect(state.pendingEvents.has(7)).toBe(true);
+    expect(state.needsResync).toBe(true);
+    expect(state.messages.map((message) => message.id)).toEqual(["msg-current"]);
+  });
+
+  it("does not request a snapshot for contiguous committed transcript cursors", () => {
+    let state = transcriptReducer(emptyTranscriptState, {
+      type: "load-snapshot",
+      streamEpoch: "epoch-1",
+      cursor: 5,
+      messages: [textMessage("msg-current", "user", "当前内容")],
+      historyBoundaries: [],
+    });
+
+    state = apply(state, 6, {
+      type: "message-added",
+      message: textMessage("msg-next", "assistant", "连续内容"),
+    });
+
+    expect(state.cursor).toBe(6);
+    expect(state.pendingEvents.size).toBe(0);
+    expect(state.needsResync).toBe(false);
+    expect(state.messages.map((message) => message.id)).toEqual(["msg-current", "msg-next"]);
+  });
+
   it("removes rejected optimistic messages but keeps the same id after a canonical commit", () => {
     const optimistic = textMessage("msg-user-1", "user", "待确认");
     let state = transcriptReducer(emptyTranscriptState, { type: "sync-optimistic", messages: [optimistic] });

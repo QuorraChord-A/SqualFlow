@@ -15,6 +15,7 @@ import {
   SendMessageInput,
   UpdateTaskInput,
   UpdateFlowNameInput,
+  WorkRunActionInput,
   type AskUserInputValue,
   type CancelAgentInputValue,
   type CreatePlanInputValue,
@@ -30,11 +31,12 @@ import {
   type SendMessageInputValue,
   type UpdateTaskInputValue,
   type UpdateFlowNameInputValue,
+  type WorkRunActionInputValue,
 } from "./platformModels.js";
 
 export interface CurrentTurnInput {
-  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "expert_message" | "user_turn_recovery" | "plan_approved" | "flow_name_generation";
-  user_turn_id?: string;
+  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "expert_message" | "plan_approved" | "flow_name_generation";
+  work_run_id?: string;
   message_id?: string;
   card_id?: string;
   content?: string;
@@ -53,7 +55,7 @@ export type LeaderToolHooks = {
   onFlowNameUpdated?: (args: { flowId: string; flow: { flow_id: string; name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }) => Promise<void> | void;
   onDecisionCardCreated?: (args: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     cardId: string;
     cardType: "clarification";
     questions: QuestionInputValue[];
@@ -63,14 +65,14 @@ export type LeaderToolHooks = {
     flowId: string;
     specApprovalId: string;
     specRevisionId: string;
-    userTurnId: string | null;
+    workRunId: string | null;
     status: "pending";
     fileName: string;
     overview: string;
   }) => Promise<void> | void;
   onTaskCreated?: (args: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     task: Record<string, unknown>;
   }) => Promise<void> | void;
   /**
@@ -88,13 +90,14 @@ export type LeaderToolHooks = {
   }) => Promise<void> | void;
   onPlanCreated?: (args: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     plan: Record<string, unknown>;
     revision: Record<string, unknown>;
     approval: Record<string, unknown>;
   }) => Promise<void> | void;
   onPlanApprovalChanged?: (args: { flowId: string; approval: Record<string, unknown> }) => Promise<void> | void;
   onPlanRunChanged?: (args: { flowId: string; run: Record<string, unknown> }) => Promise<void> | void;
+  onWorkRunChanged?: (args: { flowId: string; workRun: Record<string, unknown>; action: "interrupt" | "resume" | "cancel" }) => Promise<void> | void;
 };
 
 export type PlanFeedbackResolution = {
@@ -122,21 +125,23 @@ export interface StorePort {
     plan: string;
     sourceAgentSessionId?: string;
     currentTurnInput?: CurrentTurnInput;
-  }) => { spec_revision: Record<string, unknown>; spec_approval: Record<string, unknown> } | null;
+  }) =>
+    | { spec_revision: Record<string, unknown>; spec_approval: Record<string, unknown> }
+    | { error: { code: string; message: string } };
   askUser: (args: {
     flowId: string;
     cardId: string;
     sessionId: string;
     questions: QuestionInputValue[];
     currentTurnInput?: CurrentTurnInput;
-  }) => { id: string; status: string; userTurnId: string } | undefined;
+  }) => { id: string; status: string; workRunId: string } | undefined;
   createTask: (args: {
     flowId: string;
     subject: string;
     description: string;
     activeForm?: string;
     currentTurnInput?: CurrentTurnInput;
-  }) => { user_turn_id: string; task: Record<string, unknown> } | { error: { code: string; message: string } };
+  }) => { work_run_id: string; task: Record<string, unknown> } | { error: { code: string; message: string } };
   saveExecutionPlan: (args: {
     flowId: string;
     title: string;
@@ -191,6 +196,9 @@ export interface StorePort {
     currentTurnInput?: CurrentTurnInput;
   }) => Promise<{ ok: true; accepted: boolean; message_id?: string; error?: { code: string; message: string } }>
     | { ok: true; accepted: boolean; message_id?: string; error?: { code: string; message: string } };
+  interruptWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
+  resumeWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
+  cancelWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
 }
 
 export type LeaderToolRuntimeContext = {
@@ -225,7 +233,7 @@ export function createLeaderToolHandlers(
   const isCancellationFollowup = () => currentTurnInput()?.trigger_kind === "decision_cancelled";
   const cancellationFailure = () => fail(
     "CLARIFICATION_CANCELLED",
-    "The user cancelled the clarification card; respond in natural language before creating cards, plans, tasks, task updates, messages, or dispatches.",
+    "用户已取消澄清。本轮不要继续创建卡片、计划、任务或派发 Expert，请先用自然语言回应用户。",
   );
 
   return {
@@ -264,10 +272,10 @@ export function createLeaderToolHandlers(
         questions: parsed.questions,
         currentTurnInput: currentTurnInput(),
       });
-      if (!card) return fail("ACTIVE_USER_TURN_REQUIRED", "Clarification requires an active UserTurn.");
+      if (!card) return fail("WORK_RUN_REQUIRED", "Clarification requires an active WorkRun.");
       await hooks.onDecisionCardCreated?.({
         flowId: parsed.flow_id,
-        userTurnId: card.userTurnId,
+        workRunId: card.workRunId,
         cardId: card.id,
         cardType: "clarification",
         questions: parsed.questions,
@@ -283,10 +291,21 @@ export function createLeaderToolHandlers(
     async createPlan(input: CreatePlanInputValue) {
       const parsed = CreatePlanInput.parse(input);
       if (isCancellationFollowup()) return cancellationFailure();
-      if (!store.getContext(parsed.flow_id)) return fail("FLOW_NOT_FOUND", `flow not found: ${parsed.flow_id}`);
-      if (currentTurnInput()?.spec_requested !== true) return fail("SPEC_REQUEST_REQUIRED", "create_plan requires this message to request Spec.");
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
-      if (parsed.mode === "write" && !parsed.name) return fail("INVALID_SPEC_REVISION", "name is required when mode=write.");
+      if (!store.getContext(parsed.flow_id)) {
+        return fail("FLOW_NOT_FOUND", `找不到 Flow：${parsed.flow_id}。请检查 flow_id 后重试。`);
+      }
+      if (currentTurnInput()?.spec_requested !== true) {
+        return fail(
+          "SPEC_REQUEST_REQUIRED",
+          "当前消息不是计划模式请求，不能创建审批计划。请提示用户切换到计划模式后重新发送，不要重试。",
+        );
+      }
+      if (hasPendingUserAction(parsed.flow_id)) {
+        return fail("PENDING_USER_ACTION", "当前已有待用户处理的卡片。请等待用户处理后再创建计划。");
+      }
+      if (parsed.mode === "write" && !parsed.name) {
+        return fail("INVALID_ARGUMENTS", "创建新计划缺少 name。请补全 name 后重试。");
+      }
 
       const result = store.createPlan({
         flowId: parsed.flow_id,
@@ -297,27 +316,26 @@ export function createLeaderToolHandlers(
         sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
         currentTurnInput: currentTurnInput(),
       });
-      if (result) {
-        const specRevision = result.spec_revision as {
-          spec_revision_id: string;
-          file_name: string;
-          overview: string;
-        };
-        const specApproval = result.spec_approval as {
-          spec_approval_id: string;
-          user_turn_id?: string | null;
-        };
-        await hooks.onSpecCardCreated?.({
-          flowId: parsed.flow_id,
-          specApprovalId: specApproval.spec_approval_id,
-          specRevisionId: specRevision.spec_revision_id,
-          userTurnId: specApproval.user_turn_id ?? null,
-          status: "pending",
-          fileName: specRevision.file_name,
-          overview: specRevision.overview,
-        });
-      }
-      return result ? ok(result) : fail("INVALID_SPEC_REVISION", "Spec plan could not be created.");
+      if ("error" in result) return fail(result.error.code, result.error.message);
+      const specRevision = result.spec_revision as {
+        spec_revision_id: string;
+        file_name: string;
+        overview: string;
+      };
+      const specApproval = result.spec_approval as {
+        spec_approval_id: string;
+        work_run_id?: string | null;
+      };
+      await hooks.onSpecCardCreated?.({
+        flowId: parsed.flow_id,
+        specApprovalId: specApproval.spec_approval_id,
+        specRevisionId: specRevision.spec_revision_id,
+        workRunId: specApproval.work_run_id ?? null,
+        status: "pending",
+        fileName: specRevision.file_name,
+        overview: specRevision.overview,
+      });
+      return ok(result);
     },
 
     async createTask(input: CreateTaskInputValue) {
@@ -331,11 +349,11 @@ export function createLeaderToolHandlers(
         activeForm: parsed.active_form,
         currentTurnInput: currentTurnInput(),
       });
-      if (!result) return fail("ACTIVE_USER_TURN_REQUIRED", "Task could not be created for the current UserTurn.");
+      if (!result) return fail("WORK_RUN_REQUIRED", "Task could not be created for the current WorkRun.");
       if ("error" in result) return fail(result.error.code, result.error.message);
       await hooks.onTaskCreated?.({
         flowId: parsed.flow_id,
-        userTurnId: result.user_turn_id,
+        workRunId: result.work_run_id,
         task: result.task,
       });
       return ok(result);
@@ -352,7 +370,7 @@ export function createLeaderToolHandlers(
         sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
         currentTurnInput: currentTurnInput(),
       });
-      if (!artifact) return fail("ACTIVE_USER_TURN_REQUIRED", "编排计划需要一个活跃的 UserTurn。");
+      if (!artifact) return fail("WORK_RUN_REQUIRED", "编排计划需要一个可执行的 WorkRun。");
       await hooks.onArtifactCreated?.({
         flowId: parsed.flow_id,
         artifact,
@@ -368,14 +386,14 @@ export function createLeaderToolHandlers(
         sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
         currentTurnInput: currentTurnInput(),
       });
-      if (!result) return fail("INVALID_ORCHESTRATION_PLAN", "编排计划无法创建；请检查当前 UserTurn、依赖和 Expert。");
+      if (!result) return fail("INVALID_ORCHESTRATION_PLAN", "编排计划无法创建；请检查当前 WorkRun、依赖和 Expert。");
       if ("error" in result) {
         const error = result.error as { code?: string; issues?: unknown };
         return json({ ok: false, error: { code: error.code ?? "INVALID_ORCHESTRATION_PLAN", message: "编排计划未通过校验", issues: error.issues ?? [] } });
       }
       await hooks.onPlanCreated?.({
         flowId: parsed.flow_id,
-        userTurnId: currentTurnInput()?.user_turn_id ?? "",
+        workRunId: currentTurnInput()?.work_run_id ?? "",
         plan: result.plan as Record<string, unknown>,
         revision: result.revision as Record<string, unknown>,
         approval: result.approval as Record<string, unknown>,
@@ -498,6 +516,30 @@ export function createLeaderToolHandlers(
       });
       return ok(result);
     },
+
+    async interruptWorkRun(input: WorkRunActionInputValue) {
+      const parsed = WorkRunActionInput.parse(input);
+      const result = store.interruptWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
+      if (!result.ok) return fail(result.error.code, result.error.message);
+      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "interrupt" });
+      return ok({ work_run: result.work_run });
+    },
+
+    async resumeWorkRun(input: WorkRunActionInputValue) {
+      const parsed = WorkRunActionInput.parse(input);
+      const result = store.resumeWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
+      if (!result.ok) return fail(result.error.code, result.error.message);
+      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "resume" });
+      return ok({ work_run: result.work_run, next: "重新读取 Task，再显式决定要续接哪一位 Expert；不要自动批量派发。" });
+    },
+
+    async cancelWorkRun(input: WorkRunActionInputValue) {
+      const parsed = WorkRunActionInput.parse(input);
+      const result = store.cancelWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
+      if (!result.ok) return fail(result.error.code, result.error.message);
+      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "cancel" });
+      return ok({ work_run: result.work_run });
+    },
   };
 }
 
@@ -534,13 +576,13 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
 
   server.registerTool(
     "create_task",
-    { title: "create_task", description: "Create a task for the active UserTurn (single-expert path). Multi-step same-role work goes into one task description. Do not use after an orchestration plan was submitted this turn.", inputSchema: CreateTaskInput },
+    { title: "create_task", description: "Create a task for the active WorkRun (single-expert path). Multi-step same-role work goes into one task description. Do not use after an orchestration plan was submitted this turn.", inputSchema: CreateTaskInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.createTask(input) }] }),
   );
 
   server.registerTool(
     "save_execution_plan",
-    { title: "save_execution_plan", description: "Save an execution plan artifact for the active UserTurn (e.g. after Spec approval, single-expert path).", inputSchema: SaveExecutionPlanInput },
+    { title: "save_execution_plan", description: "Save an execution plan artifact for the active WorkRun (e.g. after Spec approval, single-expert path).", inputSchema: SaveExecutionPlanInput },
     async (input) => ({ content: [{ type: "text", text: await handlers.saveExecutionPlan(input) }] }),
   );
 
@@ -599,6 +641,24 @@ export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderTo
       inputSchema: SendMessageInput,
     },
     async (input) => ({ content: [{ type: "text", text: await handlers.sendMessage(input) }] }),
+  );
+
+  server.registerTool(
+    "interrupt_work_run",
+    { title: "interrupt_work_run", description: "Interrupt an executing WorkRun while preserving Task progress and provider context.", inputSchema: WorkRunActionInput },
+    async (input) => ({ content: [{ type: "text", text: await handlers.interruptWorkRun(input) }] }),
+  );
+
+  server.registerTool(
+    "resume_work_run",
+    { title: "resume_work_run", description: "Resume an interrupted WorkRun only after the user explicitly asks to continue. This does not dispatch Experts automatically.", inputSchema: WorkRunActionInput },
+    async (input) => ({ content: [{ type: "text", text: await handlers.resumeWorkRun(input) }] }),
+  );
+
+  server.registerTool(
+    "cancel_work_run",
+    { title: "cancel_work_run", description: "Permanently cancel a WorkRun when the user explicitly asks to abandon it.", inputSchema: WorkRunActionInput },
+    async (input) => ({ content: [{ type: "text", text: await handlers.cancelWorkRun(input) }] }),
   );
 
   return server;

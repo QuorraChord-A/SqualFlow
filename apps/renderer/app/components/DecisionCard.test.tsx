@@ -128,7 +128,7 @@ describe("DecisionCard", () => {
     expect(send).not.toHaveBeenCalledWith(expect.objectContaining({ type: "flow:decision_cancel" }));
   });
 
-  it("shows the backend-provided Leader UserTurn scope on a permission card", () => {
+  it("shows the backend-provided Leader WorkRun scope on a permission card", () => {
     render(
       <DecisionCard
         flowId="flow-1"
@@ -142,7 +142,7 @@ describe("DecisionCard", () => {
             multiSelect: false,
             options: [
               { label: "允许本次操作", description: "仅允许一次" },
-              { label: "拒绝当前命令", description: "当前 UserTurn 继续，完全相同的命令不再询问。" },
+              { label: "拒绝当前命令", description: "当前 WorkRun 继续，完全相同的命令不再询问。" },
             ],
           }],
         }}
@@ -150,7 +150,7 @@ describe("DecisionCard", () => {
     );
 
     const scopeCopy = screen.getByText(/拒绝只阻止当前命令/);
-    expect(scopeCopy).toHaveTextContent("当前 UserTurn 继续，完全相同的命令不再询问。");
+    expect(scopeCopy).toHaveTextContent("当前 WorkRun 继续，完全相同的命令不再询问。");
     expect(scopeCopy).not.toHaveTextContent("当前 Task");
   });
 

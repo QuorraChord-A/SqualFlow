@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 
 const dirs: string[] = [];
 const stores: Array<{ sqlite: { close: () => void } }> = [];
@@ -106,10 +106,10 @@ describe("disabled runtime experts", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Research",
       description: "Research",
       expertId: "exp-research",
@@ -145,10 +145,10 @@ describe("disabled runtime experts", () => {
     const store = await createIsolatedStore();
     const { createStorePort } = await import("../src/mcp/storePort.js");
     const flow = store.createFlow({ id: "flow-any", name: "Any", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Research",
       description: "Research",
       expertId: "exp-research",
@@ -167,7 +167,7 @@ describe("disabled runtime experts", () => {
       resumeAgentSessionId: "",
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
         created_at: new Date().toISOString(),
       },
     })).resolves.toEqual({
@@ -187,10 +187,10 @@ describe("disabled runtime experts", () => {
     description: "",
     projectId: store.createProject({ name: "Runtime Project", localPath: tempDir("squadflow-runtime-project-") }).id,
   });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Research",
       description: "Research",
       expertId: "exp-research",
@@ -198,7 +198,7 @@ describe("disabled runtime experts", () => {
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-research",
       displayName: "Research",
@@ -218,7 +218,7 @@ describe("disabled runtime experts", () => {
 
     await expect(runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     })).resolves.toBeUndefined();

@@ -22,7 +22,7 @@ const actor: ExpertTaskActorScope = {
 function task(overrides: Partial<ExpertTask> = {}): ExpertTask {
   return {
     task_id: "task-a",
-    user_turn_id: "utn-a",
+    work_run_id: "utn-a",
     subject: "Build the feature",
     description: "Implement and verify the feature.",
     active_form: "Implementing the feature",

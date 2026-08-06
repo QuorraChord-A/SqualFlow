@@ -18,11 +18,11 @@ import type { DesktopBridge } from "../server/desktopBridge.js";
 import { createStorePort } from "../mcp/storePort.js";
 import type { CurrentTurnInput } from "../mcp/leaderServer.js";
 import {
-  completeUserTurnIfSettled,
-  pauseUserTurnIfAwaitingPlanFeedback,
-  publishUserTurnEvent,
-} from "../domain/userTurn.js";
-import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/userTurnReview.js";
+  completeWorkRunIfSettled,
+  pauseWorkRunIfAwaitingPlanFeedback,
+  publishWorkRunEvent,
+} from "../domain/workRun.js";
+import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/workRunReview.js";
 import { planRevisionView } from "../domain/orchestrationView.js";
 import {
   contextUsageSnapshotToPayload,
@@ -54,7 +54,7 @@ import {
 } from "./leaderPrompt.js";
 import { normalizeFlowName } from "../domain/flowName.js";
 import { computeFlowSig } from "../protocol/platformEvent.js";
-import { normalizeRuntimeReasoningEffort } from "./codexReasoningEffort.js";
+import { normalizeRuntimeReasoningEffort } from "../config/runtimeReasoningEffort.js";
 import {
   checkPermission,
   isInsideAnyDir,
@@ -72,8 +72,6 @@ import {
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
 
-export type LeaderRuntimeState = "idle" | "starting" | "streaming";
-
 export class LeaderInputRejectedError extends Error {
   readonly code = "PENDING_DECISION";
 
@@ -83,7 +81,6 @@ export class LeaderInputRejectedError extends Error {
 }
 
 export type LeaderRuntime = {
-  getState?: (flowId: string) => LeaderRuntimeState;
   runLeaderTurn: (input: LeaderTurnInput) => Promise<void>;
   guideLeaderTurn: (input: {
     flowId: string;
@@ -97,7 +94,7 @@ export type LeaderRuntime = {
   }) => Promise<{ accepted: true; messageId: string }>;
   getContextUsage: (flowId: string) => Promise<ContextUsageSnapshot | null>;
   compactContext: (flowId: string) => Promise<ContextUsageSnapshot | null>;
-  cancelFlow: (flowId: string, userTurnId?: string) => boolean;
+  cancelFlow: (flowId: string, workRunId?: string) => boolean;
   close?: () => Promise<void>;
 };
 
@@ -112,7 +109,8 @@ export type CreateLeaderRuntimeInput = {
   desktopBridge?: DesktopBridge;
   orchestrationScheduler?: OrchestrationScheduler;
   permissionGate?: RuntimePermissionGate;
-  onUserTurnFatal?: (input: { flowId: string; userTurnId: string }) => void;
+  onWorkRunFatal?: (input: { flowId: string; workRunId: string }) => void;
+  onWorkRunAction?: (input: { flowId: string; workRunId: string; action: "interrupt" | "resume" | "cancel" }) => void;
   logger?: OperationalLogger;
 };
 
@@ -272,6 +270,7 @@ class LeaderFlowStream {
     this.resolveFinished = resolve;
   });
   private sessionId: string;
+  private providerSessionId: string | null;
   private providerSessionEstablished: boolean;
 
   constructor(
@@ -285,7 +284,7 @@ class LeaderFlowStream {
       userMessage: string;
       assistantMessage: string;
     }) => void,
-    private readonly deps: Pick<CreateLeaderRuntimeInput, "store" | "eventBus" | "chatJournal" | "onUserTurnFatal" | "logger">,
+    private readonly deps: Pick<CreateLeaderRuntimeInput, "store" | "eventBus" | "chatJournal" | "onWorkRunFatal" | "logger">,
     private readonly onClosed: () => void,
     private readonly desktopBridge: DesktopBridge | undefined,
     private readonly browserTurnContext: { agentSessionId: string | null },
@@ -295,13 +294,17 @@ class LeaderFlowStream {
     this.input = runtimeAdapter.createInputQueue();
     this.sessionId = firstTurn.leaderSessionId;
     const flow = this.deps.store.getFlow(firstTurn.flowId);
-    const agentSession = this.deps.store.getAgentSession(firstTurn.leaderAgentSessionId);
-    this.providerSessionEstablished = Boolean(
-      flow?.leaderSessionId
-      && agentSession?.sessionId
-      && flow.leaderSessionId === agentSession.sessionId
-      && firstTurn.leaderSessionId === agentSession.sessionId,
-    );
+    const providerSessionId = firstTurn.resumeSessionId ?? flow?.leaderSessionId ?? null;
+    // Local execution ids and the stable transcript channel are never valid
+    // provider resume handles. ProviderSession is owned by Flow and may be
+    // copied onto AgentSession only as audit metadata after it is established.
+    this.providerSessionId = providerSessionId
+      && providerSessionId !== firstTurn.leaderAgentSessionId
+      && !providerSessionId.startsWith("ags-")
+      && providerSessionId !== firstTurn.leaderSessionId
+      ? providerSessionId
+      : null;
+    this.providerSessionEstablished = Boolean(this.providerSessionId);
   }
 
   get acceptsInput() {
@@ -322,9 +325,9 @@ class LeaderFlowStream {
     if (!active) return;
     beginControlledEditReview({
       flowId: active.turn.flowId,
-      userTurnId: active.turn.userTurnId
-        ?? active.turn.currentTurnInput?.user_turn_id
-        ?? active.currentTurnInput?.user_turn_id,
+      workRunId: active.turn.workRunId
+        ?? active.turn.currentTurnInput?.work_run_id
+        ?? active.currentTurnInput?.work_run_id,
       rootPath: this.reviewRootPath,
       toolName,
       capability,
@@ -488,7 +491,7 @@ class LeaderFlowStream {
         : null,
     });
     if (!snapshot) return;
-    const sdkSessionId = active.adapter?.sdkSessionId ?? this.sessionId;
+    const sdkSessionId = active.adapter?.sdkSessionId ?? this.providerSessionId;
     this.deps.store.upsertAgentContextUsageSnapshot({
       flowId: active.turn.flowId,
       agentSessionId: active.turn.leaderAgentSessionId,
@@ -537,7 +540,7 @@ class LeaderFlowStream {
       event,
       flowId: this.active?.turn.flowId ?? this.firstTurn.flowId,
       agentSessionId: this.active?.turn.leaderAgentSessionId ?? this.firstTurn.leaderAgentSessionId,
-      sdkSessionId: this.sessionId,
+      sdkSessionId: this.providerSessionId,
       inputClosed: this.inputClosed,
       closed: this.closed,
       finalized: this.finalized,
@@ -570,9 +573,9 @@ class LeaderFlowStream {
     this.deps.logger?.info({
       runtimeRole: "leader",
       flowId: next.turn.flowId,
-      userTurnId: next.turn.userTurnId ?? null,
+      workRunId: next.turn.workRunId ?? null,
       agentSessionId: next.turn.leaderAgentSessionId,
-      sdkSessionId: this.sessionId,
+      sdkSessionId: this.providerSessionId,
       turnKind: next.turn.kind ?? "user",
     }, "runtime turn started");
     this.browserTurnContext.agentSessionId = next.turn.leaderAgentSessionId;
@@ -590,6 +593,8 @@ class LeaderFlowStream {
       (flowId) => {
         this.deps.store.markFlowOutputCompleted(flowId);
       },
+      undefined,
+      this.sessionId,
     );
 
     try {
@@ -599,7 +604,7 @@ class LeaderFlowStream {
         flow_id: next.turn.flowId,
         data: {
           agent_session_id: next.turn.leaderAgentSessionId,
-          user_turn_id: null,
+          work_run_id: null,
           expert_id: "exp-leader",
           status: "streaming",
         },
@@ -708,15 +713,15 @@ class LeaderFlowStream {
     this.deps.logger?.info({
       runtimeRole: "leader",
       flowId: active.turn.flowId,
-      userTurnId: active.turn.userTurnId ?? null,
+      workRunId: active.turn.workRunId ?? null,
       agentSessionId: active.turn.leaderAgentSessionId,
-      sdkSessionId: active.adapter.sdkSessionId ?? this.sessionId,
+      sdkSessionId: active.adapter.sdkSessionId ?? this.providerSessionId,
       durationMs: active.adapter.durationMs,
       turnKind: active.turn.kind ?? "user",
     }, "runtime turn completed");
     this.deps.store.appendEventLog({
       flowId: active.turn.flowId,
-      userTurnId: active.turn.userTurnId ?? null,
+      workRunId: active.turn.workRunId ?? null,
       taskId: null,
       agentSessionId: active.turn.leaderAgentSessionId,
       eventType: "agent_session.turn_completed",
@@ -727,7 +732,7 @@ class LeaderFlowStream {
         started_at: active.startedAt,
         finished_at: new Date().toISOString(),
         duration_ms: active.adapter.durationMs,
-        user_turn_id: active.turn.userTurnId ?? null,
+        work_run_id: active.turn.workRunId ?? null,
         turn_kind: active.turn.kind ?? "user",
       },
     });
@@ -736,7 +741,7 @@ class LeaderFlowStream {
       flow_id: active.turn.flowId,
       data: {
         agent_session_id: active.turn.leaderAgentSessionId,
-        user_turn_id: null,
+        work_run_id: null,
         expert_id: "exp-leader",
         status: "completed",
       },
@@ -750,16 +755,16 @@ class LeaderFlowStream {
       void this.activateNext();
       return;
     }
-    if (active.turn.userTurnId) {
-      const completed = await completeUserTurnIfSettled({
+    if (active.turn.workRunId) {
+      const completed = await completeWorkRunIfSettled({
         store: this.deps.store,
         eventBus: this.deps.eventBus,
-        userTurnId: active.turn.userTurnId,
+        workRunId: active.turn.workRunId,
         logId: active.turn.logId,
       });
       if (!completed) {
-        const waiting = pauseUserTurnIfAwaitingPlanFeedback(this.deps.store, active.turn.userTurnId);
-        if (waiting) await publishUserTurnEvent(this.deps.eventBus, waiting, active.turn.logId);
+        const waiting = pauseWorkRunIfAwaitingPlanFeedback(this.deps.store, active.turn.workRunId);
+        if (waiting) await publishWorkRunEvent(this.deps.eventBus, waiting, active.turn.logId);
       }
     }
     // Idle path: close immediately and resume on the next message.
@@ -778,25 +783,24 @@ class LeaderFlowStream {
     // provider's own message and let complete()/fail() handle it.
     if (active.adapter?.resultIsError) return;
     const sdkSessionId = active.adapter?.sdkSessionId;
-    if (!sdkSessionId || sdkSessionId === this.sessionId) return;
+    if (!sdkSessionId || sdkSessionId === this.providerSessionId) return;
     if (this.providerSessionEstablished) {
       const flow = this.deps.store.getFlow(active.turn.flowId);
       throw classifyLeaderResumeFailure(
-        new Error(`Provider returned a different session ID while using Leader session ${flow?.leaderSessionId ?? this.sessionId}`),
+        new Error(`Provider returned a different session ID while using Leader session ${flow?.leaderSessionId ?? this.providerSessionId ?? "unknown"}`),
         this.runtimeAdapter.sdk,
-        flow?.leaderSessionId ?? this.sessionId,
+        flow?.leaderSessionId ?? this.providerSessionId ?? sdkSessionId,
       );
     }
     this.providerSessionEstablished = true;
-    const oldSessionId = this.sessionId;
-    this.sessionId = sdkSessionId;
+    const oldSessionId = this.providerSessionId;
+    this.providerSessionId = sdkSessionId;
     this.deps.store.updateAgentSessionSession(active.turn.leaderAgentSessionId, sdkSessionId);
     this.deps.store.updateFlow(active.turn.flowId, { leaderSessionId: sdkSessionId });
-    this.deps.chatJournal.renameSession(active.turn.flowId, oldSessionId, sdkSessionId);
     this.deps.logger?.info({
       runtimeRole: "leader",
       flowId: active.turn.flowId,
-      userTurnId: active.turn.userTurnId ?? null,
+      workRunId: active.turn.workRunId ?? null,
       agentSessionId: active.turn.leaderAgentSessionId,
       oldSdkSessionId: oldSessionId,
       newSdkSessionId: sdkSessionId,
@@ -836,33 +840,33 @@ class LeaderFlowStream {
       this.deps.logger?.error({
         runtimeRole: "leader",
         flowId: active.turn.flowId,
-        userTurnId: active.turn.userTurnId ?? active.turn.currentTurnInput?.user_turn_id ?? null,
+        workRunId: active.turn.workRunId ?? active.turn.currentTurnInput?.work_run_id ?? null,
         agentSessionId: active.turn.leaderAgentSessionId,
-        sdkSessionId: this.sessionId,
+      sdkSessionId: this.providerSessionId,
         ...errorDiagnostic(failure),
       }, "runtime turn failed");
       this.deps.store.updateAgentSessionStatus(active.turn.leaderAgentSessionId, "failed");
-      const userTurnId = active.turn.userTurnId ?? active.turn.currentTurnInput?.user_turn_id;
-      if (userTurnId) {
-        this.deps.onUserTurnFatal?.({ flowId: active.turn.flowId, userTurnId });
-        // A Leader/provider fault ends this UserTurn but is not an actor-authored
+      const workRunId = active.turn.workRunId ?? active.turn.currentTurnInput?.work_run_id;
+      if (workRunId) {
+        this.deps.onWorkRunFatal?.({ flowId: active.turn.flowId, workRunId });
+        // A Leader/provider fault ends this WorkRun but is not an actor-authored
         // Task decision. Keep Tasks unchanged so Leader or their assigned Expert
         // can explicitly decide whether to resume, block, fail, or cancel them.
         for (const session of this.deps.store.listAgentSessions(active.turn.flowId)) {
-          if (session.userTurnId === userTurnId && !["completed", "failed", "interrupted"].includes(session.status)) {
+          if (session.workRunId === workRunId && !["completed", "failed", "interrupted"].includes(session.status)) {
             this.deps.store.updateAgentSessionStatus(session.id, "interrupted");
           }
         }
-        this.deps.store.cancelUserTurnPendingActions(userTurnId);
-        const failedTurn = this.deps.store.failUserTurn(userTurnId, "failed");
-        if (failedTurn) await publishUserTurnEvent(this.deps.eventBus, failedTurn, active.turn.logId);
+        this.deps.store.cancelWorkRunPendingActions(workRunId);
+        const failedTurn = this.deps.store.failWorkRun(workRunId, "failed");
+        if (failedTurn) await publishWorkRunEvent(this.deps.eventBus, failedTurn, active.turn.logId);
       }
       await this.deps.eventBus.publish(active.turn.flowId, {
         type: "session:event",
         flow_id: active.turn.flowId,
         data: {
           agent_session_id: active.turn.leaderAgentSessionId,
-          user_turn_id: null,
+          work_run_id: null,
           expert_id: "exp-leader",
           status: "failed",
           error_message: failure.message,
@@ -878,38 +882,12 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   const flowNameJobs = new Map<string, Promise<void>>();
   const flowNameQueries = new Map<string, RuntimeQueryLike>();
   const cancelledTurnByFlow = new Map<string, string>();
+  // ProviderSession is stable across Leader AgentSessions. Codex may keep using
+  // the MCP connection established by the first provider turn, so both the
+  // bridge identity and its mutable execution context must be Flow-scoped.
   const mcpTurnContexts = new Map<string, { currentTurnInput?: CurrentTurnInput }>();
   const browserTurnContexts = new Map<string, { agentSessionId: string | null }>();
   const contextCompactions = input.contextCompactions ?? new ContextCompactionState();
-
-  function getState(flowId: string): LeaderRuntimeState {
-    const stream = streams.get(flowId);
-    if (stream) {
-      return stream.acceptsInput && stream.activeLeaderAgentSessionId ? "streaming" : "starting";
-    }
-    return pendingStarts.has(flowId) ? "starting" : "idle";
-  }
-
-  function leaderAgentSessionId(flowId: string): string | null {
-    const stream = streams.get(flowId);
-    if (stream?.activeLeaderAgentSessionId) return stream.activeLeaderAgentSessionId;
-    return input.store.listAgentSessions(flowId)
-      .find((session) => session.expertId === "exp-leader" && session.taskId === null)?.id ?? null;
-  }
-
-  function publishRuntimeState(flowId: string) {
-    void input.eventBus.publish(flowId, {
-      type: "leader:runtime_state",
-      flow_id: flowId,
-      data: {
-        status: getState(flowId),
-        leader_agent_session_id: leaderAgentSessionId(flowId),
-      },
-    }).catch(() => {
-      // Runtime state is also re-sent on flow subscription; a transient socket
-      // failure must not affect the Leader turn.
-    });
-  }
 
   async function publishFlowName(flowId: string, name: string, status: "generated" | "fallback") {
     await input.eventBus.publish(flowId, {
@@ -1104,12 +1082,12 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   }
 
   function enrichSpecRequestedTurn(turn: LeaderTurnInput): LeaderTurnInput {
-    if (turn.specRequested === true || !turn.userTurnId || turn.kind === "spec_run") return turn;
-    const userTurn = input.store.getUserTurn(turn.userTurnId);
-    if (!userTurn || userTurn.workSource) return turn;
+    if (turn.specRequested === true || !turn.workRunId || turn.kind === "spec_run") return turn;
+    const workRun = input.store.getWorkRun(turn.workRunId);
+    if (!workRun || workRun.workSource) return turn;
     let requested = false;
     try {
-      const snapshot = JSON.parse(userTurn.inputSnapshotJson) as { spec_requested?: unknown };
+      const snapshot = JSON.parse(workRun.inputSnapshotJson) as { spec_requested?: unknown };
       requested = snapshot.spec_requested === true;
     } catch {
       requested = false;
@@ -1125,8 +1103,9 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
 
   async function createStream(turn: LeaderTurnInput) {
     const leader = input.store.getExpert("exp-leader");
-    const mcpTurnContext = mcpTurnContexts.get(turn.leaderAgentSessionId) ?? {};
-    mcpTurnContexts.set(turn.leaderAgentSessionId, mcpTurnContext);
+    const mcpTurnContext = mcpTurnContexts.get(turn.flowId) ?? {};
+    mcpTurnContext.currentTurnInput = turn.currentTurnInput ?? currentTurnInputFromTurn(turn);
+    mcpTurnContexts.set(turn.flowId, mcpTurnContext);
     const leaderToolHandlers = createLeaderToolHandlers(
       createStorePort(input.store, input.agentDispatcher),
       {
@@ -1143,12 +1122,12 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
             card_type: card.cardType,
             status: card.status,
             questions: card.questions,
-            user_turn_id: card.userTurnId,
+            work_run_id: card.workRunId,
           },
         }).then(async () => {
-          if (!card.userTurnId) return;
-          const turn = input.store.pauseUserTurnForUserAction(card.userTurnId);
-          if (turn) await publishUserTurnEvent(input.eventBus, turn);
+          if (!card.workRunId) return;
+          const turn = input.store.waitWorkRunForUserAction(card.workRunId);
+          if (turn) await publishWorkRunEvent(input.eventBus, turn);
         }),
         onSpecCardCreated: (card) => input.eventBus.publish(card.flowId, {
           type: "flow:spec_card",
@@ -1156,16 +1135,16 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           data: {
             spec_approval_id: card.specApprovalId,
             spec_revision_id: card.specRevisionId,
-            user_turn_id: card.userTurnId,
+            work_run_id: card.workRunId,
             status: card.status,
             file_name: card.fileName,
             overview: card.overview,
             actions: ["run"],
           },
         }).then(async () => {
-          if (!card.userTurnId) return;
-          const turn = input.store.pauseUserTurnForUserAction(card.userTurnId);
-          if (turn) await publishUserTurnEvent(input.eventBus, turn);
+          if (!card.workRunId) return;
+          const turn = input.store.waitWorkRunForUserAction(card.workRunId);
+          if (turn) await publishWorkRunEvent(input.eventBus, turn);
         }),
         onTaskCreated: async (created) => {
           await input.eventBus.publish(created.flowId, {
@@ -1211,14 +1190,14 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           });
           const revisionStatus = String((created.revision as { status?: unknown }).status ?? "");
           if (revisionStatus === "approved" && revisionId) await input.orchestrationScheduler?.startRevision(revisionId);
-          const userTurn = input.store.getUserTurn(created.userTurnId);
-          if (userTurn) await publishUserTurnEvent(input.eventBus, userTurn);
+          const workRun = input.store.getWorkRun(created.workRunId);
+          if (workRun) await publishWorkRunEvent(input.eventBus, workRun);
         },
         onPlanApprovalChanged: async ({ flowId, approval }) => {
           await input.eventBus.publish(flowId, { type: "plan_approval:event", flow_id: flowId, data: approval });
-          const userTurnId = String((approval as { userTurnId?: unknown }).userTurnId ?? "");
-          const userTurn = userTurnId ? input.store.getUserTurn(userTurnId) : undefined;
-          if (userTurn) await publishUserTurnEvent(input.eventBus, userTurn);
+          const workRunId = String((approval as { workRunId?: unknown }).workRunId ?? "");
+          const workRun = workRunId ? input.store.getWorkRun(workRunId) : undefined;
+          if (workRun) await publishWorkRunEvent(input.eventBus, workRun);
         },
         onPlanRunChanged: async ({ flowId, run }) => {
           await input.eventBus.publish(flowId, {
@@ -1227,12 +1206,33 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
             data: {
               plan_run_id: run.id,
               plan_revision_id: run.planRevisionId,
-              user_turn_id: run.userTurnId,
+              work_run_id: run.workRunId,
               status: run.status,
             },
           });
           const revisionId = String(run.planRevisionId ?? "");
           if (revisionId) await input.orchestrationScheduler?.startRevision(revisionId);
+        },
+        onWorkRunChanged: async ({ flowId, workRun, action }) => {
+          const workRunId = String((workRun as { work_run_id?: unknown }).work_run_id ?? "");
+          const persisted = workRunId ? input.store.getWorkRun(workRunId) : undefined;
+          if (persisted) await publishWorkRunEvent(input.eventBus, persisted);
+          if (workRunId) input.onWorkRunAction?.({ flowId, workRunId, action });
+          if ((action === "interrupt" || action === "cancel") && workRunId) {
+            queueMicrotask(() => {
+              const activeSessionId = stream.activeLeaderAgentSessionId;
+              if (activeSessionId) {
+                input.store.updateAgentSessionStatus(activeSessionId, "interrupted");
+                void input.eventBus.publish(flowId, {
+                  type: "session:event",
+                  flow_id: flowId,
+                  data: { agent_session_id: activeSessionId, work_run_id: workRunId, expert_id: "exp-leader", status: "interrupted" },
+                });
+              }
+              void stream.cancel();
+              if (streams.get(flowId) === stream) streams.delete(flowId);
+            });
+          }
         },
       },
       { getCurrentTurnInput: () => mcpTurnContext.currentTurnInput, leaderAgentSessionId: turn.leaderAgentSessionId },
@@ -1254,6 +1254,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       runtimeSdk: leaderRuntimeConfig.config.sdk,
       runtimeConfigId: leaderRuntimeConfig.configId,
       runtimeModelId: leaderRuntimeConfig.modelId,
+      runtimeReasoningEffort: (leaderRuntimeConfig.config as RuntimeConfigWithReasoningEffort).reasoningEffort ?? null,
     });
     let stream!: LeaderFlowStream;
     const runtimeAdapter = (input.runtimeAdapterFactory ?? createAgentRuntimeAdapter)({
@@ -1265,11 +1266,11 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const leaderMcpBinding = await runtimeAdapter.prepareLeaderMcpServer({
       server: mcpServer,
       serverFactory: createLeaderServer,
-      bindingKey: `leader:${turn.leaderAgentSessionId}`,
+      bindingKey: `leader:${turn.flowId}`,
       bridgeRegistry: input.mcpBridgeRegistry,
     });
-    const browserTurnContext = browserTurnContexts.get(turn.leaderAgentSessionId) ?? { agentSessionId: null };
-    browserTurnContexts.set(turn.leaderAgentSessionId, browserTurnContext);
+    const browserTurnContext = browserTurnContexts.get(turn.flowId) ?? { agentSessionId: null };
+    browserTurnContexts.set(turn.flowId, browserTurnContext);
     const leaderScratchDir = path.join(config.runtimeScratchRoot, turn.flowId, "leader");
     fs.mkdirSync(leaderScratchDir, { recursive: true });
     let browserMcpBinding: { mcpServerConfig: unknown; close: () => Promise<void> | void } | undefined;
@@ -1287,7 +1288,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         serverName: "squadflow-browser",
         server: browserServer,
         serverFactory: createBrowserServer,
-        bindingKey: `leader-browser:${turn.leaderAgentSessionId}`,
+        bindingKey: `leader-browser:${turn.flowId}`,
         bridgeRegistry: input.mcpBridgeRegistry,
       });
     }
@@ -1326,13 +1327,13 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         };
         const result = checkPermission(permissionArgs);
         if (result.behavior === "deny" && result.requiresConfirmation) {
-          if (!turn.userTurnId || !input.permissionGate) {
+          if (!turn.workRunId || !input.permissionGate) {
             return { behavior: "deny", message: "风险操作无法取得用户确认，已拒绝。" };
           }
           return input.permissionGate({
             flowId: turn.flowId,
-            userTurnId: turn.userTurnId,
-            scope: { kind: "leader_user_turn" },
+            workRunId: turn.workRunId,
+            scope: { kind: "leader_work_run" },
             request,
             permissionArgs,
           });
@@ -1356,7 +1357,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         context: {
           runtimeRole: "leader",
           flowId: turn.flowId,
-          userTurnId: turn.userTurnId ?? null,
+          workRunId: turn.workRunId ?? null,
           agentSessionId: turn.leaderAgentSessionId,
         },
         event,
@@ -1373,7 +1374,6 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       () => {
         if (streams.get(turn.flowId) === stream) {
           streams.delete(turn.flowId);
-          publishRuntimeState(turn.flowId);
         }
         void leaderMcpBinding.close();
         void browserMcpBinding?.close();
@@ -1384,7 +1384,6 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       modelName,
     );
     streams.set(turn.flowId, stream);
-    publishRuntimeState(turn.flowId);
     return stream;
   }
 
@@ -1392,7 +1391,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     const pendingStart = pendingStarts.get(flowId);
     if (pendingStart) await pendingStart.settled;
     if (streams.has(flowId)) throw new Error("Leader is currently running");
-    if (input.store.getOpenUserTurn(flowId)) {
+    if (input.store.getOpenWorkRun(flowId)) {
       throw new Error("Flow is not idle");
     }
 
@@ -1423,6 +1422,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       runtimeSdk: leaderRuntimeConfig.config.sdk,
       runtimeConfigId: leaderRuntimeConfig.configId,
       runtimeModelId: leaderRuntimeConfig.modelId,
+      runtimeReasoningEffort: (leaderRuntimeConfig.config as RuntimeConfigWithReasoningEffort).reasoningEffort ?? null,
     });
     const runtimeAdapter = (input.runtimeAdapterFactory ?? createAgentRuntimeAdapter)({
       sdk: leaderRuntimeConfig.config.sdk,
@@ -1446,7 +1446,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         context: {
           runtimeRole: "leader_compaction",
           flowId,
-          userTurnId: null,
+          workRunId: null,
           agentSessionId: leaderAgentSession.id,
         },
         event,
@@ -1589,21 +1589,26 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
   }
 
   return {
-    getState,
     async runLeaderTurn(turn) {
       const enrichedTurn = enrichSpecRequestedTurn(turn);
       const cancelledTurnId = cancelledTurnByFlow.get(enrichedTurn.flowId);
-      if (enrichedTurn.userTurnId && cancelledTurnId === enrichedTurn.userTurnId) return;
-      if (enrichedTurn.userTurnId && cancelledTurnId && cancelledTurnId !== enrichedTurn.userTurnId) {
+      if (enrichedTurn.workRunId && cancelledTurnId === enrichedTurn.workRunId) {
+        // An interrupt stops the invocation that was active at that moment; it
+        // must not permanently blacklist the WorkRun. A later user message is
+        // a new Leader execution and may explicitly resume the preserved work.
+        if (enrichedTurn.kind === "user") cancelledTurnByFlow.delete(enrichedTurn.flowId);
+        else return;
+      }
+      if (enrichedTurn.workRunId && cancelledTurnId && cancelledTurnId !== enrichedTurn.workRunId) {
         cancelledTurnByFlow.delete(enrichedTurn.flowId);
       }
-      if (enrichedTurn.userTurnId) {
-        const userTurn = input.store.getUserTurn(enrichedTurn.userTurnId);
-        if (userTurn && ["failed", "cancelled"].includes(userTurn.status)) return;
+      if (enrichedTurn.workRunId) {
+        const workRun = input.store.getWorkRun(enrichedTurn.workRunId);
+        if (workRun && ["failed", "cancelled"].includes(workRun.status)) return;
       }
-      if ((enrichedTurn.kind === "expert_result" || enrichedTurn.kind === "expert_message") && enrichedTurn.userTurnId) {
-        const userTurn = input.store.getUserTurn(enrichedTurn.userTurnId);
-        if (userTurn && ["completed", "failed", "cancelled"].includes(userTurn.status)) return;
+      if ((enrichedTurn.kind === "expert_result" || enrichedTurn.kind === "expert_message") && enrichedTurn.workRunId) {
+        const workRun = input.store.getWorkRun(enrichedTurn.workRunId);
+        if (workRun && ["completed", "failed", "cancelled"].includes(workRun.status)) return;
       }
       const hasPendingUserAction = input.store.listDecisionCards(enrichedTurn.flowId).some((card) => card.status === "pending")
         || input.store.listSpecApprovals(enrichedTurn.flowId).some((approval) => approval.status === "pending");
@@ -1619,7 +1624,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
           flowId: enrichedTurn.flowId,
           agentSessionId: enrichedTurn.leaderAgentSessionId,
           sdkSessionId: enrichedTurn.leaderSessionId,
-          userTurnId: enrichedTurn.userTurnId ?? null,
+          workRunId: enrichedTurn.workRunId ?? null,
         }, "runtime waiting_existing_finished");
         await Promise.race([
           existing.finished,
@@ -1645,7 +1650,6 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       }
       const start = createPendingLeaderStart();
       pendingStarts.set(enrichedTurn.flowId, start);
-      publishRuntimeState(enrichedTurn.flowId);
       try {
         const stream = await createStream(enrichedTurn);
         if (start.cancelled) {
@@ -1658,7 +1662,6 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       } finally {
         if (pendingStarts.get(enrichedTurn.flowId) === start) pendingStarts.delete(enrichedTurn.flowId);
         start.settle();
-        publishRuntimeState(enrichedTurn.flowId);
       }
     },
     async guideLeaderTurn(guide) {
@@ -1674,8 +1677,8 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     compactContext(flowId) {
       return compactLeaderContext(flowId);
     },
-    cancelFlow(flowId, userTurnId) {
-      if (userTurnId) cancelledTurnByFlow.set(flowId, userTurnId);
+    cancelFlow(flowId, workRunId) {
+      if (workRunId) cancelledTurnByFlow.set(flowId, workRunId);
       const pendingStart = pendingStarts.get(flowId);
       if (pendingStart) pendingStart.cancelled = true;
       const stream = streams.get(flowId);
@@ -1683,8 +1686,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         void stream.cancel();
         streams.delete(flowId);
       }
-      publishRuntimeState(flowId);
-      return Boolean(userTurnId || pendingStart || stream);
+      return Boolean(workRunId || pendingStart || stream);
     },
     async close() {
       const starts = [...pendingStarts.values()];

@@ -46,17 +46,17 @@ function seedRunningTask(store: ReturnType<typeof createStore>) {
     description: "",
     projectId: project.id,
   });
-  const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: `msg-${Date.now()}` })!;
-  const userTurn = store.startUserTurnWork({
+  const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: `msg-${Date.now()}` })!;
+  const workRun = store.startWorkRunWork({
     flowId: flow.id,
-    userTurnId: turn.id,
+    workRunId: turn.id,
     workSource: "direct_message",
     targetProjectId: project.id,
     inputSnapshotJson: "{}",
   })!;
   const task = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Count",
     description: "数数任务",
     expertId: "exp-coder",
@@ -64,14 +64,14 @@ function seedRunningTask(store: ReturnType<typeof createStore>) {
   })!;
   const session = store.createAgentSession({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     taskId: task.id,
     expertId: "exp-coder",
     displayName: "exp-coder",
     status: "streaming",
   });
   store.startTask(task.id, session.id);
-  return { flow, userTurn, task, session };
+  return { flow, workRun, task, session };
 }
 
 afterEach(() => {
@@ -83,7 +83,7 @@ afterEach(() => {
 describe.skipIf(!enabled)("Expert steer live e2e", () => {
   it("steers a Leader message into a live running turn and settles once", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = seedRunningTask(store);
+    const { flow, workRun, task, session } = seedRunningTask(store);
     const runtime = createExpertRuntime({
       store,
       eventBus: new EventBus(),
@@ -92,7 +92,7 @@ describe.skipIf(!enabled)("Expert steer live e2e", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
       prompt: "不要使用任何工具。请从 1 数到 60，每行输出一个数字，中途不要输出别的内容,数完后单独输出一行 COUNT-DONE。",

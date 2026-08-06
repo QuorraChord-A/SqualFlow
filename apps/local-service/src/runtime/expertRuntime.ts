@@ -14,6 +14,7 @@ import {
   type AgentRuntimeRole,
   type RuntimeConfig,
 } from "../config/agentRuntimeConfig.js";
+import { normalizeRuntimeReasoningEffort } from "../config/runtimeReasoningEffort.js";
 import type { Store } from "../db/store.js";
 import { createAgentRuntimeAdapter } from "./adapters/factory.js";
 import type { AgentRuntimeAdapterFactory } from "./adapters/factory.js";
@@ -25,14 +26,14 @@ import type {
 } from "./adapters/runtimeAdapter.js";
 import { hasWriteRuntimeCapability, normalizeRuntimeCapabilities, type RuntimeCapability } from "./capabilities.js";
 import { assembleExpertResult, type ExpertResult, type TurnOutcome } from "../harness/expertResult.js";
-import { captureUserTurnBaselineAsync, summarizeUserTurnDiffAsync, type UserTurnBaseline } from "./userTurnDiff.js";
+import { captureWorkRunBaselineAsync, summarizeWorkRunDiffAsync, type WorkRunBaseline } from "./workRunDiff.js";
 import {
   contextUsageSnapshotToPayload,
   overallContextUsageFromResultCache,
   type ContextUsageSnapshot,
 } from "../domain/contextUsage.js";
 import { runtimeModelContextWindowK } from "../config/runtimeModelContext.js";
-import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/userTurnReview.js";
+import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/workRunReview.js";
 import { checkPermission, type CheckPermissionArgs, type PermissionResult } from "../permissions/permissionPolicy.js";
 import type { ChatJournal } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
@@ -56,7 +57,7 @@ import {
 
 export type ExpertTaskInput = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string;
   taskId: string;
   flowExpertId?: string;
   agentSessionId: string;
@@ -66,7 +67,7 @@ export type ExpertTaskInput = {
 
 export type ExpertConversationInput = {
   flowId: string;
-  userTurnId: string;
+  workRunId?: string;
   flowExpertId: string;
   agentSessionId: string;
   expertId: string;
@@ -85,8 +86,8 @@ export type ExpertRuntime = {
   runTask: (input: ExpertTaskInput) => Promise<void>;
   runConversation: (input: ExpertConversationInput) => Promise<void>;
   sendMessage: (input: ExpertRuntimeMessageInput) => boolean;
-  cancelTask: (input: { flowId: string; userTurnId: string; taskId: string; agentSessionId: string }) => Promise<boolean>;
-  cancelUserTurn: (input: { flowId: string; userTurnId: string }) => number;
+  cancelTask: (input: { flowId: string; workRunId: string; taskId: string; agentSessionId: string }) => Promise<boolean>;
+  cancelWorkRun: (input: { flowId: string; workRunId: string }) => number;
   confirmPermission: RuntimePermissionGate;
   resolvePermissionCard: (input: {
     flowId: string;
@@ -99,7 +100,7 @@ export type ExpertRuntime = {
 
 export type RuntimePermissionGate = (input: {
   flowId: string;
-  userTurnId: string;
+  workRunId: string;
   scope: RuntimePermissionScope;
   request: RuntimeToolPermissionRequest;
   permissionArgs: CheckPermissionArgs;
@@ -108,11 +109,11 @@ export type RuntimePermissionGate = (input: {
 export type RuntimePermissionScope =
   | { kind: "expert_task"; taskId: string; agentSessionId: string }
   | { kind: "expert_conversation"; agentSessionId: string }
-  | { kind: "leader_user_turn" };
+  | { kind: "leader_work_run" };
 
 export type ExpertTaskFinishedEvent = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string;
   taskId: string;
   agentSessionId: string;
   expertId: string;
@@ -128,7 +129,7 @@ export type ExpertTaskFinishedEvent = {
 
 export type ExpertConversationFinishedEvent = {
   flowId: string;
-  userTurnId: string;
+  workRunId?: string;
   agentSessionId: string;
   expertId: string;
   status: "completed" | "failed" | "cancelled";
@@ -176,9 +177,9 @@ function parseJsonObject(value: string | null | undefined): Record<string, unkno
 }
 
 function taskRuntimeDirs(store: Store, task: NonNullable<ReturnType<Store["getTask"]>>, flowExpertId: string) {
-  const turn = store.getUserTurn(task.userTurnId);
+  const turn = store.getWorkRun(task.workRunId);
   if (!turn || turn.flowId !== task.flowId || !turn.workRootPath) {
-    throw new Error(`UserTurn work root is not configured: ${task.userTurnId}`);
+    throw new Error(`WorkRun work root is not configured: ${task.workRunId}`);
   }
   const cwd = turn.workRootPath;
   const scratchDir = path.join(config.runtimeScratchRoot, task.flowId, flowExpertId);
@@ -189,16 +190,16 @@ function taskRuntimeDirs(store: Store, task: NonNullable<ReturnType<Store["getTa
 
 function conversationRuntimeDirs(
   store: Store,
-  input: { flowId: string; userTurnId: string; flowExpertId: string },
+  input: { flowId: string; workRunId: string | null; flowExpertId: string },
 ) {
-  const turn = store.getUserTurn(input.userTurnId);
+  const turn = input.workRunId ? store.getWorkRun(input.workRunId) : undefined;
   const flow = store.getFlow(input.flowId);
   const project = flow?.projectId ? store.getProject(flow.projectId) : undefined;
-  if (!turn || turn.flowId !== input.flowId || !flow) {
-    throw new Error(`Expert conversation context is invalid: ${input.userTurnId}`);
+  if ((turn && turn.flowId !== input.flowId) || !flow) {
+    throw new Error(`Expert conversation context is invalid: ${input.workRunId}`);
   }
-  const cwd = turn.workRootPath || project?.localPath;
-  if (!cwd) throw new Error(`Expert conversation work root is not configured: ${input.userTurnId}`);
+  const cwd = turn?.workRootPath || project?.localPath;
+  if (!cwd) throw new Error(`Expert conversation work root is not configured: ${input.workRunId}`);
   const scratchDir = path.join(config.runtimeScratchRoot, input.flowId, input.flowExpertId);
   fs.mkdirSync(cwd, { recursive: true });
   fs.mkdirSync(scratchDir, { recursive: true });
@@ -206,11 +207,20 @@ function conversationRuntimeDirs(
 }
 
 type LockedRuntimeConfig = {
-  config: RuntimeConfig;
+  config: RuntimeConfig & { reasoningEffort: string };
   runtimeSdk: string;
   runtimeConfigId: string;
   runtimeModelId: string | null;
+  runtimeReasoningEffort: string;
 };
+
+function withReasoningEffort(runtimeConfig: RuntimeConfig, value: unknown) {
+  const reasoningEffort = normalizeRuntimeReasoningEffort(runtimeConfig.sdk, value);
+  return {
+    config: { ...runtimeConfig, reasoningEffort },
+    reasoningEffort,
+  };
+}
 
 async function resolveFlowExpertRuntimeConfig(
   flowExpert: RuntimeFlowExpert,
@@ -226,11 +236,13 @@ async function resolveFlowExpertRuntimeConfig(
     if (!runtimeConfig || !modelId) {
       throw new Error(`Locked runtime config is not available for Flow Expert: ${flowExpert.id}`);
     }
+    const withEffort = withReasoningEffort(runtimeConfig, flowExpert.runtimeReasoningEffort);
     return {
-      config: runtimeConfig,
+      config: withEffort.config,
       runtimeSdk: lockedSdk,
       runtimeConfigId: flowExpert.runtimeConfigId,
       runtimeModelId: modelId,
+      runtimeReasoningEffort: withEffort.reasoningEffort,
     };
   }
 
@@ -239,11 +251,13 @@ async function resolveFlowExpertRuntimeConfig(
     if (!legacyRuntimeConfig) {
       throw new Error(`Legacy runtime model is not configured for Flow Expert: ${flowExpert.id}`);
     }
+    const withEffort = withReasoningEffort(legacyRuntimeConfig.config, flowExpert.runtimeReasoningEffort);
     return {
-      config: legacyRuntimeConfig.config,
+      config: withEffort.config,
       runtimeSdk: legacyRuntimeConfig.config.sdk,
       runtimeConfigId: legacyRuntimeConfig.configId,
       runtimeModelId: legacyRuntimeConfig.modelId,
+      runtimeReasoningEffort: withEffort.reasoningEffort,
     };
   }
 
@@ -252,11 +266,13 @@ async function resolveFlowExpertRuntimeConfig(
   if (!modelId) {
     throw new Error(`Runtime model is not configured for role: ${runtimeRole}`);
   }
+  const withEffort = withReasoningEffort(roleRuntimeConfig.config, roleRuntimeConfig.binding.reasoningEffort);
   return {
-    config: roleRuntimeConfig.config,
+    config: withEffort.config,
     runtimeSdk: roleRuntimeConfig.config.sdk,
     runtimeConfigId: roleRuntimeConfig.config.id,
     runtimeModelId: modelId,
+    runtimeReasoningEffort: withEffort.reasoningEffort,
   };
 }
 
@@ -330,7 +346,7 @@ type CompletionGroup = {
 
 type FlowExpertTurn = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string | null;
   expertId: string;
   task: NonNullable<ReturnType<Store["getTask"]>> | null;
   agentSessionId: string;
@@ -342,7 +358,7 @@ type FlowExpertTurn = {
   startedAt: string;
   adapter?: RuntimeOutputAdapter;
   pusher?: WsPusher;
-  baseline?: UserTurnBaseline;
+  baseline?: WorkRunBaseline;
 };
 
 type RuntimeTask = NonNullable<ReturnType<Store["getTask"]>>;
@@ -353,7 +369,7 @@ type BrowserTurnContext = { agentSessionId: string | null; scratchDir: string };
 type ExpertTaskTurnContext = { flowId: string; flowExpertId: string; agentSessionId: string | null };
 type ExpertPermissionScopeContext = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string | null;
   taskId: string | null;
   agentSessionId: string;
 };
@@ -392,7 +408,7 @@ class FlowExpertWorker {
     initialSessionId: string,
     private readonly options: unknown,
     private readonly runtimeAdapter: AgentRuntimeAdapter,
-    private readonly runtimeBindingValue: Pick<LockedRuntimeConfig, "runtimeSdk" | "runtimeConfigId" | "runtimeModelId">,
+    private readonly runtimeBindingValue: Pick<LockedRuntimeConfig, "runtimeSdk" | "runtimeConfigId" | "runtimeModelId" | "runtimeReasoningEffort">,
     private readonly reviewRootPath: string,
     private readonly canWrite: boolean,
     private readonly deps: CreateExpertRuntimeInput,
@@ -430,7 +446,7 @@ class FlowExpertWorker {
     if (!active) return;
     beginControlledEditReview({
       flowId: active.flowId,
-      userTurnId: active.userTurnId,
+      workRunId: active.workRunId,
       rootPath: this.reviewRootPath,
       toolName,
       capability,
@@ -444,16 +460,16 @@ class FlowExpertWorker {
     return this.enqueue({
       ...input,
       flowId: input.task.flowId,
-      userTurnId: input.task.userTurnId,
+      workRunId: input.task.workRunId,
       expertId: input.task.expertId ?? "",
     });
   }
 
-  enqueueConversation(input: Pick<FlowExpertTurn, "flowId" | "userTurnId" | "expertId" | "agentSessionId" | "scratchDir" | "content">): Promise<void> | null {
+  enqueueConversation(input: Pick<FlowExpertTurn, "flowId" | "workRunId" | "expertId" | "agentSessionId" | "scratchDir" | "content">): Promise<void> | null {
     return this.enqueue({ ...input, task: null });
   }
 
-  private enqueue(input: Pick<FlowExpertTurn, "flowId" | "userTurnId" | "expertId" | "task" | "agentSessionId" | "scratchDir" | "content">): Promise<void> | null {
+  private enqueue(input: Pick<FlowExpertTurn, "flowId" | "workRunId" | "expertId" | "task" | "agentSessionId" | "scratchDir" | "content">): Promise<void> | null {
     if (!this.acceptsInput) return null;
     let resolve!: () => void;
     let reject!: (error: Error) => void;
@@ -519,10 +535,10 @@ class FlowExpertWorker {
     await this.mcpBindingClose?.();
   }
 
-  cancelUserTurn(flowId: string, userTurnId: string) {
+  cancelWorkRun(flowId: string, workRunId: string) {
     const turns = [this.active, ...this.queued].filter((turn): turn is FlowExpertTurn => Boolean(turn));
     if (!turns.some((turn) =>
-      turn.flowId === flowId && turn.userTurnId === userTurnId
+      turn.flowId === flowId && turn.workRunId === workRunId
     )) {
       return false;
     }
@@ -539,13 +555,13 @@ class FlowExpertWorker {
     return true;
   }
 
-  async cancelTask(input: { flowId: string; userTurnId: string; taskId: string; agentSessionId: string }) {
+  async cancelTask(input: { flowId: string; workRunId: string; taskId: string; agentSessionId: string }) {
     const active = this.active;
     if (
       !active
       || !active.task
       || active.flowId !== input.flowId
-      || active.userTurnId !== input.userTurnId
+      || active.workRunId !== input.workRunId
       || active.task.id !== input.taskId
       || active.agentSessionId !== input.agentSessionId
     ) {
@@ -567,7 +583,7 @@ class FlowExpertWorker {
     if (interruptedTiming) {
       this.deps.store.appendEventLog({
         flowId: active.flowId,
-        userTurnId: active.userTurnId,
+        workRunId: active.workRunId,
         taskId: active.task.id,
         agentSessionId: active.agentSessionId,
         eventType: "agent_session.turn_completed",
@@ -595,18 +611,7 @@ class FlowExpertWorker {
     if (session && ["queued", "streaming"].includes(session.status)) {
       const interrupted = this.deps.store.updateAgentSessionStatus(active.agentSessionId, "interrupted");
       if (interrupted) {
-        await this.deps.eventBus.publish(active.flowId, {
-          type: "session:event",
-          flow_id: active.flowId,
-          data: {
-            agent_session_id: interrupted.id,
-            user_turn_id: interrupted.userTurnId,
-            task_id: interrupted.taskId,
-            expert_id: interrupted.expertId,
-            flow_expert_id: interrupted.flowExpertId,
-            status: interrupted.status,
-          },
-        });
+        await publishAgentSessionEvent(this.deps, interrupted);
       }
     }
     this.deps.desktopBridge?.releaseLease(active.agentSessionId);
@@ -745,13 +750,13 @@ class FlowExpertWorker {
     this.activating = true;
     this.active = next;
     this.permissionScopeContext.flowId = next.flowId;
-    this.permissionScopeContext.userTurnId = next.userTurnId;
+    this.permissionScopeContext.workRunId = next.workRunId;
     this.permissionScopeContext.taskId = next.task?.id ?? null;
     this.permissionScopeContext.agentSessionId = next.agentSessionId;
     this.deps.logger?.info({
       runtimeRole: "expert",
       flowId: next.flowId,
-      userTurnId: next.userTurnId,
+      workRunId: next.workRunId,
       taskId: next.task?.id ?? null,
       flowExpertId: this.flowExpertId,
       agentSessionId: next.agentSessionId,
@@ -761,6 +766,7 @@ class FlowExpertWorker {
     try {
       const currentSession = this.deps.store.getAgentSession(next.agentSessionId);
       if (!currentSession) throw new Error(`missing Expert AgentSession: ${next.agentSessionId}`);
+      let activatedSession: ReturnType<Store["getAgentSession"]> = undefined;
       if (next.task) {
         const currentTask = this.deps.store.getTask(next.task.id);
         if (!currentTask) throw new Error(`missing task runtime state: ${next.task.id}`);
@@ -771,14 +777,17 @@ class FlowExpertWorker {
           const activated = this.deps.store.activateFlowExpertTask(next.task.id, next.agentSessionId);
           if (!activated) throw new Error(`failed to activate task: ${next.task.id}`);
           next.task = activated.task;
+          activatedSession = activated.agentSession;
         } else if (currentTask.status !== "in_progress" || currentSession.status !== "streaming") {
           throw new Error(`task is not queued for Flow Expert runtime: ${next.task.id}`);
         }
       } else if (["queued", "interrupted"].includes(currentSession.status)) {
-        this.deps.store.updateAgentSessionStatus(next.agentSessionId, "streaming");
+        activatedSession = this.deps.store.updateAgentSessionStatus(next.agentSessionId, "streaming");
+        if (!activatedSession) throw new Error(`failed to activate Expert conversation: ${next.agentSessionId}`);
       } else if (currentSession.status !== "streaming") {
         throw new Error(`conversation is not queued for Flow Expert runtime: ${next.agentSessionId}`);
       }
+      if (activatedSession) await publishAgentSessionEvent(this.deps, activatedSession);
       this.activateBrowserTurnContext(next);
       this.activateTaskTurnContext(next);
 
@@ -788,7 +797,7 @@ class FlowExpertWorker {
           flow_id: next.flowId,
           data: {
             task_id: next.task.id,
-            user_turn_id: next.userTurnId,
+            work_run_id: next.workRunId,
             expert_id: next.expertId,
             flow_expert_id: this.flowExpertId,
             agent_session_id: next.agentSessionId,
@@ -814,7 +823,7 @@ class FlowExpertWorker {
       });
       if (this.canWrite) {
         try {
-          next.baseline = await captureUserTurnBaselineAsync(this.reviewRootPath);
+          next.baseline = await captureWorkRunBaselineAsync(this.reviewRootPath);
         } catch {
           // Best-effort: files_changed simply stays empty for this turn.
         }
@@ -896,7 +905,7 @@ class FlowExpertWorker {
 
     this.deps.store.appendEventLog({
       flowId: active.flowId,
-      userTurnId: active.userTurnId,
+      workRunId: active.workRunId,
       taskId: active.task?.id ?? null,
       agentSessionId: active.agentSessionId,
       eventType: "agent_session.turn_completed",
@@ -1020,7 +1029,7 @@ class FlowExpertWorker {
     this.deps.logger?.info({
       runtimeRole: "expert",
       flowId: active.flowId,
-      userTurnId: active.userTurnId,
+      workRunId: active.workRunId,
       taskId: active.task?.id ?? null,
       flowExpertId: this.flowExpertId,
       agentSessionId: active.agentSessionId,
@@ -1034,7 +1043,7 @@ class FlowExpertWorker {
     this.deps.logger?.info({
       runtimeRole: "expert",
       flowId: active.flowId,
-      userTurnId: active.userTurnId,
+      workRunId: active.workRunId,
       taskId: active.task?.id ?? null,
       flowExpertId: this.flowExpertId,
       agentSessionId: active.agentSessionId,
@@ -1046,7 +1055,7 @@ class FlowExpertWorker {
   private async filesChangedSince(active: FlowExpertTurn): Promise<{ files: string[]; filesChangedSkipped?: boolean }> {
     if (!active.baseline) return { files: [] };
     try {
-      const summary = await summarizeUserTurnDiffAsync(this.reviewRootPath, active.baseline);
+      const summary = await summarizeWorkRunDiffAsync(this.reviewRootPath, active.baseline);
       return {
         files: summary.changedFiles.map((file) => file.path),
         filesChangedSkipped: summary.filesChangedSkipped,
@@ -1085,7 +1094,7 @@ class FlowExpertWorker {
     const fields = {
       runtimeRole: "expert",
       flowId: turn.flowId,
-      userTurnId: turn.userTurnId,
+      workRunId: turn.workRunId,
       taskId: turn.task?.id ?? null,
       flowExpertId: this.flowExpertId,
       agentSessionId: turn.agentSessionId,
@@ -1208,7 +1217,7 @@ class FlowExpertWorkerRegistry {
 
   async enqueueConversation(input: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string | null;
     expert: RuntimeExpert;
     flowExpert: RuntimeFlowExpert;
     agentSession: RuntimeAgentSession;
@@ -1220,12 +1229,12 @@ class FlowExpertWorkerRegistry {
       this.deps.store.updateAgentSessionRuntime(input.agentSession.id, worker.runtimeBinding);
       const { scratchDir } = conversationRuntimeDirs(this.deps.store, {
         flowId: input.flowId,
-        userTurnId: input.userTurnId,
+        workRunId: input.workRunId,
         flowExpertId: input.flowExpert.id,
       });
       const completion = worker.enqueueConversation({
         flowId: input.flowId,
-        userTurnId: input.userTurnId,
+        workRunId: input.workRunId,
         expertId: input.expert.id,
         agentSessionId: input.agentSession.id,
         scratchDir,
@@ -1246,15 +1255,15 @@ class FlowExpertWorkerRegistry {
     return this.workers.get(flowExpertId)?.steerMessage(session.id, message.content) ?? false;
   }
 
-  cancelUserTurn(input: { flowId: string; userTurnId: string }) {
+  cancelWorkRun(input: { flowId: string; workRunId: string }) {
     let cancelled = 0;
     for (const worker of this.workers.values()) {
-      if (worker.cancelUserTurn(input.flowId, input.userTurnId)) cancelled += 1;
+      if (worker.cancelWorkRun(input.flowId, input.workRunId)) cancelled += 1;
     }
     return cancelled;
   }
 
-  async cancelTask(input: { flowId: string; userTurnId: string; taskId: string; agentSessionId: string }) {
+  async cancelTask(input: { flowId: string; workRunId: string; taskId: string; agentSessionId: string }) {
     for (const worker of this.workers.values()) {
       const result = await worker.cancelTask(input);
       if (!result.cancelled) continue;
@@ -1275,7 +1284,7 @@ class FlowExpertWorkerRegistry {
 
   private async getOrCreateWorker(input: {
     flowId?: string;
-    userTurnId?: string;
+    workRunId?: string | null;
     task: RuntimeTask | null;
     expert: RuntimeExpert;
     flowExpert: RuntimeFlowExpert;
@@ -1283,12 +1292,12 @@ class FlowExpertWorkerRegistry {
     resumeSessionId?: string;
   }) {
     const flowId = input.task?.flowId ?? input.flowId;
-    const userTurnId = input.task?.userTurnId ?? input.userTurnId;
-    if (!flowId || !userTurnId) throw new Error("Flow Expert worker requires Flow and UserTurn context");
+    const workRunId = input.task?.workRunId ?? input.workRunId ?? null;
+    if (!flowId) throw new Error("Flow Expert worker requires Flow context");
     const existing = this.workers.get(input.flowExpert.id);
     const { cwd } = input.task
       ? taskRuntimeDirs(this.deps.store, input.task, input.flowExpert.id)
-      : conversationRuntimeDirs(this.deps.store, { flowId, userTurnId, flowExpertId: input.flowExpert.id });
+      : conversationRuntimeDirs(this.deps.store, { flowId, workRunId, flowExpertId: input.flowExpert.id });
     if (existing?.cwd === cwd) return existing;
     if (existing) {
       await existing.close();
@@ -1298,7 +1307,7 @@ class FlowExpertWorkerRegistry {
     const starting = this.startingWorkers.get(input.flowExpert.id);
     if (starting) return starting;
 
-    const created = this.createWorker({ ...input, flowId, userTurnId });
+    const created = this.createWorker({ ...input, flowId, workRunId });
     this.startingWorkers.set(input.flowExpert.id, created);
     try {
       return await created;
@@ -1311,7 +1320,7 @@ class FlowExpertWorkerRegistry {
 
   private async createWorker(input: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string | null;
     task: RuntimeTask | null;
     expert: RuntimeExpert;
     flowExpert: RuntimeFlowExpert;
@@ -1322,7 +1331,7 @@ class FlowExpertWorkerRegistry {
       ? taskRuntimeDirs(this.deps.store, input.task, input.flowExpert.id)
       : conversationRuntimeDirs(this.deps.store, {
           flowId: input.flowId,
-          userTurnId: input.userTurnId,
+          workRunId: input.workRunId,
           flowExpertId: input.flowExpert.id,
         });
     const capabilities = normalizeRuntimeCapabilities(parseToolList(input.expert.builtinTools));
@@ -1343,6 +1352,7 @@ class FlowExpertWorkerRegistry {
       runtimeSdk: expertRuntimeConfig.runtimeSdk,
       runtimeConfigId: expertRuntimeConfig.runtimeConfigId,
       runtimeModelId: expertRuntimeConfig.runtimeModelId,
+      runtimeReasoningEffort: expertRuntimeConfig.runtimeReasoningEffort,
     });
     const runtimeAdapter = (this.deps.runtimeAdapterFactory ?? createAgentRuntimeAdapter)({
       sdk: expertRuntimeConfig.config.sdk,
@@ -1358,7 +1368,7 @@ class FlowExpertWorkerRegistry {
     this.taskTurnContexts.set(input.flowExpert.id, taskTurnContext);
     const permissionScopeContext: ExpertPermissionScopeContext = {
       flowId: input.flowId,
-      userTurnId: input.userTurnId,
+      workRunId: input.workRunId,
       taskId: input.task?.id ?? null,
       agentSessionId: input.agentSession.id,
     };
@@ -1432,10 +1442,10 @@ class FlowExpertWorkerRegistry {
           riskMode: this.deps.store.getRiskMode(activeScope.flowId),
         };
         const result = await checkPermission(permissionArgs);
-        if (result.behavior === "deny" && result.requiresConfirmation && this.permissionGate) {
+        if (result.behavior === "deny" && result.requiresConfirmation && this.permissionGate && activeScope.workRunId) {
           return this.permissionGate({
             flowId: activeScope.flowId,
-            userTurnId: activeScope.userTurnId,
+            workRunId: activeScope.workRunId,
             scope: activeScope.taskId
               ? {
                   kind: "expert_task",
@@ -1461,7 +1471,7 @@ class FlowExpertWorkerRegistry {
         context: {
           runtimeRole: "expert",
           flowId: permissionScopeContext.flowId,
-          userTurnId: permissionScopeContext.userTurnId,
+          workRunId: permissionScopeContext.workRunId,
           taskId: permissionScopeContext.taskId ?? undefined,
           flowExpertId: input.flowExpert.id,
           agentSessionId: permissionScopeContext.agentSessionId,
@@ -1489,6 +1499,7 @@ class FlowExpertWorkerRegistry {
         runtimeSdk: expertRuntimeConfig.runtimeSdk,
         runtimeConfigId: expertRuntimeConfig.runtimeConfigId,
         runtimeModelId: expertRuntimeConfig.runtimeModelId,
+        runtimeReasoningEffort: expertRuntimeConfig.runtimeReasoningEffort,
       },
       cwd,
       canWrite,
@@ -1543,10 +1554,10 @@ class FlowExpertWorkerRegistry {
 }
 
 export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRuntime {
-  type PermissionWaitOutcome = "approved" | "user_denied" | "card_cancelled" | "user_turn_cancelled" | "runtime_closed";
+  type PermissionWaitOutcome = "approved" | "user_denied" | "card_cancelled" | "work_run_cancelled" | "runtime_closed";
   type PermissionWaiter = {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     scope: RuntimePermissionScope;
     cwd: string;
     command: string | null;
@@ -1566,7 +1577,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
   };
 
   const scopeLabel = (scope: RuntimePermissionScope) =>
-    scope.kind === "expert_task" ? "Task" : scope.kind === "expert_conversation" ? "Expert 对话" : "UserTurn";
+    scope.kind === "expert_task" ? "Task" : scope.kind === "expert_conversation" ? "Expert 对话" : "WorkRun";
 
   const permissionQuestions = (request: RuntimeToolPermissionRequest, scope: RuntimePermissionScope) => [{
     question: `Agent 请求执行风险操作（${request.capability ?? request.providerToolName}）。${permissionDescription(request)} 是否允许？`,
@@ -1594,7 +1605,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
       data: {
         card_id: card.id,
         card_type: card.cardType,
-        user_turn_id: card.userTurnId,
+        work_run_id: card.workRunId,
         answers: card.answers ? parseJsonObject(card.answers) : null,
         status: card.status,
         message_id: messageId,
@@ -1615,9 +1626,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     const waiter = permissionWaiters.get(request.cardId);
     input.logger?.info({
       flowId: request.flowId,
-      userTurnId: waiter?.userTurnId ?? null,
+      workRunId: waiter?.workRunId ?? null,
       taskId: waiter?.scope.kind === "expert_task" ? waiter.scope.taskId : null,
-      agentSessionId: waiter && waiter.scope.kind !== "leader_user_turn" ? waiter.scope.agentSessionId : null,
+      agentSessionId: waiter && waiter.scope.kind !== "leader_work_run" ? waiter.scope.agentSessionId : null,
       cardId: request.cardId,
       outcome: request.outcome,
       commandSha256: waiter?.commandSha256 ?? null,
@@ -1642,9 +1653,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
             ? {
                 userDeniedCommand: {
                   scopeKind: waiter.scope.kind,
-                  userTurnId: waiter.userTurnId,
+                  workRunId: waiter.workRunId,
                   ...(waiter.scope.kind === "expert_task" ? { taskId: waiter.scope.taskId } : {}),
-                  ...(waiter.scope.kind !== "leader_user_turn" ? { agentSessionId: waiter.scope.agentSessionId } : {}),
+                  ...(waiter.scope.kind !== "leader_work_run" ? { agentSessionId: waiter.scope.agentSessionId } : {}),
                   cwd: waiter.cwd,
                   commandSha256: waiter.commandSha256,
                 },
@@ -1664,7 +1675,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     if (resolution.newlyResolved) {
       input.store.appendEventLog({
         flowId: request.flowId,
-        userTurnId: resolution.card.userTurnId,
+        workRunId: resolution.card.workRunId,
         eventType: approved ? "permission_card.resolved" : "permission_card.cancelled",
         payload: {
           card_id: request.cardId,
@@ -1679,12 +1690,12 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     return true;
   };
 
-  const permissionGate: RuntimePermissionGate = async ({ flowId, userTurnId, scope, request, permissionArgs }) => {
+  const permissionGate: RuntimePermissionGate = async ({ flowId, workRunId, scope, request, permissionArgs }) => {
     const command = typeof request.input.command === "string" ? request.input.command : null;
     const digest = command === null ? null : commandSha256(command);
     if (digest && input.store.hasUserDeniedPermissionCommand({
       flowId,
-      userTurnId,
+      workRunId,
       scopeKind: scope.kind,
       ...(scope.kind === "expert_task" ? { taskId: scope.taskId } : {}),
       cwd: permissionArgs.cwd,
@@ -1692,9 +1703,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     })) {
       input.logger?.info({
         flowId,
-        userTurnId,
+        workRunId,
         taskId: scope.kind === "expert_task" ? scope.taskId : null,
-        agentSessionId: scope.kind !== "leader_user_turn" ? scope.agentSessionId : null,
+        agentSessionId: scope.kind !== "leader_work_run" ? scope.agentSessionId : null,
         scopeKind: scope.kind,
         cwd: permissionArgs.cwd,
         commandSha256: digest,
@@ -1704,7 +1715,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     const cardId = `dc-perm-${randomUUID().slice(0, 12)}`;
     const card = input.store.createDecisionCard({
       flowId,
-      userTurnId,
+      workRunId,
       cardId,
       sessionId: request.context.toolUseId ?? "",
       cardType: "permission_confirmation",
@@ -1713,9 +1724,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     if (!card) {
       input.logger?.error({
         flowId,
-        userTurnId,
+        workRunId,
         taskId: scope.kind === "expert_task" ? scope.taskId : null,
-        agentSessionId: scope.kind !== "leader_user_turn" ? scope.agentSessionId : null,
+        agentSessionId: scope.kind !== "leader_work_run" ? scope.agentSessionId : null,
         scopeKind: scope.kind,
         commandSha256: digest,
       }, "permission card creation failed");
@@ -1724,9 +1735,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
 
     input.logger?.info({
       flowId,
-      userTurnId,
+      workRunId,
       taskId: scope.kind === "expert_task" ? scope.taskId : null,
-      agentSessionId: scope.kind !== "leader_user_turn" ? scope.agentSessionId : null,
+      agentSessionId: scope.kind !== "leader_work_run" ? scope.agentSessionId : null,
       scopeKind: scope.kind,
       cardId,
       cwd: permissionArgs.cwd,
@@ -1736,7 +1747,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     const decision = new Promise<PermissionWaitOutcome>((resolve) => {
       permissionWaiters.set(cardId, {
         flowId,
-        userTurnId,
+        workRunId,
         scope,
         cwd: permissionArgs.cwd,
         command,
@@ -1752,25 +1763,25 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
         card_type: card.cardType,
         status: card.status,
         questions: permissionQuestions(request, scope),
-        user_turn_id: card.userTurnId,
+        work_run_id: card.workRunId,
       },
     });
     const outcome = await decision;
     if (outcome === "user_denied") {
       return { behavior: "deny", message: userDeniedMessage(scope, command, false) };
     }
-    if (outcome === "user_turn_cancelled") {
-      return { behavior: "deny", message: "用户已停止当前 UserTurn，未确认的风险操作已拒绝。" };
+    if (outcome === "work_run_cancelled") {
+      return { behavior: "deny", message: "用户已停止当前 WorkRun，未确认的风险操作已拒绝。" };
     }
     if (outcome === "card_cancelled") {
-      return { behavior: "deny", message: "用户已取消当前风险确认，操作已拒绝；当前 Task 或 UserTurn 可继续。" };
+      return { behavior: "deny", message: "用户已取消当前风险确认，操作已拒绝；当前 Task 或 WorkRun 可继续。" };
     }
     if (outcome === "runtime_closed") {
       return { behavior: "deny", message: "Runtime 已关闭或重启，未确认的风险操作已拒绝。" };
     }
-    const currentTurn = input.store.getUserTurn(userTurnId);
-    if (!currentTurn || currentTurn.flowId !== flowId || currentTurn.status !== "active") {
-      return { behavior: "deny", message: "当前 UserTurn 已结束，操作已拒绝。" };
+    const currentTurn = input.store.getWorkRun(workRunId);
+    if (!currentTurn || currentTurn.flowId !== flowId || currentTurn.status !== "executing") {
+      return { behavior: "deny", message: "当前 WorkRun 已结束，操作已拒绝。" };
     }
     return checkPermission({
       ...permissionArgs,
@@ -1782,13 +1793,13 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
 
   const runTask = async (taskInput: ExpertTaskInput): Promise<void> => {
     let task = input.store.getTask(taskInput.taskId);
-    if (!task || task.userTurnId !== taskInput.userTurnId || task.flowId !== taskInput.flowId) {
+    if (!task || task.workRunId !== taskInput.workRunId || task.flowId !== taskInput.flowId) {
       throw new Error(`task not found: ${taskInput.taskId}`);
     }
     if (!task.expertId) throw new Error(`task has no assigned expert: ${taskInput.taskId}`);
-    const userTurn = input.store.getUserTurn(task.userTurnId);
-    if (!userTurn || userTurn.status !== "active") {
-      throw new Error(`task user turn is not active: ${task.userTurnId}`);
+    const workRun = input.store.getWorkRun(task.workRunId);
+    if (!workRun || workRun.status !== "executing") {
+      throw new Error(`task WorkRun is not executable: ${task.workRunId}`);
     }
     const expert = input.store.getExpert(task.expertId);
     if (!expert) throw new Error(`expert not found: ${task.expertId}`);
@@ -1839,9 +1850,9 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
   };
 
   const runConversation = async (conversationInput: ExpertConversationInput): Promise<void> => {
-    const userTurn = input.store.getUserTurn(conversationInput.userTurnId);
-    if (!userTurn || userTurn.flowId !== conversationInput.flowId || userTurn.status !== "active") {
-      throw new Error(`Expert conversation user turn is not active: ${conversationInput.userTurnId}`);
+    const workRun = conversationInput.workRunId ? input.store.getWorkRun(conversationInput.workRunId) : undefined;
+    if (workRun && (workRun.flowId !== conversationInput.flowId || workRun.status === "interrupted")) {
+      throw new Error(`Expert conversation WorkRun is not executable: ${conversationInput.workRunId}`);
     }
     const expert = input.store.getExpert(conversationInput.expertId);
     if (!expert) throw new Error(`expert not found: ${conversationInput.expertId}`);
@@ -1857,7 +1868,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     if (
       !agentSession
       || agentSession.flowId !== conversationInput.flowId
-      || agentSession.userTurnId !== conversationInput.userTurnId
+      || agentSession.workRunId !== (conversationInput.workRunId ?? null)
       || agentSession.taskId !== null
       || agentSession.expertId !== conversationInput.expertId
       || agentSession.flowExpertId !== conversationInput.flowExpertId
@@ -1868,7 +1879,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     try {
       await workerRegistry.enqueueConversation({
         flowId: conversationInput.flowId,
-        userTurnId: conversationInput.userTurnId,
+        workRunId: conversationInput.workRunId ?? null,
         expert,
         flowExpert,
         agentSession,
@@ -1880,18 +1891,19 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
       const failed = failureResult(runtimeError.message);
       input.store.updateAgentSessionStatus(agentSession.id, "failed");
       input.store.updateFlowExpertStatus(flowExpert.id, "failed");
-      await input.onConversationFinished?.({
-        flowId: conversationInput.flowId,
-        userTurnId: conversationInput.userTurnId,
-        agentSessionId: agentSession.id,
-        expertId: conversationInput.expertId,
-        status: "failed",
-        turnOutcome: failed.turn_outcome,
-        summary: failed.summary,
-        error: runtimeError.message,
-        artifactRefs: [],
-        completedAt: new Date().toISOString(),
-      });
+      await publishConversationFinished(
+        input,
+        {
+          flowId: conversationInput.flowId,
+          workRunId: conversationInput.workRunId ?? null,
+          expertId: conversationInput.expertId,
+          agentSessionId: agentSession.id,
+        },
+        flowExpert.id,
+        "failed",
+        failed,
+        runtimeError.message,
+      );
     }
   };
 
@@ -1904,13 +1916,13 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     async cancelTask(taskInput) {
       return workerRegistry.cancelTask(taskInput);
     },
-    cancelUserTurn(input) {
+    cancelWorkRun(input) {
       for (const [cardId, waiter] of permissionWaiters) {
-        if (waiter.flowId === input.flowId && waiter.userTurnId === input.userTurnId) {
-          void settlePermissionCard({ flowId: input.flowId, cardId, outcome: "user_turn_cancelled" });
+        if (waiter.flowId === input.flowId && waiter.workRunId === input.workRunId) {
+          void settlePermissionCard({ flowId: input.flowId, cardId, outcome: "work_run_cancelled" });
         }
       }
-      return workerRegistry.cancelUserTurn(input);
+      return workerRegistry.cancelWorkRun(input);
     },
     confirmPermission: permissionGate,
     resolvePermissionCard(input) {
@@ -1947,7 +1959,7 @@ async function publishFinished(
   const completion = {
     kind: "expert_result" as const,
     flow_id: task.flowId,
-    user_turn_id: task.userTurnId,
+    work_run_id: task.workRunId,
     task_id: task.id,
     agent_session_id: agentSessionId,
     flow_expert_id: flowExpertId,
@@ -1966,15 +1978,19 @@ async function publishFinished(
 
   input.store.appendEventLog({
     flowId: task.flowId,
-    userTurnId: task.userTurnId,
+    workRunId: task.workRunId,
     taskId: task.id,
     agentSessionId,
     eventType: "agent_session.completion",
     payload: completion,
   });
+  if (status !== "cancelled") {
+    const agentSession = input.store.getAgentSession(agentSessionId);
+    if (agentSession) await publishAgentSessionEvent(input, agentSession);
+  }
   const leaderCompletion = Promise.resolve(input.onTaskFinished?.({
     flowId: completion.flow_id,
-    userTurnId: completion.user_turn_id,
+    workRunId: completion.work_run_id,
     taskId: completion.task_id,
     agentSessionId: completion.agent_session_id,
     expertId: completion.expert_id,
@@ -1991,7 +2007,7 @@ async function publishFinished(
     flow_id: task.flowId,
     data: {
       task_id: task.id,
-      user_turn_id: task.userTurnId,
+      work_run_id: task.workRunId,
       expert_id: task.expertId,
       flow_expert_id: flowExpertId,
       agent_session_id: agentSessionId,
@@ -2025,7 +2041,7 @@ async function publishFinished(
 
 async function publishConversationFinished(
   input: CreateExpertRuntimeInput,
-  turn: Pick<FlowExpertTurn, "flowId" | "userTurnId" | "expertId" | "agentSessionId">,
+  turn: Pick<FlowExpertTurn, "flowId" | "workRunId" | "expertId" | "agentSessionId">,
   flowExpertId: string,
   status: "completed" | "failed" | "cancelled",
   result: ExpertResult,
@@ -2035,7 +2051,7 @@ async function publishConversationFinished(
   const completion = {
     kind: "expert_message" as const,
     flow_id: turn.flowId,
-    user_turn_id: turn.userTurnId,
+    work_run_id: turn.workRunId ?? undefined,
     agent_session_id: turn.agentSessionId,
     flow_expert_id: flowExpertId,
     expert_id: turn.expertId,
@@ -2048,24 +2064,16 @@ async function publishConversationFinished(
   };
   input.store.appendEventLog({
     flowId: turn.flowId,
-    userTurnId: turn.userTurnId,
+    workRunId: turn.workRunId,
     taskId: null,
     agentSessionId: turn.agentSessionId,
     eventType: "agent_session.conversation_completion",
     payload: completion,
   });
-  await input.eventBus.publish(turn.flowId, {
-    type: "session:event",
-    flow_id: turn.flowId,
-    data: {
-      agent_session_id: turn.agentSessionId,
-      user_turn_id: turn.userTurnId,
-      task_id: null,
-      expert_id: turn.expertId,
-      flow_expert_id: flowExpertId,
-      status,
-    },
-  });
+  if (status !== "cancelled") {
+    const agentSession = input.store.getAgentSession(turn.agentSessionId);
+    if (agentSession) await publishAgentSessionEvent(input, agentSession);
+  }
   await input.eventBus.publish(turn.flowId, {
     type: "flow_expert:event",
     flow_id: turn.flowId,
@@ -2079,7 +2087,7 @@ async function publishConversationFinished(
   });
   await input.onConversationFinished?.({
     flowId: completion.flow_id,
-    userTurnId: completion.user_turn_id,
+    workRunId: completion.work_run_id,
     agentSessionId: completion.agent_session_id,
     expertId: completion.expert_id,
     status: completion.status,
@@ -2088,5 +2096,24 @@ async function publishConversationFinished(
     error: completion.error,
     artifactRefs: completion.artifact_refs,
     completedAt: completion.completed_at,
+  });
+}
+
+type AgentSessionRow = NonNullable<ReturnType<Store["getAgentSession"]>>;
+
+async function publishAgentSessionEvent(input: Pick<CreateExpertRuntimeInput, "eventBus">, session: AgentSessionRow) {
+  await input.eventBus.publish(session.flowId, {
+    type: "session:event",
+    flow_id: session.flowId,
+    data: {
+      agent_session_id: session.id,
+      work_run_id: session.workRunId,
+      task_id: session.taskId,
+      expert_id: session.expertId,
+      flow_expert_id: session.flowExpertId,
+      session_id: session.sessionId,
+      display_name: session.displayName,
+      status: session.status,
+    },
   });
 }

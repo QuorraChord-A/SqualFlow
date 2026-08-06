@@ -22,7 +22,7 @@ export function createOrchestrationScheduler(input: {
       data: {
         plan_run_id: run.id,
         plan_revision_id: run.planRevisionId,
-        user_turn_id: run.userTurnId,
+        work_run_id: run.workRunId,
         status: run.status,
       },
     });

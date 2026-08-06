@@ -554,7 +554,16 @@ function replayPending(state: TranscriptState): TranscriptState {
     next = reconcileCommittedEvent(next, event);
     cursor += 1;
   }
-  return { ...next, cursor, pendingEvents };
+  const nextPendingCursor = pendingEvents.size > 0
+    ? Math.min(...pendingEvents.keys())
+    : null;
+  const hasCursorGap = nextPendingCursor !== null && nextPendingCursor > cursor + 1;
+  return {
+    ...next,
+    cursor,
+    pendingEvents,
+    needsResync: next.needsResync || hasCursorGap,
+  };
 }
 
 function applyEvents(state: TranscriptState, events: TranscriptCommittedEvent[]): TranscriptState {

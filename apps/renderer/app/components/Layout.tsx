@@ -819,7 +819,8 @@ export default function Layout() {
                         orchestrationPlans={dashboard.orchestrationPlans}
                         riskMode={dashboard.riskMode}
                         planApproval={dashboard.planApproval}
-                        userTurns={dashboard.userTurns}
+                        workRuns={dashboard.workRuns}
+                        agentSessions={agentSessions}
                         onOpenSpecPreview={openSpecPreview}
                         onOpenPlan={openOrchestrationPlan}
                         review={workbench.review}
@@ -902,7 +903,8 @@ export default function Layout() {
             orchestrationPlans={dashboard.orchestrationPlans}
             riskMode={dashboard.riskMode}
             planApproval={dashboard.planApproval}
-            userTurns={dashboard.userTurns}
+            workRuns={dashboard.workRuns}
+            agentSessions={agentSessions}
             onOpenSpecPreview={openSpecPreview}
             onOpenPlan={openOrchestrationPlan}
             review={workbench.review}

@@ -24,10 +24,10 @@ describe("canonical transcript persistence", () => {
     const store = createStore(":memory:");
     store.migrate();
     const flow = store.createFlow({ id: "flow-restart", workspaceId: "ws-default", name: "Restart", description: "", projectId: null });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-user-restart" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-user-restart" })!;
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       expertId: "exp-leader",
       sessionId: "sdk-session-restart",
       status: "streaming",
@@ -38,13 +38,13 @@ describe("canonical transcript persistence", () => {
     journal.record(flow.id, leader.sessionId!, { type: "text-delta", id: "text-restart", delta: "最后已提交内容" }, leader.id, leader.id);
 
     expect(store.sealActiveTranscriptMessages()).toBe(1);
-    expect(store.expireStaleLeaderRuntimeState()).toEqual({
+    expect(store.interruptStaleLeaderSessions()).toEqual({
       interruptedLeaderSessions: 1,
-      finalizedUserTurns: 1,
+      finalizedWorkRuns: 0,
     });
 
     expect(store.getAgentSession(leader.id)?.status).toBe("interrupted");
-    expect(store.getUserTurn(turn.id)?.status).toBe("failed");
+    expect(store.getWorkRun(turn.id)?.status).toBe("ready");
     expect(store.getFlow(flow.id)?.status).toBe("idle");
     expect(journal.getTranscriptMessages(flow.id, leader.id).map((message) => message.content)).toEqual([
       "重启前消息",

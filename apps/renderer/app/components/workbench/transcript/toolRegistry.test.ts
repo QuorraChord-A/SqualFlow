@@ -512,7 +512,7 @@ describe("toolRegistry", () => {
               ok: false,
               error: {
                 code: "BOOTSTRAP_LIMIT",
-                message: "dispatch requires a task in the current UserTurn",
+                message: "dispatch requires a task in the current WorkRun",
               },
             }),
           },
@@ -525,7 +525,7 @@ describe("toolRegistry", () => {
           title: "exp-backend",
           detailRows: expect.arrayContaining([
             { label: "错误码", value: "BOOTSTRAP_LIMIT" },
-            { label: "错误", value: "dispatch requires a task in the current UserTurn" },
+            { label: "错误", value: "dispatch requires a task in the current WorkRun" },
           ]),
         });
       });

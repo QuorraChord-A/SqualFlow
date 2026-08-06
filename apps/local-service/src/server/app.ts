@@ -17,8 +17,8 @@ import {
 } from "../runtime/expertRuntime.js";
 import { createAgentDispatcher } from "../runtime/agentDispatcher.js";
 import { createOrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
-import { listUserTurnsNeedingRecovery } from "../runtime/userTurnLifecycle.js";
-import { pauseUserTurnIfAwaitingPlanFeedback, publishUserTurnEvent } from "../domain/userTurn.js";
+import { pauseWorkRunIfAwaitingPlanFeedback, publishWorkRunEvent } from "../domain/workRun.js";
+import { leaderTranscriptChannelId } from "../domain/transcriptChannels.js";
 import { ContextCompactionState } from "../runtime/contextCompactionState.js";
 import type { AgentRuntimeAdapterFactory } from "../runtime/adapters/factory.js";
 import { McpBridgeRegistry, registerMcpBridgeRoutes } from "../mcp/mcpBridgeRegistry.js";
@@ -27,6 +27,7 @@ import { registerDesktopWsGateway } from "./desktopWsGateway.js";
 import { registerHttpRoutes } from "./httpRoutes.js";
 import {
   recoverPendingDecisionCardLeaderInputs,
+  publishInterruptedSessions,
   registerWsGateway,
   type WsConnection,
 } from "./wsGateway.js";
@@ -57,26 +58,27 @@ export async function routeExpertResultToLeader(input: {
   event: ExpertTaskFinishedEvent;
 }) {
   const { event } = input;
-  const leaderAgentSession = input.store
-    .listAgentSessions(event.flowId)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
   const flowLeaderSessionId = input.store.getFlow(event.flowId)?.leaderSessionId ?? null;
-  const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
-    ? flowLeaderSessionId
-    : leaderAgentSession?.sessionId ?? null;
-  const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
-  const userTurn = input.store.getUserTurn(event.userTurnId);
+  const workRun = input.store.getWorkRun(event.workRunId);
   if (
-    !leaderAgentSession
-    || !leaderSessionId
-    || !userTurn
-    || ["completed", "failed", "cancelled"].includes(userTurn.status)
+    !workRun
+    || !workRun.executionStartedAt
+    || !["executing", "waiting_user"].includes(workRun.status)
   ) return false;
+  const leaderAgentSession = input.store.createAgentSession({
+    flowId: event.flowId,
+    workRunId: event.workRunId,
+    expertId: "exp-leader",
+    sessionId: flowLeaderSessionId,
+    displayName: "Leader",
+    status: "queued",
+  });
+  if (!leaderAgentSession) return false;
 
   await input.leaderRuntime.runLeaderTurn({
     flowId: event.flowId,
     kind: "expert_result",
-    userTurnId: event.userTurnId,
+    workRunId: event.workRunId,
     expertResult: {
       taskId: event.taskId,
       agentSessionId: event.agentSessionId,
@@ -90,8 +92,8 @@ export async function routeExpertResultToLeader(input: {
       completedAt: event.completedAt,
     },
     leaderAgentSessionId: leaderAgentSession.id,
-    leaderSessionId,
-    resumeSessionId: providerLeaderSessionId ?? undefined,
+    leaderSessionId: leaderTranscriptChannelId(event.flowId),
+    resumeSessionId: flowLeaderSessionId ?? undefined,
   });
   return true;
 }
@@ -102,26 +104,23 @@ export async function routeExpertMessageToLeader(input: {
   event: ExpertConversationFinishedEvent;
 }) {
   const { event } = input;
-  const leaderAgentSession = input.store
-    .listAgentSessions(event.flowId)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
   const flowLeaderSessionId = input.store.getFlow(event.flowId)?.leaderSessionId ?? null;
-  const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
-    ? flowLeaderSessionId
-    : leaderAgentSession?.sessionId ?? null;
-  const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
-  const userTurn = input.store.getUserTurn(event.userTurnId);
-  if (
-    !leaderAgentSession
-    || !leaderSessionId
-    || !userTurn
-    || ["completed", "failed", "cancelled"].includes(userTurn.status)
-  ) return false;
+  const workRun = event.workRunId ? input.store.getWorkRun(event.workRunId) : undefined;
+  if (workRun && (!workRun.executionStartedAt || workRun.status !== "executing")) return false;
+  const leaderAgentSession = input.store.createAgentSession({
+    flowId: event.flowId,
+    workRunId: event.workRunId ?? null,
+    expertId: "exp-leader",
+    sessionId: flowLeaderSessionId,
+    displayName: "Leader",
+    status: "queued",
+  });
+  if (!leaderAgentSession) return false;
 
   await input.leaderRuntime.runLeaderTurn({
     flowId: event.flowId,
     kind: "expert_message",
-    userTurnId: event.userTurnId,
+    workRunId: event.workRunId ?? undefined,
     expertMessage: {
       agentSessionId: event.agentSessionId,
       expertId: event.expertId,
@@ -133,8 +132,8 @@ export async function routeExpertMessageToLeader(input: {
       completedAt: event.completedAt,
     },
     leaderAgentSessionId: leaderAgentSession.id,
-    leaderSessionId,
-    resumeSessionId: providerLeaderSessionId ?? undefined,
+    leaderSessionId: leaderTranscriptChannelId(event.flowId),
+    resumeSessionId: flowLeaderSessionId ?? undefined,
   });
   return true;
 }
@@ -146,7 +145,7 @@ export function createApp(options: CreateAppOptions = {}) {
   const store = options.store ?? createStore(databasePath!);
   store.migrate({ beforeRuntimeMessageProtocolReset: clearNativeRuntimeSessionFiles });
   const sealedTranscriptMessageCount = store.sealActiveTranscriptMessages();
-  const staleRuntimeRecovery = store.expireStaleLeaderRuntimeState();
+  const staleLeaderSessions = store.interruptStaleLeaderSessions();
   app.log.info({
     event: "backend_process_started",
     runId,
@@ -154,7 +153,7 @@ export function createApp(options: CreateAppOptions = {}) {
     pid: process.pid,
     databasePath,
     sealedTranscriptMessageCount,
-    ...staleRuntimeRecovery,
+    ...staleLeaderSessions,
   }, "SquadFlow backend process started");
   const defaultProjectPath = path.join(config.defaultProjectRoot, DEFAULT_PROJECT_DIRECTORY_NAME);
   fs.mkdirSync(defaultProjectPath, { recursive: true });
@@ -215,26 +214,26 @@ export function createApp(options: CreateAppOptions = {}) {
     } catch (error) {
       app.log.error({
         flowId: event.flowId,
-        userTurnId: event.userTurnId,
+        workRunId: event.workRunId,
         taskId: event.taskId,
         ...errorDiagnostic(error),
       }, "failed to deliver Expert result to Leader");
-      expertRuntime?.cancelUserTurn({ flowId: event.flowId, userTurnId: event.userTurnId });
+      expertRuntime?.cancelWorkRun({ flowId: event.flowId, workRunId: event.workRunId });
       // A delivery/provider failure is not an actor-authored Task cancellation.
-      // Preserve Task state; only the execution transport/UserTurn is stopped.
+      // Preserve Task state; only the execution transport/WorkRun is stopped.
       for (const session of store.listAgentSessions(event.flowId)) {
-        if (session.userTurnId === event.userTurnId && ['queued', 'streaming'].includes(session.status)) {
+        if (session.workRunId === event.workRunId && ['queued', 'streaming'].includes(session.status)) {
           store.updateAgentSessionStatus(session.id, 'interrupted');
         }
       }
-      store.cancelUserTurnPendingActions(event.userTurnId);
-      const failedTurn = store.failUserTurn(event.userTurnId, "failed");
-      if (failedTurn) await publishUserTurnEvent(eventBus, failedTurn);
+      store.cancelWorkRunPendingActions(event.workRunId);
+      const failedTurn = store.failWorkRun(event.workRunId, "failed");
+      if (failedTurn) await publishWorkRunEvent(eventBus, failedTurn);
       app.log.error({
         flowId: event.flowId,
-        userTurnId: event.userTurnId,
+        workRunId: event.workRunId,
         ...errorDiagnostic(error),
-      }, "UserTurn failed after Leader delivery error");
+      }, "WorkRun failed after Leader delivery error");
     }
   };
   const deliverExpertMessageToLeader = async (event: ExpertConversationFinishedEvent) => {
@@ -243,13 +242,15 @@ export function createApp(options: CreateAppOptions = {}) {
     } catch (error) {
       app.log.error({
         flowId: event.flowId,
-        userTurnId: event.userTurnId,
+        workRunId: event.workRunId,
         agentSessionId: event.agentSessionId,
         ...errorDiagnostic(error),
       }, "failed to deliver taskless Expert message to Leader");
-      expertRuntime?.cancelUserTurn({ flowId: event.flowId, userTurnId: event.userTurnId });
-      const failedTurn = store.failUserTurn(event.userTurnId, "failed");
-      if (failedTurn) await publishUserTurnEvent(eventBus, failedTurn);
+      if (event.workRunId) {
+        expertRuntime?.cancelWorkRun({ flowId: event.flowId, workRunId: event.workRunId });
+        const failedTurn = store.failWorkRun(event.workRunId, "failed");
+        if (failedTurn) await publishWorkRunEvent(eventBus, failedTurn);
+      }
     }
   };
   expertRuntime = createExpertRuntime({
@@ -268,7 +269,7 @@ export function createApp(options: CreateAppOptions = {}) {
         flow_id: flowId,
         data: {
           task_id: task.task_id,
-          user_turn_id: task.user_turn_id,
+          work_run_id: task.work_run_id,
           expert_id: task.assignment.expert_id,
           flow_expert_id: task.assignment.flow_expert_id,
           status: task.status,
@@ -297,8 +298,19 @@ export function createApp(options: CreateAppOptions = {}) {
     logger: app.log,
     orchestrationScheduler,
     permissionGate: expertRuntime.confirmPermission,
-    onUserTurnFatal: ({ flowId, userTurnId }) => {
-      expertRuntime.cancelUserTurn({ flowId, userTurnId });
+    onWorkRunFatal: ({ flowId, workRunId }) => {
+      expertRuntime.cancelWorkRun({ flowId, workRunId });
+    },
+    onWorkRunAction: ({ flowId, workRunId, action }) => {
+      if (action === "interrupt" || action === "cancel") {
+        expertRuntime.cancelWorkRun({ flowId, workRunId });
+        void publishInterruptedSessions(
+          { store, eventBus, chatJournal },
+          flowId,
+          undefined,
+          { workRunId, includeLeader: false },
+        );
+      }
     },
   });
 
@@ -333,58 +345,16 @@ export function createApp(options: CreateAppOptions = {}) {
     app.log.error({ event: "orchestration_recovery_failed", runId, ...errorDiagnostic(error) }, "orchestration recovery failed");
   });
 
-  const recoverableExpertWork = store.recoverFlowExpertRuntimeWork();
-  const recoverableUserTurns = listUserTurnsNeedingRecovery(store);
+  const staleExpertSessions = store.interruptStaleExpertSessions();
   app.log.info({
-    event: "runtime_recovery_scheduled",
+    event: "stale_runtime_sessions_interrupted",
     runId,
-    expertTaskCount: recoverableExpertWork.length,
-    leaderUserTurnCount: recoverableUserTurns.length,
-  }, "runtime recovery work scheduled");
-
-  for (const item of recoverableExpertWork) {
-    void expertRuntime.runTask({
-      flowId: item.flowId,
-      userTurnId: item.userTurnId,
-      taskId: item.taskId,
-      flowExpertId: item.flowExpertId,
-      agentSessionId: item.agentSessionId,
-      prompt: item.prompt,
-      resumeSessionId: item.resumeSessionId,
-    }).catch((error) => {
-      app.log.error({
-        flowId: item.flowId,
-        userTurnId: item.userTurnId,
-        taskId: item.taskId,
-        ...errorDiagnostic(error),
-      }, "failed to recover Flow Expert task");
-    });
-  }
+    ...staleExpertSessions,
+  }, "stale runtime sessions interrupted");
 
   for (const flow of store.listFlows()) {
-    const openTurn = store.getOpenUserTurn(flow.id);
-    if (openTurn?.status === "active") pauseUserTurnIfAwaitingPlanFeedback(store, openTurn.id);
-  }
-
-  for (const turn of recoverableUserTurns) {
-    const leaderAgentSession = store.listAgentSessions(turn.flowId)
-      .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-    const flowLeaderSessionId = store.getFlow(turn.flowId)?.leaderSessionId ?? null;
-    const providerLeaderSessionId = leaderAgentSession?.sessionId && flowLeaderSessionId !== leaderAgentSession.id
-      ? flowLeaderSessionId
-      : leaderAgentSession?.sessionId ?? null;
-    const leaderSessionId = providerLeaderSessionId ?? leaderAgentSession?.id ?? "";
-    if (!leaderAgentSession || !leaderSessionId) continue;
-    void leaderRuntime.runLeaderTurn({
-      flowId: turn.flowId,
-      kind: "user_turn_recovery",
-      userTurnId: turn.id,
-      leaderAgentSessionId: leaderAgentSession.id,
-      leaderSessionId,
-      resumeSessionId: providerLeaderSessionId ?? undefined,
-    }).catch((error) => {
-      app.log.error({ flowId: turn.flowId, userTurnId: turn.id, ...errorDiagnostic(error) }, "failed to recover UserTurn Leader work");
-    });
+    const openTurn = store.getOpenWorkRun(flow.id);
+    if (openTurn?.status === "executing") pauseWorkRunIfAwaitingPlanFeedback(store, openTurn.id);
   }
 
   void recoverPendingDecisionCardLeaderInputs({

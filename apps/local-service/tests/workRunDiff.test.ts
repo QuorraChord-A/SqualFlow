@@ -4,11 +4,11 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  captureUserTurnBaseline,
-  captureUserTurnBaselineAsync,
-  summarizeUserTurnDiff,
-  summarizeUserTurnDiffAsync,
-} from "../src/runtime/userTurnDiff.js";
+  captureWorkRunBaseline,
+  captureWorkRunBaselineAsync,
+  summarizeWorkRunDiff,
+  summarizeWorkRunDiffAsync,
+} from "../src/runtime/workRunDiff.js";
 
 const dirs: string[] = [];
 
@@ -22,15 +22,15 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-describe("UserTurn diff capture", () => {
+describe("WorkRun diff capture", () => {
   it("captures changed files from a hash baseline", () => {
     const root = tempDir();
     fs.writeFileSync(path.join(root, "hello.txt"), "hello");
-    const baseline = captureUserTurnBaseline(root);
+    const baseline = captureWorkRunBaseline(root);
     fs.writeFileSync(path.join(root, "hello.txt"), "hello world");
     fs.writeFileSync(path.join(root, "new.txt"), "new");
 
-    const summary = summarizeUserTurnDiff(root, baseline);
+    const summary = summarizeWorkRunDiff(root, baseline);
 
     expect(summary.changedFiles.map((file) => file.path).sort()).toEqual(["hello.txt", "new.txt"]);
     expect(summary.text).toContain("hello.txt");
@@ -41,10 +41,10 @@ describe("UserTurn diff capture", () => {
     const root = tempDir();
     fs.mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
     fs.writeFileSync(path.join(root, "node_modules", "pkg", "index.js"), "old");
-    const baseline = captureUserTurnBaseline(root);
+    const baseline = captureWorkRunBaseline(root);
     fs.writeFileSync(path.join(root, "node_modules", "pkg", "index.js"), "new");
 
-    expect(summarizeUserTurnDiff(root, baseline).changedFiles).toEqual([]);
+    expect(summarizeWorkRunDiff(root, baseline).changedFiles).toEqual([]);
   });
 
   it("uses a git status fast path for Expert turn diffs", async () => {
@@ -55,12 +55,12 @@ describe("UserTurn diff capture", () => {
     execFileSync("git", ["-C", root, "add", "."], { stdio: "ignore" });
     execFileSync("git", ["-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial"], { stdio: "ignore" });
 
-    const baseline = await captureUserTurnBaselineAsync(root);
+    const baseline = await captureWorkRunBaselineAsync(root);
     fs.writeFileSync(path.join(root, "one.txt"), "one changed\n");
     fs.writeFileSync(path.join(root, "two.txt"), "two changed\n");
     fs.writeFileSync(path.join(root, "three.txt"), "three\n");
 
-    const summary = await summarizeUserTurnDiffAsync(root, baseline);
+    const summary = await summarizeWorkRunDiffAsync(root, baseline);
 
     expect(baseline).toEqual(expect.objectContaining({ kind: "git", strategy: "status" }));
     expect(summary.changedFiles).toEqual([
@@ -80,10 +80,10 @@ describe("UserTurn diff capture", () => {
     fs.writeFileSync(path.join(root, "changed.txt"), "dirty before baseline\n");
     fs.writeFileSync(path.join(root, "untouched.txt"), "dirty before baseline\n");
 
-    const baseline = await captureUserTurnBaselineAsync(root);
+    const baseline = await captureWorkRunBaselineAsync(root);
     fs.writeFileSync(path.join(root, "changed.txt"), "dirty after baseline\n");
 
-    const summary = await summarizeUserTurnDiffAsync(root, baseline);
+    const summary = await summarizeWorkRunDiffAsync(root, baseline);
 
     expect(baseline).toEqual(expect.objectContaining({ kind: "git", strategy: "status" }));
     expect(summary.changedFiles).toEqual([{ path: "changed.txt", status: "modified" }]);
@@ -92,11 +92,11 @@ describe("UserTurn diff capture", () => {
   it("keeps non-git async fallback behavior aligned with the hash baseline", async () => {
     const root = tempDir();
     fs.writeFileSync(path.join(root, "hello.txt"), "hello");
-    const baseline = await captureUserTurnBaselineAsync(root);
+    const baseline = await captureWorkRunBaselineAsync(root);
     fs.writeFileSync(path.join(root, "hello.txt"), "hello world");
     fs.writeFileSync(path.join(root, "new.txt"), "new");
 
-    const summary = await summarizeUserTurnDiffAsync(root, baseline);
+    const summary = await summarizeWorkRunDiffAsync(root, baseline);
 
     expect(summary.changedFiles.map((file) => file.path).sort()).toEqual(["hello.txt", "new.txt"]);
     expect(summary.filesChangedSkipped).toBeUndefined();
@@ -108,9 +108,9 @@ describe("UserTurn diff capture", () => {
       fs.writeFileSync(path.join(root, `file-${index}.txt`), "");
     }
 
-    const baseline = await captureUserTurnBaselineAsync(root);
+    const baseline = await captureWorkRunBaselineAsync(root);
     fs.writeFileSync(path.join(root, "changed.txt"), "changed");
-    const summary = await summarizeUserTurnDiffAsync(root, baseline);
+    const summary = await summarizeWorkRunDiffAsync(root, baseline);
 
     expect(baseline).toEqual(expect.objectContaining({ kind: "hash", skipped: true }));
     expect(summary).toEqual({ changedFiles: [], text: "", filesChangedSkipped: true });

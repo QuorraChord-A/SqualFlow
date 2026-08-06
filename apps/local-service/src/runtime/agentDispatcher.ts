@@ -7,6 +7,8 @@ import type {
   ExpertRuntime,
   ExpertTaskFinishedEvent,
 } from "./expertRuntime.js";
+import { publishWorkRunEvent } from "../domain/workRun.js";
+import { captureWorkRunBaseline } from "./workRunDiff.js";
 
 export type AgentDispatcher = {
   dispatchAgent: (input: {
@@ -21,10 +23,10 @@ export type AgentDispatcher = {
     status: string;
     expert_id?: string;
     task_id?: string | null;
-    user_turn_id?: string | null;
+    work_run_id?: string | null;
     task?: {
       task_id: string;
-      user_turn_id: string;
+      work_run_id: string;
       subject: string;
       description: string;
       active_form: string;
@@ -39,7 +41,7 @@ export type AgentDispatcher = {
   }>;
   sendMessage: (input: {
     flowId: string;
-    userTurnId: string;
+    workRunId?: string;
     expertId: string;
     content: string;
     summary?: string;
@@ -50,7 +52,7 @@ export type AgentDispatcher = {
   }>;
   cancelAgent: (input: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     taskId: string;
     agentSessionId: string;
   }) => Promise<{
@@ -84,7 +86,7 @@ async function recordLeaderInputAudit(
   const messageId = `msg-leader-${Date.now()}-${randomUUID().slice(0, 6)}`;
   store.appendEventLog({
     flowId: session.flowId,
-    userTurnId: session.userTurnId,
+    workRunId: session.workRunId,
     taskId: session.taskId,
     agentSessionId: session.id,
     eventType: "agent_session.leader_message",
@@ -124,9 +126,9 @@ export function createAgentDispatcher(input: {
         return { agent_session_id: "", status: "failed", error: "expert does not match task expert" };
       }
 
-      const userTurn = input.store.getUserTurn(task.userTurnId);
-      if (!userTurn || userTurn.status !== "active") {
-        return { agent_session_id: "", status: "failed", error: "task user turn is not active" };
+      const workRun = input.store.getWorkRun(task.workRunId);
+      if (!workRun || !["ready", "executing"].includes(workRun.status)) {
+        return { agent_session_id: "", status: "failed", error: workRun?.status === "interrupted" ? "WORK_RUN_INTERRUPTED" : "WORK_RUN_NOT_EXECUTABLE" };
       }
       if (!input.store.listTaskDependencies(task.id).every((dependencyId) =>
         input.store.getTask(dependencyId)?.status === "completed"
@@ -142,7 +144,7 @@ export function createAgentDispatcher(input: {
       }
       if (taskMetadata.resourceKeys.length > 0) {
         const activeStatuses = new Set(["in_progress"]);
-        const conflicting = input.store.listUserTurnTasks(task.userTurnId).some((candidate) =>
+        const conflicting = input.store.listWorkRunTasks(task.workRunId).some((candidate) =>
           candidate.id !== task.id
           && activeStatuses.has(candidate.status)
           && parseTaskMetadata(candidate.metadataJson).resourceKeys.some((key) => taskMetadata.resourceKeys.includes(key))
@@ -189,6 +191,21 @@ export function createAgentDispatcher(input: {
         flowId: dispatch.flowId,
         expertId: dispatch.expertId,
       });
+      if (workRun.status === "ready" && workRun.workRootPath) {
+        let snapshot: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(workRun.inputSnapshotJson) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) snapshot = parsed as Record<string, unknown>;
+        } catch {
+          snapshot = {};
+        }
+        if (!("diff_baseline" in snapshot)) {
+          input.store.updateWorkRunInputSnapshot(workRun.id, JSON.stringify({
+            ...snapshot,
+            diff_baseline: captureWorkRunBaseline(workRun.workRootPath),
+          }));
+        }
+      }
       const started = input.store.startAgentDispatch({
         flowId: dispatch.flowId,
         taskId: task.id,
@@ -202,12 +219,14 @@ export function createAgentDispatcher(input: {
       }
 
       const { agentSession, task: startedTask, flowExpert: updatedFlowExpert } = started;
+      const executingWorkRun = input.store.getWorkRun(startedTask.workRunId);
+      if (executingWorkRun) await publishWorkRunEvent(input.eventBus, executingWorkRun);
       await input.eventBus.publish(dispatch.flowId, {
         type: "task:event",
         flow_id: dispatch.flowId,
         data: {
           task_id: startedTask.id,
-          user_turn_id: startedTask.userTurnId,
+          work_run_id: startedTask.workRunId,
           expert_id: startedTask.expertId,
           flow_expert_id: startedTask.flowExpertId,
           status: startedTask.status,
@@ -219,7 +238,7 @@ export function createAgentDispatcher(input: {
         data: {
           event: "created",
           agent_session_id: agentSession.id,
-          user_turn_id: agentSession.userTurnId,
+          work_run_id: agentSession.workRunId,
           task_id: agentSession.taskId,
           expert_id: agentSession.expertId,
           flow_expert_id: agentSession.flowExpertId,
@@ -247,7 +266,7 @@ export function createAgentDispatcher(input: {
 
       void input.expertRuntime.runTask({
         flowId: dispatch.flowId,
-        userTurnId: startedTask.userTurnId,
+        workRunId: startedTask.workRunId,
         taskId: startedTask.id,
         flowExpertId: flowExpert.id,
         agentSessionId: agentSession.id,
@@ -262,7 +281,7 @@ export function createAgentDispatcher(input: {
           flow_id: dispatch.flowId,
           data: {
             task_id: startedTask.id,
-            user_turn_id: startedTask.userTurnId,
+            work_run_id: startedTask.workRunId,
             expert_id: startedTask.expertId,
             flow_expert_id: startedTask.flowExpertId,
             agent_session_id: agentSession.id,
@@ -273,7 +292,7 @@ export function createAgentDispatcher(input: {
         });
         await input.onTaskFinished?.({
           flowId: dispatch.flowId,
-          userTurnId: startedTask.userTurnId,
+          workRunId: startedTask.workRunId,
           taskId: startedTask.id,
           agentSessionId: agentSession.id,
           expertId: dispatch.expertId,
@@ -293,10 +312,10 @@ export function createAgentDispatcher(input: {
         status: agentSession.status,
         expert_id: agentSession.expertId,
         task_id: agentSession.taskId,
-        user_turn_id: agentSession.userTurnId,
+        work_run_id: agentSession.workRunId,
         task: {
           task_id: startedTask.id,
-          user_turn_id: startedTask.userTurnId,
+          work_run_id: startedTask.workRunId,
           subject: startedTask.title,
           description: startedTask.description,
           active_form: startedTask.activeForm,
@@ -312,12 +331,12 @@ export function createAgentDispatcher(input: {
 
     async sendMessage(message) {
       const flow = input.store.getFlow(message.flowId);
-      const userTurn = input.store.getUserTurn(message.userTurnId);
       const expert = input.store.getExpert(message.expertId);
-      if (!flow || !userTurn || userTurn.flowId !== message.flowId || userTurn.status !== "active") {
+      const workRun = message.workRunId ? input.store.getWorkRun(message.workRunId) : undefined;
+      if (!flow || (workRun && (workRun.flowId !== message.flowId || workRun.status === "interrupted"))) {
         return {
           accepted: false,
-          error: { code: "USER_TURN_NOT_ACTIVE", message: "Expert conversation requires an active UserTurn" },
+          error: { code: "WORK_RUN_NOT_EXECUTABLE", message: "Expert conversation is not available for this WorkRun" },
         };
       }
       if (!expert || expert.role === "leader") {
@@ -374,7 +393,7 @@ export function createAgentDispatcher(input: {
       }
       const agentSession = input.store.createAgentSession({
         flowId: message.flowId,
-        userTurnId: message.userTurnId,
+        workRunId: message.workRunId ?? null,
         taskId: null,
         expertId: message.expertId,
         flowExpertId: flowExpert.id,
@@ -396,7 +415,7 @@ export function createAgentDispatcher(input: {
         data: {
           event: "created",
           agent_session_id: agentSession.id,
-          user_turn_id: agentSession.userTurnId,
+          work_run_id: agentSession.workRunId,
           task_id: null,
           expert_id: agentSession.expertId,
           flow_expert_id: agentSession.flowExpertId,
@@ -419,7 +438,7 @@ export function createAgentDispatcher(input: {
       const messageId = await recordLeaderInputAudit(input.store, agentSession, message.summary);
       void input.expertRuntime.runConversation({
         flowId: message.flowId,
-        userTurnId: message.userTurnId,
+        workRunId: message.workRunId,
         flowExpertId: flowExpert.id,
         agentSessionId: agentSession.id,
         expertId: message.expertId,
@@ -431,7 +450,7 @@ export function createAgentDispatcher(input: {
         input.store.updateFlowExpertStatus(flowExpert.id, "failed");
         await input.onConversationFinished?.({
           flowId: message.flowId,
-          userTurnId: message.userTurnId,
+          workRunId: message.workRunId,
           agentSessionId: agentSession.id,
           expertId: message.expertId,
           status: "failed",
@@ -452,7 +471,7 @@ export function createAgentDispatcher(input: {
         !session
         || !task
         || session.flowId !== message.flowId
-        || session.userTurnId !== message.userTurnId
+        || session.workRunId !== message.workRunId
         || session.taskId !== task.id
         || task.agentSessionId !== session.id
         || task.status !== "in_progress"
@@ -465,7 +484,7 @@ export function createAgentDispatcher(input: {
       }
       const cancelled = await input.expertRuntime.cancelTask({
         flowId: message.flowId,
-        userTurnId: message.userTurnId,
+        workRunId: message.workRunId,
         taskId: message.taskId,
         agentSessionId: message.agentSessionId,
       });

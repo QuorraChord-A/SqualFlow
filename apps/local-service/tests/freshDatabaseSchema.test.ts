@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 describe("fresh database schema", () => {
-  it("initializes the UserTurn model idempotently without legacy business data", () => {
+  it("initializes the WorkRun model idempotently without legacy business data", () => {
     const store = tempStore();
 
     store.migrate();
@@ -41,13 +41,13 @@ describe("fresh database schema", () => {
     expect(tableNames(store)).not.toContain("executions");
     for (const table of ["tasks", "agent_sessions", "decision_cards", "artifacts", "event_log"]) {
       expect(columnNames(store, table)).not.toContain("execution_id");
-      expect(columnNames(store, table)).toContain("user_turn_id");
+      expect(columnNames(store, table)).toContain("work_run_id");
     }
 
     const businessTables = [
       "projects",
       "flows",
-      "user_turns",
+      "work_runs",
       "tasks",
       "agent_sessions",
       "decision_cards",

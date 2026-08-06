@@ -64,7 +64,7 @@ export default function ToolRow({ id, tool }: ToolRowProps) {
           )}
           <span className={styles.toolMain}>
             <span className={styles.toolState}>{presentation.statusLabel}</span>
-            <span className={styles.toolCount}>{presentation.title}</span>
+            <span className={styles.toolCount} title={presentation.title}>{presentation.title}</span>
             <span className={styles.toolName}>{presentation.operationLabel}</span>
           </span>
           {hasDiff && <ChevronDown className={`${styles.rowArrow} ${expanded ? styles.expanded : ""}`} size={22} />}

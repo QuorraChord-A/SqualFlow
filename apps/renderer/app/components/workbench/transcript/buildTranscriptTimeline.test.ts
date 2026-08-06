@@ -761,6 +761,54 @@ describe("buildTranscriptTimeline", () => {
     expect(card).toMatchObject({ specApprovalId: "sca-1", toolCallId: "plan-1" });
   });
 
+  it("keeps an orchestration plan card at its MCP tool position when structuredContent is null", () => {
+    const planRevisionId = "prev-38461eec7e7b";
+    const message: TimelineInputMessage = {
+      id: "msg-plan",
+      role: "assistant",
+      parts: [
+        { type: "text", text: "准备提交编排计划。" },
+        makeToolPart(
+          "submit-plan-1",
+          "mcp__squadflow-leader__submit_orchestration_plan",
+          "output-available",
+          { flow_id: "flow-1", title: "后台升级" },
+          {
+            content: "",
+            is_error: false,
+            mcp: {
+              structuredContent: null,
+              content: [{
+                type: "text",
+                text: JSON.stringify({
+                  ok: true,
+                  revision: { plan_revision_id: planRevisionId },
+                }),
+              }],
+              isError: false,
+            },
+          },
+        ),
+        { type: "text", text: "计划已提交，等待审批。" },
+      ],
+    };
+
+    const blocks = buildTranscriptTimeline({ message, activity: "finished" });
+
+    expect(blocks.map((block) => block.type)).toEqual([
+      "text",
+      "tool-group",
+      "plan-card",
+      "text",
+    ]);
+    expect(blocks[2]).toMatchObject({
+      id: "tool-card:submit-plan-1:orchestration-plan",
+      type: "plan-card",
+      planRevisionId,
+      toolCallId: "submit-plan-1",
+    });
+  });
+
   it("keeps the normalized MCP envelope for generic result rendering", () => {
     const output = {
       content: "Detailed Results",

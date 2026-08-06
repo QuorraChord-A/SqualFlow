@@ -698,22 +698,32 @@
 
 .toolMain {
   display: inline-flex;
+  min-width: 0;
+  flex: 1 1 auto;
   align-items: baseline;
   gap: 10px;
-  flex-wrap: wrap;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
 .toolState {
+  flex: 0 0 auto;
   color: var(--sqt-muted);
   font-weight: 650;
 }
 
 .toolCount {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
   color: var(--sqt-muted-2);
   font-weight: 520;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toolName {
+  flex: 0 0 auto;
   color: var(--sqt-muted-2);
   font-family: var(--sqt-mono);
   font-size: 11px;
@@ -1084,8 +1094,11 @@
 }
 
 .terminalCard {
+  max-height: 260px;
   margin-top: 13px;
   width: min(100%, 820px);
+  overflow: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--sqt-line-strong);
   border-radius: 16px;
   background: var(--sqt-surface);
@@ -1094,8 +1107,14 @@
   font-family: var(--sqt-mono);
   font-size: 13px;
   line-height: 1.65;
-  white-space: pre-wrap;
+  white-space: pre;
+  scrollbar-width: thin;
+  scrollbar-color: var(--sqt-muted-2) transparent;
 }
+
+.terminalCard::-webkit-scrollbar { width: 8px; height: 8px; }
+.terminalCard::-webkit-scrollbar-thumb { background: var(--sqt-muted-2); border-radius: 999px; }
+.terminalCard::-webkit-scrollbar-track { background: transparent; }
 
 .terminalMuted {
   color: var(--sqt-muted);

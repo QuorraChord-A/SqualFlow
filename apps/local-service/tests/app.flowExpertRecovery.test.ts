@@ -1,50 +1,24 @@
 import { describe, expect, it } from "vitest";
-import type { ClaudeQueryInput, ClaudeQueryLike } from "../src/harness/agentRunner.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createApp } from "../src/server/app.js";
-import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
-import { listUserTurnsNeedingRecovery } from "../src/runtime/userTurnLifecycle.js";
-
-function successfulQuery(onDrained: () => void): ClaudeQueryLike {
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield {
-        type: "result",
-        subtype: "success",
-        session_id: "sdk-recovered-frontend",
-        is_error: false,
-        structured_output: {
-          status: "done",
-          summary: "recovered",
-          files_changed: [],
-          findings: [],
-          metrics: {},
-          notes: "",
-        },
-      };
-      onDrained();
-    },
-    close() {},
-  };
-}
 
 describe("Flow Expert app recovery", () => {
   function createRunningExpertWork(store: ReturnType<typeof createStore>, flowId: string) {
     const flow = store.createFlow({ id: flowId, workspaceId: "ws-default", name: "Recover", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     store.updateFlowExpertSession(flowExpert.id, "sdk-before-restart");
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Recover task",
       description: "Recover the interrupted task",
       expertId: "exp-coder",
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -54,51 +28,42 @@ describe("Flow Expert app recovery", () => {
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
     store.setTaskRuntimeStatus(task.id, "in_progress");
     store.activateFlowExpertTask(task.id, session.id);
-    return { flow, userTurn, flowExpert, task, session };
+    return { flow, workRun, flowExpert, task, session };
   }
 
-  it("on first restart schedules interrupted Expert work without scheduling Leader recovery", () => {
+  it("on first restart interrupts stale Expert work without scheduling recovery", () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
     const fixture = createRunningExpertWork(store, "flow-first-restart");
 
-    const expertRecovery = store.recoverFlowExpertRuntimeWork();
+    const result = store.interruptStaleExpertSessions();
 
-    expect(expertRecovery).toEqual([
-      expect.objectContaining({ taskId: fixture.task.id, userTurnId: fixture.userTurn.id }),
-    ]);
+    expect(result).toEqual({ interruptedSessionCount: 1 });
     expect(store.getTask(fixture.task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(fixture.session.id)?.status).toBe("interrupted");
-    expect(listUserTurnsNeedingRecovery(store)).toEqual([]);
+    expect(store.getWorkRun(fixture.workRun.id)?.status).toBe("executing");
     store.sqlite.close();
   });
 
-  it("on a second restart recovers the same in-progress and interrupted Expert work", () => {
+  it("does not repeatedly process an already interrupted Expert session", () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
     const fixture = createRunningExpertWork(store, "flow-second-restart");
 
-    const firstRestart = store.recoverFlowExpertRuntimeWork();
-    const secondRestart = store.recoverFlowExpertRuntimeWork();
+    const firstRestart = store.interruptStaleExpertSessions();
+    const secondRestart = store.interruptStaleExpertSessions();
 
-    expect(firstRestart.map((item) => item.taskId)).toEqual([fixture.task.id]);
-    expect(secondRestart).toEqual([
-      expect.objectContaining({
-        taskId: fixture.task.id,
-        userTurnId: fixture.userTurn.id,
-        agentSessionId: fixture.session.id,
-      }),
-    ]);
-    expect(secondRestart[0]?.resumeSessionId).toBe("sdk-before-restart");
+    expect(firstRestart).toEqual({ interruptedSessionCount: 1 });
+    expect(secondRestart).toEqual({ interruptedSessionCount: 0 });
     expect(store.getFlowExpert(fixture.flowExpert.id)?.sdkSessionId).toBe("sdk-before-restart");
     expect(store.getTask(fixture.task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(fixture.session.id)?.status).toBe("interrupted");
     store.sqlite.close();
   });
 
-  it("does not close an active UserTurn merely because the app started", async () => {
+  it("does not close an active WorkRun merely because the app started", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -109,21 +74,21 @@ describe("Flow Expert app recovery", () => {
       description: "",
       projectId: null,
     });
-    const finishedTurn = store.createUserTurn({
+    const finishedTurn = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-finished",
       startedAt: "2026-06-28T09:06:47.701Z",
     })!;
-    store.failUserTurn(finishedTurn.id, "failed", "2026-06-28T09:08:09.770Z");
-    const userTurn = beginUserTurn(store, {
+    store.failWorkRun(finishedTurn.id, "failed", "2026-06-28T09:08:09.770Z");
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
-      userTurnId: finishedTurn.id,
+      workRunId: finishedTurn.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Finished task",
       description: "already done",
       expertId: "exp-research",
@@ -134,15 +99,15 @@ describe("Flow Expert app recovery", () => {
     const app = createApp({ logger: false, store });
 
     try {
-      expect(store.getUserTurn(userTurn.id)?.status).toBe("active");
-      expect(store.getFlow(flow.id)?.status).toBe("active");
+      expect(store.getWorkRun(workRun.id)?.status).toBe("executing");
+      expect(store.getFlow(flow.id)?.status).toBe("idle");
     } finally {
       await app.close();
       store.sqlite.close();
     }
   });
 
-  it("preserves a confirmed FlowExpert SDK session and resumes it after cold startup", async () => {
+  it("preserves a confirmed FlowExpert ProviderSession without auto-resuming it after cold startup", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -153,7 +118,7 @@ describe("Flow Expert app recovery", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
@@ -162,7 +127,7 @@ describe("Flow Expert app recovery", () => {
     store.updateFlowExpertSession(flowExpert.id, "sdk-before-restart");
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Recover task",
       description: "Recover the queued task",
       expertId: "exp-coder",
@@ -170,7 +135,7 @@ describe("Flow Expert app recovery", () => {
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -180,34 +145,20 @@ describe("Flow Expert app recovery", () => {
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
     store.setTaskRuntimeStatus(task.id, "in_progress");
 
-    let captured: ClaudeQueryInput | null = null;
-    let persistedSessionAtQueryStart: string | null | undefined;
-    let resolveDrained!: () => void;
-    const drained = new Promise<void>((resolve) => { resolveDrained = resolve; });
-    const app = createApp({
-      logger: false,
-      store,
-      runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: (input) => {
-        captured = input;
-        persistedSessionAtQueryStart = store.getFlowExpert(flowExpert.id)?.sdkSessionId;
-        return successfulQuery(resolveDrained);
-      } }),
-    });
+    const app = createApp({ logger: false, store });
 
     try {
-      await drained;
-      expect(persistedSessionAtQueryStart).toBe("sdk-before-restart");
-      expect(captured?.options?.resume).toBe("sdk-before-restart");
       expect(store.getTask(task.id)?.status).toBe("in_progress");
-      expect(store.getAgentSession(session.id)?.status).toBe("completed");
-      expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-recovered-frontend");
+      expect(store.getAgentSession(session.id)?.status).toBe("interrupted");
+      expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
+      expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-before-restart");
     } finally {
       await app.close();
       store.sqlite.close();
     }
   });
 
-  it("starts a fresh session when only AgentSession has a temporary session ID", async () => {
+  it("interrupts a stale temporary AgentSession without promoting it to ProviderSession", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -218,7 +169,7 @@ describe("Flow Expert app recovery", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
@@ -226,7 +177,7 @@ describe("Flow Expert app recovery", () => {
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Recover task with temporary session",
       description: "Recover without resuming the temporary session",
       expertId: "exp-coder",
@@ -234,7 +185,7 @@ describe("Flow Expert app recovery", () => {
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -245,24 +196,13 @@ describe("Flow Expert app recovery", () => {
     store.assignTaskFlowExpert(task.id, flowExpert.id, session.id);
     store.setTaskRuntimeStatus(task.id, "in_progress");
 
-    let captured: ClaudeQueryInput | null = null;
-    let resolveDrained!: () => void;
-    const drained = new Promise<void>((resolve) => { resolveDrained = resolve; });
-    const app = createApp({
-      logger: false,
-      store,
-      runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: (input) => {
-        captured = input;
-        return successfulQuery(resolveDrained);
-      } }),
-    });
+    const app = createApp({ logger: false, store });
 
     try {
-      await drained;
-      expect(captured?.options?.resume).toBeUndefined();
       expect(store.getTask(task.id)?.status).toBe("in_progress");
-      expect(store.getAgentSession(session.id)?.status).toBe("completed");
-      expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-recovered-frontend");
+      expect(store.getAgentSession(session.id)?.status).toBe("interrupted");
+      expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
+      expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBeNull();
     } finally {
       await app.close();
       store.sqlite.close();

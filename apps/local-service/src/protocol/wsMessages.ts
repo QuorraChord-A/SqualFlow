@@ -131,7 +131,21 @@ export const ClientWsMessageSchema = z.discriminatedUnion("type", [
     client_action_id: z.string().min(1),
     log_id: z.string().optional(),
   }).strict(),
-  z.object({ type: z.literal("user_turn:cancel"), flow_id: z.string(), user_turn_id: z.string(), log_id: z.string().optional() }).strict(),
+  z.object({
+    type: z.literal("work_run:interrupt"),
+    flow_id: z.string(),
+    work_run_id: z.string(),
+    expected_revision: z.number().int().positive(),
+    client_action_id: z.string().min(1),
+    log_id: z.string().optional(),
+  }).strict(),
+  z.object({
+    type: z.literal("agent_session:interrupt"),
+    flow_id: z.string(),
+    agent_session_id: z.string().min(1),
+    client_action_id: z.string().min(1),
+    log_id: z.string().optional(),
+  }).strict(),
   z.object({ type: z.literal("session:get"), flow_id: z.string(), flow_expert_id: z.string().optional(), agent_session_id: z.string().optional(), session_id: z.string().optional(), log_id: z.string().optional() }).strict(),
   z.object({
     type: z.literal("client:diagnostic"),
@@ -163,15 +177,6 @@ const ActiveTurnSchema = z.object({
 }).strict();
 
 export const ServerWsMessageSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("leader:runtime_state"),
-    flow_id: z.string(),
-    log_id: z.string().optional(),
-    data: z.object({
-      status: z.enum(["idle", "starting", "streaming"]),
-      leader_agent_session_id: z.string().nullable(),
-    }).strict(),
-  }).strict(),
   z.object({ type: z.literal("flow:state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:status"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:name_updated"), flow_id: z.string(), log_id: z.string().optional(), data: z.object({ name: z.string(), name_generation_status: z.enum(["pending", "generated", "fallback", "manual"]) }).strict() }).strict(),
@@ -179,7 +184,7 @@ export const ServerWsMessageSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("flow:guide_ack"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow:queue_state"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("task:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
-  z.object({ type: z.literal("user_turn:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
+  z.object({ type: z.literal("work_run:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("session:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("flow_expert:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
   z.object({ type: z.literal("context_usage:event"), flow_id: z.string(), log_id: z.string().optional(), data: z.unknown() }).strict(),
@@ -195,7 +200,7 @@ export const ServerWsMessageSchema = z.discriminatedUnion("type", [
       attempt: z.number().int().positive().optional(),
       max_attempts: z.number().int().positive().optional(),
       runtime_role: z.enum(["leader", "expert"]),
-      user_turn_id: z.string().optional(),
+      work_run_id: z.string().optional(),
       task_id: z.string().optional(),
     }).strict(),
   }).strict(),

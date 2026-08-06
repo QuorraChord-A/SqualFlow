@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createAgentDispatcher } from "../src/runtime/agentDispatcher.js";
 import { EventBus } from "../src/ws/eventBus.js";
 
@@ -95,14 +95,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: null,
@@ -134,7 +134,7 @@ describe("agent dispatcher", () => {
     }));
     expect(runTask).toHaveBeenCalledWith(expect.objectContaining({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       flowExpertId: result.flow_expert_id,
       agentSessionId,
@@ -151,14 +151,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -188,7 +188,7 @@ describe("agent dispatcher", () => {
     }));
   });
 
-  it("starts runnable UserTurn Task sessions", async () => {
+  it("starts runnable WorkRun Task sessions", async () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-task",
@@ -197,14 +197,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -238,7 +238,7 @@ describe("agent dispatcher", () => {
     }));
     expect(runTask).toHaveBeenCalledWith(expect.objectContaining({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       flowExpertId: result.flow_expert_id,
       agentSessionId,
@@ -281,14 +281,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -314,7 +314,7 @@ describe("agent dispatcher", () => {
     store.activateFlowExpertTask(task.id, dispatched.agent_session_id);
     const result = await dispatcher.sendMessage({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       expertId: "exp-coder",
       content: "Use the existing API contract",
       summary: "补充约束",
@@ -346,7 +346,7 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
@@ -357,7 +357,7 @@ describe("agent dispatcher", () => {
     });
     const previousSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: null,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -381,7 +381,7 @@ describe("agent dispatcher", () => {
 
     const result = await dispatcher.sendMessage({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       expertId: "exp-coder",
       content: "你有哪些 MCP 工具？",
       summary: "询问能力",
@@ -400,7 +400,7 @@ describe("agent dispatcher", () => {
     }));
     expect(runConversation).toHaveBeenCalledWith({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       flowExpertId: flowExpert.id,
       agentSessionId: created!.id,
       expertId: "exp-coder",
@@ -420,12 +420,12 @@ describe("agent dispatcher", () => {
   it("interrupts a running Task through the Expert runtime", async () => {
     const store = tempStore();
     const flow = store.createFlow({ id: "flow-cancel-dispatch", name: "Cancel", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
-    const task = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "Build", description: "Build", expertId: "exp-coder", dependsOnTaskIds: [] })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
+    const task = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "Build", description: "Build", expertId: "exp-coder", dependsOnTaskIds: [] })!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -446,14 +446,14 @@ describe("agent dispatcher", () => {
 
     const result = await dispatcher.cancelAgent({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
 
     expect(cancelTask).toHaveBeenCalledWith({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -473,14 +473,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const first = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "First",
       description: "First",
       expertId: "exp-coder",
@@ -488,7 +488,7 @@ describe("agent dispatcher", () => {
     })!;
     const second = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Second",
       description: "Second",
       expertId: "exp-verify",
@@ -527,14 +527,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: null,
@@ -598,14 +598,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Review",
       description: "Review",
       expertId: null,
@@ -668,14 +668,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -683,7 +683,7 @@ describe("agent dispatcher", () => {
     })!;
     const oldSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       sessionId: "sdk-running",
@@ -722,14 +722,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -737,7 +737,7 @@ describe("agent dispatcher", () => {
     })!;
     const otherSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       sessionId: "sdk-other",
@@ -777,14 +777,14 @@ describe("agent dispatcher", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",

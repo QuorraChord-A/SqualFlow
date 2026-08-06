@@ -310,7 +310,10 @@ describe("Codex runtime adapter", () => {
     expect(output.finalAssistantText).toBe("completed");
     expect(requests[0]).toEqual(expect.objectContaining({
       method: "thread/start",
-      params: expect.objectContaining({ approvalPolicy: "on-request" }),
+      params: expect.objectContaining({
+        approvalPolicy: "on-request",
+        sandbox: "danger-full-access",
+      }),
     }));
     expect(adapter.contextUsageSnapshot(events[2])).toEqual(expect.objectContaining({
       totalTokens: 100,

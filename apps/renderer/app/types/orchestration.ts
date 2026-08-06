@@ -15,7 +15,7 @@ export type PlanNodeView = {
 export type OrchestrationPlanView = {
   plan_id: string;
   flow_id: string;
-  user_turn_id: string;
+  work_run_id: string;
   spec_revision_id?: string | null;
   revision: {
     plan_revision_id: string;

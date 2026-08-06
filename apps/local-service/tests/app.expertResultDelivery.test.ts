@@ -1,20 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 import { createStore } from "../src/db/store.js";
 import { routeExpertMessageToLeader, routeExpertResultToLeader } from "../src/server/app.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 
 describe("Expert result delivery", () => {
-  it("delivers a completed Expert result while the UserTurn waits for plan approval", async () => {
+  it("delivers a completed Expert result while the WorkRun waits for plan approval", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
     const project = store.createProject({ id: "project-delivery", name: "Delivery", localPath: "/tmp/delivery" });
     const flow = store.createFlow({ id: "flow-delivery", name: "Delivery", description: "", projectId: project.id });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-delivery" })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
+    const workRun = beginWorkRun(store, { flowId: flow.id, triggerMessageId: "msg-delivery" })!;
+    store.waitWorkRunForUserAction(workRun.id);
     const leader = store.createAgentSession({
       flowId: flow.id,
       taskId: null,
-      userTurnId: null,
+      workRunId: null,
       expertId: "exp-leader",
       sessionId: "leader-session",
       status: "completed",
@@ -26,7 +27,7 @@ describe("Expert result delivery", () => {
         leaderRuntime: { runLeaderTurn },
         event: {
           flowId: flow.id,
-          userTurnId: userTurn.id,
+          workRunId: workRun.id,
           taskId: "task-v1",
           agentSessionId: "ags-v1",
           expertId: "exp-coder",
@@ -42,9 +43,9 @@ describe("Expert result delivery", () => {
 
       expect(runLeaderTurn).toHaveBeenCalledWith(expect.objectContaining({
         kind: "expert_result",
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
       }));
-      expect(store.getUserTurn(userTurn.id)?.status).toBe("waiting_user");
+      expect(store.getWorkRun(workRun.id)?.status).toBe("waiting_user");
       expect(leader.status).toBe("completed");
     } finally {
       store.sqlite.close();
@@ -57,18 +58,10 @@ describe("Expert result delivery", () => {
     store.seedExperts();
     const project = store.createProject({ id: "project-message", name: "Message", localPath: "/tmp/message" });
     const flow = store.createFlow({ id: "flow-message", name: "Message", description: "", projectId: project.id });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-message" })!;
-    store.startUserTurnWork({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      workSource: "direct_message",
-      targetProjectId: project.id,
-      inputSnapshotJson: "{}",
-    });
     store.createAgentSession({
       flowId: flow.id,
       taskId: null,
-      userTurnId: null,
+      workRunId: null,
       expertId: "exp-leader",
       sessionId: "leader-message-session",
       status: "completed",
@@ -80,7 +73,7 @@ describe("Expert result delivery", () => {
         leaderRuntime: { runLeaderTurn },
         event: {
           flowId: flow.id,
-          userTurnId: userTurn.id,
+          workRunId: null,
           agentSessionId: "ags-message",
           expertId: "exp-research",
           status: "completed",
@@ -95,7 +88,7 @@ describe("Expert result delivery", () => {
       expect(runLeaderTurn).toHaveBeenCalledWith(expect.objectContaining({
         flowId: flow.id,
         kind: "expert_message",
-        userTurnId: userTurn.id,
+        workRunId: undefined,
         expertMessage: expect.objectContaining({
           agentSessionId: "ags-message",
           expertId: "exp-research",

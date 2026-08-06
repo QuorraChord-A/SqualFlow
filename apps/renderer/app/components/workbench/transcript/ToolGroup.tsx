@@ -66,7 +66,7 @@ export default function ToolGroup({ group }: ToolGroupProps) {
           <span className={styles.rowSpinner} role="status" aria-label="Loading" />
           <span className={styles.toolMain}>
             <span className={styles.toolState}>{currentPresentation.statusLabel}</span>
-            <span className={styles.toolCount}>{currentPresentation.title}</span>
+            <span className={styles.toolCount} title={currentPresentation.title}>{currentPresentation.title}</span>
             <span className={styles.toolName}>{currentPresentation.operationLabel}</span>
           </span>
           <ChevronDown className={styles.chevron} size={14} />
@@ -89,7 +89,7 @@ export default function ToolGroup({ group }: ToolGroupProps) {
           </span>
           <span className={styles.toolMain}>
             <span className={styles.toolState}>{currentPresentation.statusLabel}</span>
-            <span className={styles.toolCount}>{currentPresentation.title}</span>
+            <span className={styles.toolCount} title={currentPresentation.title}>{currentPresentation.title}</span>
             <span className={styles.toolName}>{currentPresentation.operationLabel}</span>
           </span>
           <ChevronDown className={styles.chevron} size={14} />

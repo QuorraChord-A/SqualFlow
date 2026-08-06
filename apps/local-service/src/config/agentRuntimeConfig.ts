@@ -4,6 +4,10 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { config } from "../config.js";
 import { normalizeRuntimeModelContext } from "./runtimeModelContext.js";
+import {
+  normalizeRuntimeReasoningEffort,
+  parseRuntimeReasoningEffort,
+} from "./runtimeReasoningEffort.js";
 
 export type AgentRuntimeRole = "leader" | "coder" | "research" | "verify" | "codereview";
 export type RuntimeSdk = "claudecode" | "codex";
@@ -32,6 +36,7 @@ export type RoleRuntimeBinding = {
   enabled: boolean;
   configId: string;
   modelId: string;
+  reasoningEffort: string;
 };
 
 export type AgentRuntimeConfigSnapshot = {
@@ -64,11 +69,11 @@ const legacySeedRuntimeConfigId = "default-agent-sdk";
 const initialIndex: RuntimeConfigIndex = {
   version: 1,
   roles: {
-    leader: { enabled: true, configId: "", modelId: "" },
-    coder: { enabled: true, configId: "", modelId: "" },
-    research: { enabled: false, configId: "", modelId: "" },
-    verify: { enabled: true, configId: "", modelId: "" },
-    codereview: { enabled: true, configId: "", modelId: "" },
+    leader: { enabled: true, configId: "", modelId: "", reasoningEffort: "" },
+    coder: { enabled: true, configId: "", modelId: "", reasoningEffort: "" },
+    research: { enabled: false, configId: "", modelId: "", reasoningEffort: "" },
+    verify: { enabled: true, configId: "", modelId: "", reasoningEffort: "" },
+    codereview: { enabled: true, configId: "", modelId: "", reasoningEffort: "" },
   },
 };
 
@@ -314,6 +319,7 @@ function normalizeIndex(value: unknown): RuntimeConfigIndex {
         enabled: role === "leader" ? true : booleanValue(binding.enabled, initialIndex.roles[role].enabled),
         configId: stringValue(binding.configId, initialIndex.roles[role].configId),
         modelId: stringValue(binding.modelId, initialIndex.roles[role].modelId),
+        reasoningEffort: stringValue(binding.reasoningEffort, initialIndex.roles[role].reasoningEffort),
       }];
     })) as RuntimeConfigIndex["roles"],
   };
@@ -410,6 +416,10 @@ function resolvedRoleBinding(
     enabled: role === "leader" ? true : index.roles[role].enabled,
     configId,
     modelId: runtimeConfig ? resolveRuntimeModelId(runtimeConfig, index.roles[role].modelId) : "",
+    reasoningEffort: normalizeRuntimeReasoningEffort(
+      runtimeConfig?.sdk ?? "claudecode",
+      index.roles[role].reasoningEffort,
+    ),
   };
 }
 
@@ -556,6 +566,9 @@ export async function deleteRuntimeConfig(configId: string): Promise<AgentRuntim
         modelId: rebind
           ? (fallbackConfig ? firstUsableRuntimeModelId(fallbackConfig) : "")
           : index.roles[role].modelId,
+        reasoningEffort: rebind && fallbackConfig
+          ? normalizeRuntimeReasoningEffort(fallbackConfig.sdk, index.roles[role].reasoningEffort)
+          : index.roles[role].reasoningEffort,
       }];
     })) as RuntimeConfigIndex["roles"],
   };
@@ -581,10 +594,18 @@ export async function updateRoleRuntimeBinding(
   if (requestedModelId && !runtimeConfig.models.some((item) => item.id === requestedModelId && item.name.trim())) {
     throw new Error("model_id must reference an existing model in the runtime config");
   }
+  const requestedReasoningEffort = Object.prototype.hasOwnProperty.call(input, "reasoningEffort")
+    ? parseRuntimeReasoningEffort(runtimeConfig.sdk, input.reasoningEffort)
+    : null;
+  if (Object.prototype.hasOwnProperty.call(input, "reasoningEffort") && !requestedReasoningEffort) {
+    throw new Error("reasoning_effort must be supported by the runtime sdk");
+  }
   index.roles[role] = {
     enabled: role === "leader" ? true : booleanValue(input.enabled, index.roles[role].enabled),
     configId,
     modelId: requestedModelId || resolveRuntimeModelId(runtimeConfig, index.roles[role].modelId),
+    reasoningEffort: requestedReasoningEffort
+      ?? normalizeRuntimeReasoningEffort(runtimeConfig.sdk, index.roles[role].reasoningEffort),
   };
   await writeIndex(index);
   return { role, ...index.roles[role] };

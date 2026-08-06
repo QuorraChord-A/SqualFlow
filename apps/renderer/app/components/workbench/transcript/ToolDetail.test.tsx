@@ -63,4 +63,26 @@ describe("ToolDetail", () => {
     expect(screen.getByText("结构化结果")).toBeInTheDocument();
     expect(screen.getByText(/"title": "MCP"/u)).toBeInTheDocument();
   });
+
+  it("renders Shell command output in a keyboard-scrollable result region", () => {
+    const presentation: ToolPresentation = {
+      kind: "bash",
+      icon: "terminal",
+      status: "completed",
+      statusLabel: "已执行",
+      title: "npm test",
+      operationLabel: "执行",
+      command: "npm test",
+      detailRows: [],
+      rawInput: { command: "npm test" },
+      rawOutput: { content: "line 1\nline 2", is_error: false },
+    };
+
+    render(<ToolDetail presentation={presentation} />);
+
+    const result = screen.getByRole("region", { name: "命令输出" });
+    expect(result).toHaveAttribute("tabindex", "0");
+    expect(result).toHaveTextContent("$ npm test");
+    expect(result).toHaveTextContent("line 1 line 2");
+  });
 });

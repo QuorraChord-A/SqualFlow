@@ -152,7 +152,7 @@ function isPinnedTurnBlock(block: TranscriptBlock): boolean {
 }
 
 /**
- * A turn-level "finished" signal (from the merged user-turn status) can lag
+ * A turn-level "finished" signal (derived from the containing WorkRun) can lag
  * behind the message that is still actually streaming inside that same turn.
  * Treat the turn as still live whenever any rendered block is itself
  * mid-flight, regardless of what the turn-level signal claims.

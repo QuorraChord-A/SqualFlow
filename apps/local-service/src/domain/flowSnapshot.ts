@@ -4,8 +4,9 @@ import {
   readAgentRuntimeConfigSnapshotSync,
   runtimeRoleForExpertRole,
 } from "../config/agentRuntimeConfig.js";
-import { userTurnDto } from "./userTurn.js";
+import { workRunDto } from "./workRun.js";
 import { currentPlanView, planHistoryView } from "./orchestrationView.js";
+import { leaderTranscriptChannelId } from "./transcriptChannels.js";
 
 function parseJsonArray(value: string | null | undefined): unknown[] {
   if (!value) return [];
@@ -29,7 +30,7 @@ function parseJsonObject(value: string | null | undefined): Record<string, unkno
   }
 }
 
-function parseUserTurnInput(turn: ReturnType<Store["listUserTurns"]>[number]) {
+function parseWorkRunInput(turn: ReturnType<Store["listWorkRuns"]>[number]) {
   const snapshot = parseJsonObject(turn.inputSnapshotJson);
   if (turn.workSource === "spec") {
     return {
@@ -52,16 +53,15 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
   if (!flow) return { error: `flow not found: ${flowId}` };
 
   const agentSessions = store.listAgentSessions(flowId);
-  const leader = agentSessions.find(
-    (session) => session.expertId === "exp-leader" && session.taskId === null,
-  );
-  const userTurns = store.listUserTurns(flowId);
-  const activeUserTurn = userTurns.find((turn) => turn.status === "active" || turn.status === "waiting_user") ?? null;
-  const hasActiveExecution = agentSessions.some((session) => session.status === "queued" || session.status === "streaming")
-    || (activeUserTurn?.status === "active"
-      && store.listUserTurnTasks(activeUserTurn.id).some((task) =>
-        task.status === "in_progress",
-      ));
+  const leaderSessions = agentSessions
+    .filter((session) => session.expertId === "exp-leader" && session.taskId === null)
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  const activeLeaderSession = leaderSessions.find((session) => session.status === "queued" || session.status === "streaming") ?? null;
+  const latestLeaderSession = leaderSessions.at(-1) ?? null;
+  const workRuns = store.listWorkRuns(flowId);
+  const currentWorkRun = workRuns.find((turn) => ["ready", "executing", "waiting_user", "interrupted"].includes(turn.status)) ?? null;
+  const hasActiveExecution = agentSessions.some((session) => session.status === "queued" || session.status === "streaming");
+  const projectedFlowStatus = hasActiveExecution ? "active" : "idle";
 
   const latestSpecRow = store.listSpecRevisions(flowId).reduce<
     ReturnType<Store["listSpecRevisions"]>[number] | null
@@ -75,7 +75,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     id: flow.id,
     name: flow.name,
     name_generation_status: flow.nameGenerationStatus,
-    status: flow.status,
+    status: projectedFlowStatus,
     has_active_execution: hasActiveExecution,
     legacy_spec_flow: flow.legacySpecFlow === 1,
     risk_mode: store.getRiskMode(flow.id),
@@ -89,7 +89,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
       approval: pendingSpecApproval?.specRevisionId === latestSpecRow.id
         ? {
             spec_approval_id: pendingSpecApproval.id,
-            user_turn_id: pendingSpecApproval.userTurnId,
+            work_run_id: pendingSpecApproval.workRunId,
             status: pendingSpecApproval.status,
           }
         : null,
@@ -97,7 +97,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     pending_spec_approval: pendingSpecApproval ? {
       spec_approval_id: pendingSpecApproval.id,
       spec_revision_id: pendingSpecApproval.specRevisionId,
-      user_turn_id: pendingSpecApproval.userTurnId,
+      work_run_id: pendingSpecApproval.workRunId,
       status: pendingSpecApproval.status,
       file_name: pendingSpecApproval.fileName,
       overview: pendingSpecApproval.overview,
@@ -109,7 +109,12 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     leader_runtime_config_id: flow.leaderRuntimeConfigId,
     leader_runtime_model_id: flow.leaderRuntimeModelId,
     leader_runtime_reasoning_effort: flow.leaderRuntimeReasoningEffort,
-    leader_agent_session_id: leader?.id ?? null,
+    active_leader_agent_session_id: activeLeaderSession?.id ?? null,
+    latest_leader_agent_session_id: latestLeaderSession?.id ?? null,
+    leader_transcript_channel: {
+      channel_id: leaderTranscriptChannelId(flowId),
+      provider_session_id: flow.leaderSessionId,
+    },
     // Template catalog (runtime enablement). Prefer `team` for Leader planning by person name.
     experts: store.listExperts().map((expert) => {
       const runtimeRole = expert.role === "leader" ? "leader" : runtimeRoleForExpertRole(expert.role);
@@ -143,14 +148,14 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
         runtime_role: runtimeRole,
       };
     }),
-    active_user_turn_id: activeUserTurn?.id ?? null,
-    user_turns: userTurns.map((turn) => ({ ...userTurnDto(turn), input: parseUserTurnInput(turn) })),
+    current_work_run_id: currentWorkRun?.id ?? null,
+    work_runs: workRuns.map((turn) => ({ ...workRunDto(turn), input: parseWorkRunInput(turn) })),
     created_at: flow.createdAt,
     updated_at: flow.updatedAt,
     tasks: store.listTasks(flowId).map((task) => ({
       id: task.id,
       flow_id: task.flowId,
-      user_turn_id: task.userTurnId,
+      work_run_id: task.workRunId,
       title: task.title,
       description: task.description,
       expert_id: task.expertId,
@@ -184,7 +189,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
       id: card.id,
       card_id: card.id,
       flow_id: card.flowId,
-      user_turn_id: card.userTurnId,
+      work_run_id: card.workRunId,
       session_id: card.sessionId,
       card_type: card.cardType,
       questions: parseJsonArray(card.questions),
@@ -197,13 +202,14 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
       id: session.id,
       agent_session_id: session.id,
       flow_id: session.flowId,
-      user_turn_id: session.userTurnId,
+      work_run_id: session.workRunId,
       task_id: session.taskId,
       expert_id: session.expertId,
       session_id: session.sessionId,
       runtime_sdk: session.runtimeSdk,
       runtime_config_id: session.runtimeConfigId,
       runtime_model_id: session.runtimeModelId,
+      runtime_reasoning_effort: session.runtimeReasoningEffort,
       display_name: session.displayName,
       status: session.status,
       resume_from_agent_session_id: session.resumeFromAgentSessionId,
@@ -213,7 +219,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
     artifacts: store.listArtifacts(flowId).map((artifact) => ({
       id: artifact.id,
       flow_id: artifact.flowId,
-      user_turn_id: artifact.userTurnId,
+      work_run_id: artifact.workRunId,
       task_id: artifact.taskId,
       artifact_type: artifact.type,
       type: artifact.type,
@@ -232,7 +238,7 @@ export function buildFlowSnapshot(store: Store, flowId: string) {
         id: event.id,
         sequence: event.sequence,
         event_type: event.eventType,
-        user_turn_id: event.userTurnId,
+        work_run_id: event.workRunId,
         task_id: event.taskId,
         agent_session_id: event.agentSessionId,
         payload,

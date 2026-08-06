@@ -123,8 +123,9 @@ describe("seedExperts browser tool authorization", () => {
   it("distinguishes an explicit pause from resuming a feedback-frozen run", () => {
     const store = tempStore();
     const leader = store.getExpert("exp-leader");
-    expect(leader!.systemPrompt).toContain("用户明确要求暂停、停止或等待下一步");
-    expect(leader!.systemPrompt).toContain("不调用 `resolve_plan_feedback`");
+    expect(leader!.systemPrompt).toContain("用户明确要求暂停、先停一下或中断协作时，调用 `interrupt_work_run`");
+    expect(leader!.systemPrompt).toContain("普通消息绝不自动恢复");
+    expect(leader!.systemPrompt).toContain("只有用户明确要求继续、恢复协作时才调用 `resume_work_run`");
     expect(leader!.systemPrompt).toContain("结构无需修改且用户要求继续时，调用 `resolve_plan_feedback`");
     expect(leader!.systemPrompt).toContain("实际调用成功后才能声称计划、Task 或 AgentSession 已创建");
     expect(leader!.systemPrompt).toContain("不得用文字假装完成平台动作");

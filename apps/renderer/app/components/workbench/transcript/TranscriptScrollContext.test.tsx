@@ -11,12 +11,14 @@ import {
 const scrollToBottom = vi.fn();
 const stopScroll = vi.fn();
 const scrollRef = { current: null as HTMLDivElement | null };
+let isAtBottom = true;
 
 vi.mock("use-stick-to-bottom", () => ({
   useStickToBottomContext: () => ({
     scrollRef,
     scrollToBottom,
     stopScroll,
+    isAtBottom,
   }),
 }));
 
@@ -117,9 +119,15 @@ function FlowScrollThread({ flowId, anchorTop }: { flowId: string; anchorTop: nu
   );
 }
 
+function ConditionalFollowProbe() {
+  const { followIfAtBottom } = useTranscriptScroll();
+  return <button type="button" onClick={() => followIfAtBottom()}>跟随新增内容</button>;
+}
+
 describe("TranscriptScrollContext", () => {
   beforeEach(() => {
     scrollRef.current = null;
+    isAtBottom = true;
     scrollToBottom.mockReset();
     stopScroll.mockReset();
     Object.defineProperty(globalThis, "ResizeObserver", {
@@ -148,6 +156,29 @@ describe("TranscriptScrollContext", () => {
     fireEvent.click(button);
     expect(stopScroll).toHaveBeenCalledTimes(2);
     expect(scrollElement!.scrollTop).toBe(320);
+  });
+
+  it("follows newly materialized content only while the reader is already at the bottom", () => {
+    const first = render(
+      <TranscriptScrollProvider>
+        <ConditionalFollowProbe />
+      </TranscriptScrollProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "跟随新增内容" }));
+    expect(scrollToBottom).toHaveBeenCalledWith({ animation: "instant" });
+
+    first.unmount();
+    scrollToBottom.mockClear();
+    isAtBottom = false;
+    render(
+      <TranscriptScrollProvider>
+        <ConditionalFollowProbe />
+      </TranscriptScrollProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "跟随新增内容" }));
+    expect(scrollToBottom).not.toHaveBeenCalled();
   });
 
   it("restores the same message and viewport offset after another flow changes the scroll position", () => {

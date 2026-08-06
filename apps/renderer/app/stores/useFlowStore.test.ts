@@ -64,8 +64,8 @@ describe("useFlowStore streaming state", () => {
   });
 
   afterEach(() => {
-    emit("user_turn:event", {
-      type: "user_turn:event",
+    emit("work_run:event", {
+      type: "work_run:event",
       flow_id: "flow-1",
       data: { flow_status: "idle", status: "completed" },
     });
@@ -315,6 +315,44 @@ describe("useFlowStore streaming state", () => {
     });
   });
 
+  it("synchronizes the sidebar summary from the authoritative flow state snapshot", () => {
+    useFlowStore.setState({
+      flows: [{ ...flow, status: "active", current_stage: "develop" }],
+      selectedFlowId: "flow-1",
+      selectedFlow: null,
+    });
+
+    emit("flow:state", {
+      type: "flow:state",
+      flow_id: "flow-1",
+      data: {
+        name: "Updated Flow",
+        type: "full",
+        status: "idle",
+        current_stage: null,
+        project_id: "project-1",
+        created_at: "2026-06-12T00:00:00.000Z",
+        updated_at: "2026-06-12T00:01:00.000Z",
+        is_pinned: false,
+        has_pending_decision: false,
+        has_active_execution: false,
+      },
+    });
+
+    expect(useFlowStore.getState().flows[0]).toMatchObject({
+      id: "flow-1",
+      name: "Updated Flow",
+      status: "idle",
+      current_stage: null,
+      has_active_execution: false,
+    });
+    expect(useFlowStore.getState().selectedFlow).toMatchObject({
+      id: "flow-1",
+      status: "idle",
+      current_stage: null,
+    });
+  });
+
   it("clears streaming when the flow starts waiting for a decision card", () => {
     useFlowStore.setState({ flows: [{ ...flow, is_streaming: true }] });
 
@@ -334,21 +372,24 @@ describe("useFlowStore streaming state", () => {
     emit("task:event", {
       type: "task:event",
       flow_id: "flow-1",
-      data: { task_id: "task-1", user_turn_id: "utn-1", status: "failed" },
+      data: { task_id: "task-1", work_run_id: "utn-1", status: "failed" },
     });
 
     expect(useFlowStore.getState().flows[0].is_streaming).toBe(true);
   });
 
-  it("clears streaming when the UserTurn completes", () => {
-    useFlowStore.setState({ flows: [{ ...flow, is_streaming: true }] });
+  it("does not derive Flow runtime state from WorkRun events", () => {
+    useFlowStore.setState({ flows: [{ ...flow, status: "idle", is_streaming: true }] });
 
-    emit("user_turn:event", {
-      type: "user_turn:event",
+    emit("work_run:event", {
+      type: "work_run:event",
       flow_id: "flow-1",
-      data: { flow_status: "idle", status: "completed" },
+      data: { status: "interrupted" },
     });
 
-    expect(useFlowStore.getState().flows[0].is_streaming).toBe(false);
+    expect(useFlowStore.getState().flows[0]).toMatchObject({
+      status: "idle",
+      is_streaming: true,
+    });
   });
 });

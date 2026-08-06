@@ -16,7 +16,13 @@ vi.mock("../lib/api", () => ({
 }));
 
 const runtimeSnapshot = {
-  roles: [{ role: "leader", enabled: true, configId: "default-agent-sdk" }],
+  roles: [{
+    role: "leader",
+    enabled: true,
+    configId: "default-agent-sdk",
+    modelId: "qwen-plus",
+    reasoningEffort: "max",
+  }],
   configs: [
     {
       id: "default-agent-sdk",
@@ -571,6 +577,20 @@ describe("LeaderModelSelector", () => {
       modelId: "qwen-a3b",
     });
     expect(apiMocks.updateFlowLeaderRuntimeSelection).not.toHaveBeenCalled();
+  });
+
+  it("uses the Leader role effort as the default for a new flow", async () => {
+    const onSelectionReasoningEffortChange = vi.fn();
+
+    render(
+      <LeaderModelSelector
+        defaultSelection
+        onSelectionReasoningEffortChange={onSelectionReasoningEffortChange}
+      />,
+    );
+
+    expect(await screen.findByRole("button", { name: "调整 Claude effort" })).toHaveTextContent("max");
+    await waitFor(() => expect(onSelectionReasoningEffortChange).toHaveBeenCalledWith("max"));
   });
 
   it("supports local Codex effort selection before a flow exists without a lightning icon", async () => {

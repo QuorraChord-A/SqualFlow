@@ -5,7 +5,7 @@ import type { RuntimeDiagnosticEvent } from "./adapters/runtimeAdapter.js";
 export type RuntimeDiagnosticContext = {
   runtimeRole: "leader" | "leader_compaction" | "expert";
   flowId: string;
-  userTurnId: string | null;
+  workRunId: string | null;
   agentSessionId: string;
   taskId?: string;
   flowExpertId?: string;
@@ -37,7 +37,7 @@ export function reportRuntimeDiagnostic(input: {
       ...(event.attempt !== undefined ? { attempt: event.attempt } : {}),
       ...(event.maxAttempts !== undefined ? { max_attempts: event.maxAttempts } : {}),
       runtime_role: context.runtimeRole,
-      ...(context.userTurnId ? { user_turn_id: context.userTurnId } : {}),
+      ...(context.workRunId ? { work_run_id: context.workRunId } : {}),
       ...(context.taskId ? { task_id: context.taskId } : {}),
     },
   }).catch((error) => {

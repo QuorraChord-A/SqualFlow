@@ -3,11 +3,11 @@
 import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, FileText, FolderTree, Search } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import type { UserTurnReview, UserTurnReviewFile } from "../../hooks/useFlowWorkbench";
+import type { WorkRunReview, WorkRunReviewFile } from "../../hooks/useFlowWorkbench";
 import UnifiedDiff from "./UnifiedDiff";
 
 type ReviewDiffPanelProps = {
-  review: UserTurnReview | null;
+  review: WorkRunReview | null;
 };
 
 function statClassName(kind: "additions" | "deletions") {
@@ -16,13 +16,13 @@ function statClassName(kind: "additions" | "deletions") {
     : "text-red-700 dark:text-red-400";
 }
 
-function statusLabel(status: UserTurnReviewFile["status"]) {
+function statusLabel(status: WorkRunReviewFile["status"]) {
   if (status === "added") return "A";
   if (status === "deleted") return "D";
   return "M";
 }
 
-function statusClassName(status: UserTurnReviewFile["status"]) {
+function statusClassName(status: WorkRunReviewFile["status"]) {
   if (status === "added") return "text-emerald-700 dark:text-emerald-400";
   if (status === "deleted") return "text-red-700 dark:text-red-400";
   return "text-sky-700 dark:text-sky-300";
@@ -36,7 +36,7 @@ function groupName(path: string) {
   return path.includes("/") ? path.split("/", 1)[0] || "." : ".";
 }
 
-function ReviewFileCard({ file }: { file: UserTurnReviewFile }) {
+function ReviewFileCard({ file }: { file: WorkRunReviewFile }) {
   const [expanded, setExpanded] = useState(true);
   return (
     <section className="overflow-hidden rounded-lg border border-border/80 bg-card/35" data-testid="review-file-card">
@@ -61,14 +61,14 @@ function ReviewFileCard({ file }: { file: UserTurnReviewFile }) {
   );
 }
 
-function ReviewFileList({ files }: { files: UserTurnReviewFile[] }) {
+function ReviewFileList({ files }: { files: WorkRunReviewFile[] }) {
   const [query, setQuery] = useState("");
   const normalizedQuery = query.trim().toLowerCase();
   const grouped = useMemo(() => {
     const filtered = normalizedQuery
       ? files.filter((file) => file.path.toLowerCase().includes(normalizedQuery))
       : files;
-    const groups = new Map<string, UserTurnReviewFile[]>();
+    const groups = new Map<string, WorkRunReviewFile[]>();
     for (const file of filtered) {
       const name = groupName(file.path);
       groups.set(name, [...(groups.get(name) ?? []), file]);

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
 import { createApp } from "../src/server/app.js";
+import { leaderTranscriptChannelId } from "../src/domain/transcriptChannels.js";
 import { ChatJournal } from "../src/ws/chatJournal.js";
 
 const wsBuffers = new WeakMap<any, unknown[]>();
@@ -79,7 +80,7 @@ describe("leader snapshot uses the canonical transcript", () => {
     store.createAgentSession({
       id: "ags-leader-stale",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-stale",
@@ -88,7 +89,7 @@ describe("leader snapshot uses the canonical transcript", () => {
     });
 
     const chatJournal = new ChatJournal(store);
-    recordLeaderCompleteTurn(chatJournal, flow.id, "sdk-leader-stale", "ags-leader-stale");
+    recordLeaderCompleteTurn(chatJournal, flow.id, "sdk-leader-stale", leaderTranscriptChannelId(flow.id));
     const app = createApp({
       logger: false,
       store,

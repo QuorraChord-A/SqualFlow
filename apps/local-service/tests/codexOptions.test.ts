@@ -54,23 +54,21 @@ function baseInput(overrides: Partial<BuildExpertRuntimeOptionsInput> = {}): Bui
 }
 
 describe("buildCodexExpertOptions browser MCP config", () => {
-  it("grants the project, per-flow scratch, and shared pooled Codex temp as writable roots", () => {
+  it.each([
+    { name: "read-oriented", capabilities: ["read", "search", "shell"] },
+    { name: "writable", capabilities: ["read", "write", "edit", "search", "shell"] },
+  ] satisfies Array<{
+    name: string;
+    capabilities: BuildExpertRuntimeOptionsInput["capabilities"];
+  }>)("disables the native Codex sandbox for $name Experts", ({ capabilities }) => {
     const options = buildCodexExpertOptions(baseInput({
       cwd: "/repo/project",
       scratchDir: "/managed/scratch",
-      capabilities: ["read", "write", "shell"],
+      capabilities,
     }));
 
-    expect(options.sandboxMode).toBe("workspace-write");
-    expect(options.config).toEqual(expect.objectContaining({
-      "sandbox_workspace_write.exclude_tmpdir_env_var": true,
-      "sandbox_workspace_write.exclude_slash_tmp": true,
-    }));
-    expect(options.config["sandbox_workspace_write.writable_roots"]).toEqual([
-      "/repo/project",
-      "/managed/scratch",
-      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/custom$/),
-    ]);
+    expect(options.sandboxMode).toBe("danger-full-access");
+    expect(Object.keys(options.config).some((key) => key.startsWith("sandbox_workspace_write."))).toBe(false);
     expect(options.env).toMatchObject({
       TMPDIR: "/managed/scratch",
       TMP: "/managed/scratch",
@@ -135,9 +133,8 @@ describe("buildCodexExpertOptions browser MCP config", () => {
     expect(options.modelProvider).toBe("openai");
     expect(options.config.model_reasoning_effort).toBeUndefined();
     expect(Object.keys(options.config).some((key) => key.startsWith("model_providers."))).toBe(false);
-    expect(options.config["sandbox_workspace_write.writable_roots"]).toContainEqual(
-      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/official$/),
-    );
+    expect(options.sandboxMode).toBe("danger-full-access");
+    expect(Object.keys(options.config).some((key) => key.startsWith("sandbox_workspace_write."))).toBe(false);
   });
 
   it("keeps model catalog diagnostics on while detailed transport diagnostics remain opt-in", () => {
@@ -294,10 +291,12 @@ describe("buildCodexLeaderOptions MCP config", () => {
     const expert = buildCodexExpertOptions(baseInput());
 
     expect(leader.config["features.multi_agent"]).toBe(false);
+    expect(leader.config["features.multi_agent_v2"]).toBe(false);
     expect(expert.config["features.multi_agent"]).toBeUndefined();
+    expect(expert.config["features.multi_agent_v2"]).toBeUndefined();
   });
 
-  it("gives a writable Leader the project and slash tmp without changing Expert sandbox defaults", () => {
+  it("disables the native Codex sandbox for the Leader without emitting workspace sandbox config", () => {
     const options = buildCodexLeaderOptions({
       role: "leader",
       systemPrompt: "system",
@@ -307,15 +306,13 @@ describe("buildCodexLeaderOptions MCP config", () => {
       mcpTools: [],
     });
 
-    expect(options.sandboxMode).toBe("workspace-write");
-    expect(options.config["sandbox_workspace_write.exclude_tmpdir_env_var"]).toBe(true);
-    expect(options.config["sandbox_workspace_write.exclude_slash_tmp"]).toBe(false);
-    expect(options.config["sandbox_workspace_write.writable_roots"]).toEqual([
-      "/repo/project",
-      "/managed/leader-scratch",
-      expect.stringMatching(/output\/runtime\/scratch\/codex-pool\/custom$/),
-      "/tmp",
-    ]);
+    expect(options.sandboxMode).toBe("danger-full-access");
+    expect(Object.keys(options.config).some((key) => key.startsWith("sandbox_workspace_write."))).toBe(false);
+    expect(options.env).toMatchObject({
+      TMPDIR: "/managed/leader-scratch",
+      TMP: "/managed/leader-scratch",
+      TEMP: "/managed/leader-scratch",
+    });
   });
 
   it("exposes Leader and browser MCP namespaces to the external official-login runtime", () => {

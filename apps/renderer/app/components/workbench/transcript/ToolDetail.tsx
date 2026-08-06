@@ -45,7 +45,7 @@ function ShellDetail({ command, output }: { command?: string; output: unknown })
   }
 
   return (
-    <div className={styles.terminalCard}>
+    <div className={styles.terminalCard} role="region" aria-label="命令输出" tabIndex={0}>
       {command && <div>$ {command}</div>}
       {stdout && <div className={styles.terminalMuted}>{stdout}</div>}
       {stderr && <div className={styles.terminalMuted}>{stderr}</div>}

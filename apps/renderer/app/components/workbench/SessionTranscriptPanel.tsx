@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type CSSProperties } from "react";
 import type { UIMessage } from "ai";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { ConversationEmptyState } from "@/components/ai-elements-official/conversation";
@@ -22,7 +22,7 @@ import type { TimelineInputMessage, TranscriptActivity, TranscriptBlock } from "
 import type { TurnTiming } from "./transcript/buildTranscriptTimeline";
 import type { DecisionCardData, SpecCardState } from "../../hooks/useDashboardData";
 import type { OrchestrationPlanView } from "../../types/orchestration";
-import type { UserTurnReview } from "../../hooks/useFlowWorkbench";
+import type { WorkRunReview } from "../../hooks/useFlowWorkbench";
 import { useAppPreferencesStore } from "../../stores/useAppPreferencesStore";
 import type { BrowserElementAttachment } from "../../stores/useBrowserSelectionStore";
 import type { MessageImageAttachment } from "../../types/messageAttachments";
@@ -35,6 +35,7 @@ import {
   type TranscriptEvent,
 } from "./transcript/transcriptState";
 import { ImagePreviewOverlay, ImageThumbnailContent } from "./transcript/ImagePreview";
+import { isMcpToolNamed, parseMcpOutput } from "./transcript/mcpToolPresenters";
 
 export interface SessionTranscriptPanelProps {
   flowId: string | null;
@@ -52,14 +53,15 @@ export interface SessionTranscriptPanelProps {
   followRequestKey?: number;
   isAwaitingResponse?: boolean;
   allowInferredAgentSessionId?: boolean;
+  stableTranscriptChannel?: boolean;
   className?: string;
   bottomOverlayHeight?: number;
   onOpenSpec?: (specRevisionId: string, title: string) => void;
   onOpenPlan?: (plan: OrchestrationPlanView) => void;
   onApprovePlan?: (plan: OrchestrationPlanView) => void;
   showReasoning?: boolean;
-  userTurns?: UserTurnDisplay[];
-  review?: UserTurnReview | null;
+  workRuns?: WorkRunDisplay[];
+  review?: WorkRunReview | null;
   onOpenReview?: () => void;
   onOpenWorkspaceFile?: (path: string) => void;
   statusDividerLabel?: string | null;
@@ -68,16 +70,18 @@ export interface SessionTranscriptPanelProps {
   workspaceRootPath?: string | null;
 }
 
-export type UserTurnDisplay = {
+export type WorkRunDisplay = {
   id: string;
   triggerMessageId: string;
-  status: "active" | "waiting_user" | "completed" | "failed" | "cancelled" | string;
+  status: "ready" | "executing" | "waiting_user" | "interrupted" | "completed" | "failed" | "cancelled" | string;
   startedAt: string | null;
   activeStartedAt: string | null;
   activeDurationMs: number;
   completedAt: string | null;
   workRootPath?: string | null;
   specRequested?: boolean;
+  revision?: number;
+  executionStartedAt?: string | null;
 };
 
 export function shouldBatchTranscriptEvent(event: TranscriptEvent) {
@@ -86,12 +90,12 @@ export function shouldBatchTranscriptEvent(event: TranscriptEvent) {
     || event.type.startsWith("tool-");
 }
 
-type UserTurnReviewFile = UserTurnReview["files"][number];
-type UserTurnReviewLine = UserTurnReviewFile["lines"][number];
+type WorkRunReviewFile = WorkRunReview["files"][number];
+type WorkRunReviewLine = WorkRunReviewFile["lines"][number];
 const REVIEW_DIFF_PREVIEW_UNLOCK_MS = 1_000;
 const REVIEW_DIFF_PREVIEW_LOCK_MS = 750;
 
-function DiffPreviewLine({ line }: { line: UserTurnReviewLine }) {
+function DiffPreviewLine({ line }: { line: WorkRunReviewLine }) {
   const marker = line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
   const rowClassName = line.kind === "added"
     ? "bg-emerald-500/10 text-foreground dark:bg-emerald-500/14"
@@ -114,7 +118,7 @@ function DiffPreviewLine({ line }: { line: UserTurnReviewLine }) {
   );
 }
 
-function FileDiffPreview({ file }: { file: UserTurnReviewFile }) {
+function FileDiffPreview({ file }: { file: WorkRunReviewFile }) {
   return (
     <div
       data-testid="review-file-diff-preview"
@@ -138,11 +142,11 @@ function FileDiffPreview({ file }: { file: UserTurnReviewFile }) {
   );
 }
 
-function UserTurnReviewSummaryCard({
+function WorkRunReviewSummaryCard({
   review,
   onOpenReview,
 }: {
-  review: UserTurnReview;
+  review: WorkRunReview;
   onOpenReview?: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -204,7 +208,7 @@ function UserTurnReviewSummaryCard({
   }, [clearLockTimer, clearUnlockTimer]);
 
   return (
-    <div data-testid="user-turn-review-summary" className="my-4 w-full max-w-[820px] rounded-lg border border-border bg-card/70 shadow-sm">
+    <div data-testid="work-run-review-summary" className="my-4 w-full max-w-[820px] rounded-lg border border-border bg-card/70 shadow-sm">
       <div className="flex items-center gap-3 border-b border-border/70 px-4 py-3">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-background">
           <FileText className="size-4 text-muted-foreground" />
@@ -319,7 +323,7 @@ function messageTimestampValue(message: UIMessage): unknown {
   return idTimestamp ? Number(idTimestamp) : undefined;
 }
 
-function userTurnTiming(turn: UserTurnDisplay): TurnTiming {
+function workRunTiming(turn: WorkRunDisplay): TurnTiming {
   if (turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled") {
     return {
       startedAt: turn.startedAt,
@@ -358,9 +362,9 @@ function timestampMs(value: unknown): number | null {
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 
-function findUserTurnStartIndex(
+function findWorkRunStartIndex(
   messages: UIMessage[],
-  turn: UserTurnDisplay,
+  turn: WorkRunDisplay,
   usedIndexes: Set<number>,
 ): number {
   return messages.findIndex((message, index) =>
@@ -658,25 +662,15 @@ function useCardMaps(
     }
 
     const plansByRevisionId = new Map((orchestrationPlans ?? []).map((plan) => [plan.revision.plan_revision_id, plan]));
-    const latestPlanByUserTurnId = new Map<string, OrchestrationPlanView>();
+    const latestPlanByWorkRunId = new Map<string, OrchestrationPlanView>();
     for (const plan of orchestrationPlans ?? []) {
-      const current = latestPlanByUserTurnId.get(plan.user_turn_id);
+      const current = latestPlanByWorkRunId.get(plan.work_run_id);
       if (!current || current.revision.revision_number < plan.revision.revision_number) {
-        latestPlanByUserTurnId.set(plan.user_turn_id, plan);
+        latestPlanByWorkRunId.set(plan.work_run_id, plan);
       }
     }
-    return { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByUserTurnId };
+    return { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByWorkRunId };
   }, [decisionCards, decisionCardStatuses, decisionCardAnswers, orchestrationPlans, specCards]);
-}
-
-export function ensureDurablePlanCard(blocks: TranscriptBlock[], plan?: OrchestrationPlanView) {
-  if (!plan || blocks.some((block) => block.type === "plan-card" && block.planRevisionId === plan.revision.plan_revision_id)) return blocks;
-  return [...blocks, {
-    id: `durable-plan-card:${plan.revision.plan_revision_id}`,
-    type: "plan-card" as const,
-    planRevisionId: plan.revision.plan_revision_id,
-    toolCallId: "durable-plan-state",
-  }];
 }
 
 export function ensureDurableSpecCards(blocks: TranscriptBlock[], cards: Iterable<SpecCardState>) {
@@ -703,7 +697,7 @@ function recordValue(value: unknown): Record<string, unknown> | null {
 }
 
 function submittedPlanRevisionId(output: unknown): string | null {
-  const revision = recordValue(recordValue(output)?.revision);
+  const revision = recordValue(recordValue(parseMcpOutput(output))?.revision);
   const revisionId = revision?.plan_revision_id ?? revision?.id;
   return typeof revisionId === "string" && revisionId ? revisionId : null;
 }
@@ -712,7 +706,7 @@ function submissionToolMatchesPlan(
   tool: Extract<TranscriptBlock, { type: "tool-group" }>["tools"][number],
   plan: OrchestrationPlanView,
 ) {
-  if (!tool.toolName.endsWith("__submit_orchestration_plan")) return false;
+  if (!isMcpToolNamed(tool.toolName, "submit_orchestration_plan", tool.mcp?.tool)) return false;
   const revisionId = submittedPlanRevisionId(tool.output);
   if (revisionId) return revisionId === plan.revision.plan_revision_id;
 
@@ -722,26 +716,61 @@ function submissionToolMatchesPlan(
   return inputFlowId === plan.flow_id && inputTitle === plan.revision.title;
 }
 
+export function hasMatchingPlanToolAnchor(messages: UIMessage[], plan: OrchestrationPlanView) {
+  return messages.some((message) => {
+    if (message.role !== "assistant") return false;
+    const parts = timelineInputMessage(message).parts;
+    return parts.some((part) => {
+      if (part.type === "text" || part.type === "reasoning") return false;
+      return submissionToolMatchesPlan({
+        toolCallId: part.toolCallId,
+        toolName: part.toolName,
+        capability: part.capability,
+        providerToolName: part.providerToolName,
+        mcp: part.mcp,
+        state: "completed",
+        input: part.input ?? null,
+        output: part.output,
+      }, plan);
+    });
+  });
+}
+
 /**
- * Reconcile a persisted orchestration plan with an SDK transcript that still
- * contains the earlier live `submit_orchestration_plan` input state. The
- * persisted revision id is authoritative; flow + title is only used when the
- * stale SDK part has not retained its output yet.
+ * Reconcile persisted orchestration state with its canonical transcript tool
+ * part. The transcript owns display position; persisted state only completes
+ * the tool lifecycle and hydrates a card directly after the matching tool
+ * group. A plan without a matching tool anchor is never appended elsewhere.
  */
 export function reconcileDurablePlanCard(
   blocks: TranscriptBlock[],
   plans: OrchestrationPlanView[],
   preferredPlan?: OrchestrationPlanView,
 ) {
-  const tools = blocks
-    .filter((block): block is Extract<TranscriptBlock, { type: "tool-group" }> => block.type === "tool-group")
-    .flatMap((block) => block.tools)
-    .filter((tool) => tool.toolName.endsWith("__submit_orchestration_plan"));
+  const toolAnchors = blocks.flatMap((block) => block.type === "tool-group"
+    ? block.tools
+      .filter((tool) => isMcpToolNamed(tool.toolName, "submit_orchestration_plan", tool.mcp?.tool))
+      .map((tool) => ({ blockId: block.id, tool }))
+    : []);
+  const planCandidates = preferredPlan
+    ? [preferredPlan, ...plans.filter((plan) => plan.revision.plan_revision_id !== preferredPlan.revision.plan_revision_id)]
+    : plans;
+  const match = planCandidates
+    .map((plan) => ({
+      plan,
+      anchor: [...toolAnchors].reverse().find(({ tool }) => submissionToolMatchesPlan(tool, plan)),
+    }))
+    .find((candidate) => candidate.anchor);
+  if (!match?.anchor) return blocks;
 
-  const matchedPlan = preferredPlan ?? plans.find((plan) => tools.some((tool) => submissionToolMatchesPlan(tool, plan)));
-  if (!matchedPlan) return blocks;
+  const matchedPlan = match.plan;
+  const matchedAnchor = match.anchor;
+  const hasCard = blocks.some((block) => (
+    block.type === "plan-card"
+    && block.planRevisionId === matchedPlan.revision.plan_revision_id
+  ));
 
-  const reconciled = blocks.map((block) => {
+  return blocks.flatMap((block) => {
     if (block.type !== "tool-group") return block;
     let changed = false;
     const reconciledTools = block.tools.map((tool) => {
@@ -749,18 +778,22 @@ export function reconcileDurablePlanCard(
       changed = true;
       return { ...tool, state: "completed" as const };
     });
-    if (!changed) return block;
-    const hasRunningTool = reconciledTools.some((tool) => tool.state === "running");
-    return {
+    const hasRunningTool = changed && reconciledTools.some((tool) => tool.state === "running");
+    const reconciledBlock = changed ? {
       ...block,
       tools: reconciledTools,
       finalized: hasRunningTool ? block.finalized : true,
       activeState: hasRunningTool ? block.activeState : undefined,
       currentToolCallId: hasRunningTool ? block.currentToolCallId : null,
-    };
+    } : block;
+    if (block.id !== matchedAnchor.blockId || hasCard) return reconciledBlock;
+    return [reconciledBlock, {
+      id: `tool-card:${matchedAnchor.tool.toolCallId}:orchestration-plan`,
+      type: "plan-card" as const,
+      planRevisionId: matchedPlan.revision.plan_revision_id,
+      toolCallId: matchedAnchor.tool.toolCallId,
+    }];
   });
-
-  return ensureDurablePlanCard(reconciled, matchedPlan);
 }
 
 export function interleaveHistoryBoundaries(
@@ -846,7 +879,7 @@ function SessionTranscriptContent({
   activity,
   activityMessageId,
   activeTurnTiming,
-  userTurns,
+  workRuns,
   review,
   onOpenReview,
   onOpenWorkspaceFile,
@@ -878,8 +911,8 @@ function SessionTranscriptContent({
   activity?: TranscriptActivity | null;
   activityMessageId?: string | null;
   activeTurnTiming?: TurnTiming | null;
-  userTurns?: UserTurnDisplay[];
-  review?: UserTurnReview | null;
+  workRuns?: WorkRunDisplay[];
+  review?: WorkRunReview | null;
   onOpenReview?: () => void;
   onOpenWorkspaceFile?: (path: string) => void;
   expandedDecisionResultIds: Set<string>;
@@ -892,8 +925,9 @@ function SessionTranscriptContent({
   thinkingLabel?: string | null;
 }) {
   const lastFollowRequestKeyRef = useRef(followRequestKey);
-  const { follow, registerThread } = useTranscriptScroll();
-  const { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByUserTurnId } = useCardMaps(
+  const followedPlanRevisionIdsRef = useRef(new Set<string>());
+  const { follow, followIfAtBottom, registerThread } = useTranscriptScroll();
+  const { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByWorkRunId } = useCardMaps(
     decisionCards,
     decisionCardStatuses,
     decisionCardAnswers,
@@ -905,6 +939,10 @@ function SessionTranscriptContent({
     if (activity !== null && message.id === activityMessageId) return true;
     return hasRenderableContent(message, showReasoning);
   });
+  const renderablePlanRevisionIds = (orchestrationPlans ?? [])
+    .filter((plan) => hasMatchingPlanToolAnchor(visibleMessages, plan))
+    .map((plan) => plan.revision.plan_revision_id);
+  const renderablePlanRevisionKey = renderablePlanRevisionIds.join(":");
 
   const timelineItems = interleaveStatusDivider(
     interleaveHistoryBoundaries(visibleMessages, historyBoundaries),
@@ -912,17 +950,17 @@ function SessionTranscriptContent({
     Boolean(statusDividerAnimated),
     statusDividerAt,
   );
-  const { userTurnRenderTargets, userTurnGroupedMessageIds } = useMemo(() => {
-    const targets = new Map<string, { activity: TranscriptActivity; timing: TurnTiming; messageIds: string[]; turn?: UserTurnDisplay }>();
+  const { workRunRenderTargets, workRunGroupedMessageIds } = useMemo(() => {
+    const targets = new Map<string, { activity: TranscriptActivity; timing: TurnTiming; messageIds: string[]; turn?: WorkRunDisplay }>();
     const grouped = new Set<string>();
-    if (!userTurns || userTurns.length === 0) {
+    if (!workRuns || workRuns.length === 0) {
       // Continue to inferred grouping below. Active snapshots can arrive before
-      // user turn state after switching flows.
+      // WorkRun state after switching flows.
     } else {
       const usedStartIndexes = new Set<number>();
-      const turnStartIndexes: Array<{ turn: UserTurnDisplay; startIndex: number }> = [];
-      for (const turn of userTurns) {
-        const startIndex = findUserTurnStartIndex(visibleMessages, turn, usedStartIndexes);
+      const turnStartIndexes: Array<{ turn: WorkRunDisplay; startIndex: number }> = [];
+      for (const turn of workRuns) {
+        const startIndex = findWorkRunStartIndex(visibleMessages, turn, usedStartIndexes);
         if (startIndex < 0) continue;
         usedStartIndexes.add(startIndex);
         turnStartIndexes.push({ turn, startIndex });
@@ -945,7 +983,7 @@ function SessionTranscriptContent({
           activity: turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled"
             ? "finished"
             : "waiting",
-          timing: userTurnTiming(turn),
+          timing: workRunTiming(turn),
           messageIds: turnMessages.map((message) => message.id),
           turn,
         });
@@ -954,7 +992,7 @@ function SessionTranscriptContent({
 
     // The backend-driven grouping above is authoritative when it accounts for
     // every assistant message; only fall back to the inferred heuristic below
-    // for turns it hasn't covered yet (e.g. userTurns arriving late after a
+    // for turns it hasn't covered yet (e.g. workRuns arriving late after a
     // flow switch). Skipping it entirely once fully covered avoids the two
     // algorithms ever picking different anchor ids for the same turn.
     const allAssistantsCovered = visibleMessages.every(
@@ -991,11 +1029,11 @@ function SessionTranscriptContent({
       });
     }
 
-    return { userTurnRenderTargets: targets, userTurnGroupedMessageIds: grouped };
-  }, [activity, activityMessageId, activeTurnTiming, userTurns, visibleMessages]);
+    return { workRunRenderTargets: targets, workRunGroupedMessageIds: grouped };
+  }, [activity, activityMessageId, activeTurnTiming, workRuns, visibleMessages]);
   const durableSpecTargetMessageId = [...visibleMessages].reverse().find(
     (message) => message.role === "assistant"
-      && (!userTurnGroupedMessageIds.has(message.id) || userTurnRenderTargets.has(message.id)),
+      && (!workRunGroupedMessageIds.has(message.id) || workRunRenderTargets.has(message.id)),
   )?.id;
   const durableSpecCards = [...specCardsById.values()].filter((card) =>
     !visibleMessages.some((message) => message.role === "assistant"
@@ -1007,13 +1045,13 @@ function SessionTranscriptContent({
   );
   const lastVisibleMessage = visibleMessages.at(-1);
   const durablePlanFallback = visibleMessages.length === 0
-    ? [...latestPlanByUserTurnId.values()].reduce<OrchestrationPlanView | undefined>(
+    ? [...latestPlanByWorkRunId.values()].reduce<OrchestrationPlanView | undefined>(
       (latest, plan) => !latest || latest.revision.created_at < plan.revision.created_at ? plan : latest,
       undefined,
     )
     : undefined;
   const durablePlanTurn = durablePlanFallback
-    ? userTurns?.find((turn) => turn.id === durablePlanFallback.user_turn_id)
+    ? workRuns?.find((turn) => turn.id === durablePlanFallback.work_run_id)
     : undefined;
   const showThinkingIndicator =
     isAwaitingResponse && !durablePlanFallback && !activeAssistantMessage && lastVisibleMessage?.role !== "assistant";
@@ -1023,6 +1061,17 @@ function SessionTranscriptContent({
     lastFollowRequestKeyRef.current = followRequestKey;
     follow();
   }, [follow, followRequestKey]);
+
+  useLayoutEffect(() => {
+    const newlyRenderableRevisionIds = renderablePlanRevisionKey.split(":").filter(Boolean).filter(
+      (revisionId) => !followedPlanRevisionIdsRef.current.has(revisionId),
+    );
+    if (newlyRenderableRevisionIds.length === 0) return;
+    for (const revisionId of newlyRenderableRevisionIds) {
+      followedPlanRevisionIdsRef.current.add(revisionId);
+    }
+    followIfAtBottom();
+  }, [followIfAtBottom, renderablePlanRevisionKey]);
 
   return (
     <>
@@ -1047,8 +1096,13 @@ function SessionTranscriptContent({
             {durablePlanFallback ? (
               <TranscriptTimelineRenderer
                 key={`durable-plan-fallback:${durablePlanFallback.revision.plan_revision_id}`}
-                turnId={`durable-plan-fallback:${durablePlanFallback.user_turn_id}`}
-                blocks={ensureDurablePlanCard([], durablePlanFallback)}
+                turnId={`durable-plan-fallback:${durablePlanFallback.work_run_id}`}
+                blocks={[{
+                  id: `orphaned-plan-card:${durablePlanFallback.revision.plan_revision_id}`,
+                  type: "plan-card",
+                  planRevisionId: durablePlanFallback.revision.plan_revision_id,
+                  toolCallId: "orphaned-plan-state",
+                }]}
                 flowId={flowId ?? ""}
                 decisionCardsById={decisionCardsById}
                 specCardsById={specCardsById}
@@ -1057,7 +1111,7 @@ function SessionTranscriptContent({
                 onPlanOpen={onOpenPlan ?? (() => {})}
                 onPlanApprove={onApprovePlan ?? (() => {})}
                 activity="finished"
-                turnTiming={durablePlanTurn ? userTurnTiming(durablePlanTurn) : null}
+                turnTiming={durablePlanTurn ? workRunTiming(durablePlanTurn) : null}
                 showReasoning={showReasoning}
                 workspaceRootPath={durablePlanTurn?.workRootPath?.trim() || workspaceRootPath}
                 onOpenWorkspaceFile={onOpenWorkspaceFile}
@@ -1089,9 +1143,9 @@ function SessionTranscriptContent({
             }
             const msg = item;
             const isActive = msg.id === activityMessageId;
-            const userTurnTarget = userTurnRenderTargets.get(msg.id);
-            const groupedByUserTurn = userTurnGroupedMessageIds.has(msg.id);
-            if (groupedByUserTurn && !userTurnTarget) return null;
+            const workRunTarget = workRunRenderTargets.get(msg.id);
+            const groupedByWorkRun = workRunGroupedMessageIds.has(msg.id);
+            if (groupedByWorkRun && !workRunTarget) return null;
 
             if (isRunningGuideMessage(msg)) {
               return (
@@ -1150,27 +1204,27 @@ function SessionTranscriptContent({
             }
 
             const projectionActivity: TranscriptActivity = isActive ? activity ?? "finished" : "finished";
-            const rendererActivity = userTurnTarget
-              ? userTurnTarget.activity
+            const rendererActivity = workRunTarget
+              ? workRunTarget.activity
               : isActive
                 ? activity ?? undefined
-                : groupedByUserTurn
+                : groupedByWorkRun
                   ? undefined
                   : "finished";
-            const rendererTurnTiming = userTurnTarget
-              ? userTurnTarget.timing
+            const rendererTurnTiming = workRunTarget
+              ? workRunTarget.timing
               : isActive
                 ? activeTurnTiming
-                : groupedByUserTurn
+                : groupedByWorkRun
                   ? null
                   : readHistoryTurnTiming(msg);
-            const targetMessages = userTurnTarget
-              ? userTurnTarget.messageIds
+            const targetMessages = workRunTarget
+              ? workRunTarget.messageIds
                 .map((messageId) => visibleMessages.find((message) => message.id === messageId))
                 .filter((message): message is UIMessage => Boolean(message))
               : [msg];
             const blocks = targetMessages.flatMap((message) => {
-              const guideBlock = ((userTurnTarget && message.role === "user") || isRunningGuideMessage(message))
+              const guideBlock = ((workRunTarget && message.role === "user") || isRunningGuideMessage(message))
                 ? guideMessageBlock(message)
                 : null;
               if (guideBlock) return [guideBlock];
@@ -1182,15 +1236,15 @@ function SessionTranscriptContent({
             const planReconciledBlocks = reconcileDurablePlanCard(
               blocks,
               orchestrationPlans ?? [],
-              userTurnTarget?.turn ? latestPlanByUserTurnId.get(userTurnTarget.turn.id) : undefined,
+              workRunTarget?.turn ? latestPlanByWorkRunId.get(workRunTarget.turn.id) : undefined,
             );
             const renderedBlocks = msg.id === durableSpecTargetMessageId
               ? ensureDurableSpecCards(planReconciledBlocks, durableSpecCards)
               : planReconciledBlocks;
             const activeInGroup = targetMessages.some((message) => message.id === activityMessageId);
-            const reviewForTurn = userTurnTarget?.turn
-              && userTurnTarget.turn.status === "completed"
-              && review?.user_turn_id === userTurnTarget.turn.id
+            const reviewForTurn = workRunTarget?.turn
+              && workRunTarget.turn.status === "completed"
+              && review?.work_run_id === workRunTarget.turn.id
               ? review
               : null;
 
@@ -1209,9 +1263,9 @@ function SessionTranscriptContent({
                 activity={rendererTurnTiming ? rendererActivity : undefined}
                 turnTiming={rendererTurnTiming}
                 showReasoning={showReasoning}
-                workspaceRootPath={userTurnTarget?.turn?.workRootPath?.trim() || workspaceRootPath}
+                workspaceRootPath={workRunTarget?.turn?.workRootPath?.trim() || workspaceRootPath}
                 onOpenWorkspaceFile={onOpenWorkspaceFile}
-                beforeFooter={reviewForTurn ? <UserTurnReviewSummaryCard review={reviewForTurn} onOpenReview={onOpenReview} /> : undefined}
+                beforeFooter={reviewForTurn ? <WorkRunReviewSummaryCard review={reviewForTurn} onOpenReview={onOpenReview} /> : undefined}
                 data-testid="chat-message-assistant"
                 data-transcript-activity={activeInGroup ? activity ?? undefined : undefined}
                 thinkingLabel={activeInGroup ? thinkingLabel ?? undefined : undefined}
@@ -1251,13 +1305,14 @@ export default function SessionTranscriptPanel({
   followRequestKey,
   isAwaitingResponse = false,
   allowInferredAgentSessionId = false,
+  stableTranscriptChannel = false,
   className,
   bottomOverlayHeight,
   onOpenSpec,
   onOpenPlan,
   onApprovePlan,
   showReasoning: showReasoningOverride,
-  userTurns,
+  workRuns,
   review,
   onOpenReview,
   onOpenWorkspaceFile,
@@ -1281,6 +1336,8 @@ export default function SessionTranscriptPanel({
   const pendingHistoryRequestRef = useRef<string | null>(null);
   const eventFrameRef = useRef<number | null>(null);
   const pendingEventsRef = useRef<TranscriptCommittedEvent[]>([]);
+  const resyncInFlightRef = useRef<string | null>(null);
+  const planRecoveryAttemptsRef = useRef(new Set<string>());
   const activeFlowIdRef = useRef<string | null>(flowId);
   const activeFlowExpertIdRef = useRef<string | null>(flowExpertId);
   const activeAgentSessionIdRef = useRef<string | null>(agentSessionId);
@@ -1326,6 +1383,14 @@ export default function SessionTranscriptPanel({
     pendingEventsRef.current = [];
   }, []);
 
+  const requestTranscriptResync = useCallback(() => {
+    if (!flowId) return;
+    const requestKey = `${flowId}:${flowExpertId ?? "leader"}:${agentSessionId ?? "latest"}`;
+    if (resyncInFlightRef.current === requestKey) return;
+    resyncInFlightRef.current = requestKey;
+    wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined, flowExpertId ?? undefined);
+  }, [agentSessionId, flowExpertId, flowId]);
+
   useEffect(() => {
     const prevFlowId = prevFlowIdRef.current;
     const prevFlowExpertId = prevFlowExpertIdRef.current;
@@ -1347,6 +1412,8 @@ export default function SessionTranscriptPanel({
       inferredAgentSessionIdRef.current = agentSessionId;
       fetchedSessionRef.current = null;
       pendingHistoryRequestRef.current = null;
+      resyncInFlightRef.current = null;
+      planRecoveryAttemptsRef.current.clear();
       cancelPendingEventFlush();
       setRuntimeTransportLabel(null);
       dispatchTranscript({ type: "reset" });
@@ -1356,7 +1423,12 @@ export default function SessionTranscriptPanel({
         inferredAgentSessionIdRef.current = agentSessionId;
       }
       const lastRealAgentSessionId = lastRealAgentSessionIdRef.current;
-      if (agentSessionId !== null && lastRealAgentSessionId !== null && lastRealAgentSessionId !== agentSessionId) {
+      if (
+        !stableTranscriptChannel
+        && agentSessionId !== null
+        && lastRealAgentSessionId !== null
+        && lastRealAgentSessionId !== agentSessionId
+      ) {
         fetchedSessionRef.current = null;
         cancelPendingEventFlush();
         setRuntimeTransportLabel(null);
@@ -1376,7 +1448,9 @@ export default function SessionTranscriptPanel({
 
     const fetchKey = flowExpertId
       ? `${flowId}:fexp:${flowExpertId}`
-      : `${flowId}:ags:${agentSessionId}`;
+      : stableTranscriptChannel
+        ? `${flowId}:leader-channel`
+        : `${flowId}:ags:${agentSessionId}`;
     if (fetchKey === fetchedSessionRef.current) return;
     fetchedSessionRef.current = fetchKey;
     pendingHistoryRequestRef.current = fetchKey;
@@ -1387,7 +1461,7 @@ export default function SessionTranscriptPanel({
     } else {
       wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined);
     }
-  }, [flowId, flowExpertId, agentSessionId, cancelPendingEventFlush]);
+  }, [flowId, flowExpertId, agentSessionId, stableTranscriptChannel, cancelPendingEventFlush]);
 
   useEffect(() => {
     dispatchTranscript({ type: "sync-optimistic", messages: optimisticMessages });
@@ -1421,7 +1495,10 @@ export default function SessionTranscriptPanel({
         if (extractMessageFlowExpertId(msg) !== activeFlowExpertId) return;
       } else {
         const msgAgentSessionId = extractMessageAgentSessionId(msg);
-        if (msgAgentSessionId !== activeAgentSessionId) {
+        const messageUsesStableLeaderChannel = stableTranscriptChannel
+          && "session_id" in msg
+          && msg.session_id === `leader:${activeFlowId}`;
+        if (!messageUsesStableLeaderChannel && msgAgentSessionId !== activeAgentSessionId) {
           if (allowInferredAgentSessionId && activeAgentSessionId === null && msgAgentSessionId) {
             inferredAgentSessionIdRef.current = msgAgentSessionId;
             activeAgentSessionIdRef.current = msgAgentSessionId;
@@ -1447,6 +1524,7 @@ export default function SessionTranscriptPanel({
       }
 
       if (msg.type === "session:transcript_snapshot") {
+        resyncInFlightRef.current = null;
         setIsLoadingHistory(false);
         if (pendingHistoryRequestRef.current) {
           pendingHistoryRequestRef.current = null;
@@ -1482,13 +1560,51 @@ export default function SessionTranscriptPanel({
     });
 
     return unsubscribe;
-  }, [flowId, flowExpertId, agentSessionId, allowInferredAgentSessionId, flushPendingEvents, scheduleTranscriptEvent]);
+  }, [flowId, flowExpertId, agentSessionId, allowInferredAgentSessionId, stableTranscriptChannel, flushPendingEvents, scheduleTranscriptEvent]);
 
   useEffect(() => {
     if (!transcript.needsResync || !flowId) return;
     dispatchTranscript({ type: "resync-requested" });
-    wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined, flowExpertId ?? undefined);
-  }, [agentSessionId, flowExpertId, flowId, transcript.needsResync]);
+    requestTranscriptResync();
+  }, [flowId, requestTranscriptResync, transcript.needsResync]);
+
+  const pendingPlanForRecovery = useMemo(() => [...(orchestrationPlans ?? [])]
+    .reverse()
+    .find((plan) => plan.approval?.status === "pending" || plan.revision.status === "pending_approval") ?? null,
+  [orchestrationPlans]);
+  const pendingPlanHasAnchor = useMemo(() => pendingPlanForRecovery
+    ? hasMatchingPlanToolAnchor(transcript.messages, pendingPlanForRecovery)
+    : false,
+  [pendingPlanForRecovery, transcript.messages]);
+
+  useEffect(() => {
+    if (
+      !flowId
+      || flowExpertId
+      || isAwaitingResponse
+      || isLoadingHistory
+      || transcript.streamEpoch === null
+      || transcript.cursor === null
+      || transcript.messages.length === 0
+      || !pendingPlanForRecovery
+      || pendingPlanHasAnchor
+    ) return;
+    const recoveryKey = `${flowId}:${pendingPlanForRecovery.revision.plan_revision_id}:${transcript.streamEpoch}`;
+    if (planRecoveryAttemptsRef.current.has(recoveryKey)) return;
+    planRecoveryAttemptsRef.current.add(recoveryKey);
+    requestTranscriptResync();
+  }, [
+    flowExpertId,
+    flowId,
+    isAwaitingResponse,
+    isLoadingHistory,
+    pendingPlanForRecovery,
+    pendingPlanHasAnchor,
+    requestTranscriptResync,
+    transcript.cursor,
+    transcript.messages.length,
+    transcript.streamEpoch,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -1527,7 +1643,7 @@ export default function SessionTranscriptPanel({
         activity={transcript.activeTurn?.activity ?? null}
         activityMessageId={transcript.activeTurn?.renderMessageId ?? null}
         activeTurnTiming={transcript.activeTurn?.timing ?? null}
-        userTurns={userTurns}
+        workRuns={workRuns}
         review={review}
         onOpenReview={onOpenReview}
         onOpenWorkspaceFile={onOpenWorkspaceFile}

@@ -9,7 +9,7 @@ import {
   runtimeModelContextWindowK,
 } from "../../config/runtimeModelContext.js";
 import type { AgentRuntimeConnectionTestInput, AgentRuntimeConnectionTestResult } from "./runtimeConnectionTest.js";
-import { inheritedProcessEnv } from "./claudeOptions.js";
+import { claudeRuntimeAuthEnv, inheritedProcessEnv } from "./claudeOptions.js";
 
 const CLAUDE_CONNECTION_TEST_TIMEOUT_MS = 30_000;
 
@@ -35,12 +35,7 @@ function testEnv(
   } else if (contextWindowK !== null) {
     env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
   }
-  if (runtimeConfig.authMode === "apiKey") {
-    const apiKey = runtimeConfig.apiKey.trim();
-    const baseUrl = runtimeConfig.baseUrl.trim();
-    if (apiKey) env.ANTHROPIC_API_KEY = apiKey;
-    if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
-  }
+  Object.assign(env, claudeRuntimeAuthEnv(runtimeConfig));
   return env;
 }
 

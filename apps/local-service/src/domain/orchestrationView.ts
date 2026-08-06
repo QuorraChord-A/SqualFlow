@@ -32,7 +32,7 @@ export function planRevisionView(store: Store, revisionId: string) {
   return {
     plan_id: plan.id,
     flow_id: plan.flowId,
-    user_turn_id: plan.userTurnId,
+    work_run_id: plan.workRunId,
     spec_revision_id: plan.specRevisionId,
     revision: {
       plan_revision_id: revision.id,

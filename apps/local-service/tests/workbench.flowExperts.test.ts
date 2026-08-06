@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 import { buildFlowWorkbench } from "../src/domain/workbench.js";
 
 function setup() {
@@ -27,11 +27,11 @@ describe("Flow workbench projection", () => {
   it("projects legacy per-task agent sessions into one Flow Expert", () => {
     const { store, flow, cleanup } = setup();
     try {
-      const userTurn = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
-      const task1 = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "实现 Hello World", description: "one", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
-      const task2 = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "优化 Hello World 页面", description: "two", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
-      const session1 = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: task1.id, expertId: "exp-coder", displayName: "Frontend 2482", sessionId: "sdk-1" });
-      const session2 = store.createAgentSession({ flowId: flow.id, userTurnId: userTurn.id, taskId: task2.id, expertId: "exp-coder", displayName: "Frontend 5924", sessionId: "sdk-2" });
+      const workRun = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
+      const task1 = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "实现 Hello World", description: "one", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
+      const task2 = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "优化 Hello World 页面", description: "two", expertId: "exp-coder", activeForm: "", dependsOnTaskIds: [] })!;
+      const session1 = store.createAgentSession({ flowId: flow.id, workRunId: workRun.id, taskId: task1.id, expertId: "exp-coder", displayName: "Frontend 2482", sessionId: "sdk-1" });
+      const session2 = store.createAgentSession({ flowId: flow.id, workRunId: workRun.id, taskId: task2.id, expertId: "exp-coder", displayName: "Frontend 5924", sessionId: "sdk-2" });
       store.assignTaskAgentSession(task1.id, session1.id);
       store.assignTaskAgentSession(task2.id, session2.id);
 
@@ -50,12 +50,12 @@ describe("Flow workbench projection", () => {
     }
   });
 
-  it("shows one Coder team member and all Flow Tasks across UserTurns", () => {
+  it("shows one Coder team member and all Flow Tasks across WorkRuns", () => {
     const { store, flow, cleanup } = setup();
     try {
       store.createAgentSession({
         flowId: flow.id,
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         displayName: "Leader",
@@ -63,10 +63,10 @@ describe("Flow workbench projection", () => {
       });
 
       const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-      const execution1 = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+      const execution1 = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
       const task1 = store.createTask({
         flowId: flow.id,
-        userTurnId: execution1.id,
+        workRunId: execution1.id,
         title: "实现 Hello World",
         description: "write page",
         expertId: "exp-coder",
@@ -75,7 +75,7 @@ describe("Flow workbench projection", () => {
       })!;
       const session1 = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: execution1.id,
+        workRunId: execution1.id,
         taskId: task1.id,
         expertId: "exp-coder",
         flowExpertId: flowExpert.id,
@@ -84,12 +84,12 @@ describe("Flow workbench projection", () => {
       });
       store.assignTaskFlowExpert(task1.id, flowExpert.id, session1.id);
       store.completeTask(task1.id, JSON.stringify({ status: "done", summary: "done" }));
-      store.completeUserTurn(execution1.id);
+      store.completeWorkRun(execution1.id);
 
-      const execution2 = beginUserTurn(store, { flowId: flow.id, source: "direct_message" })!;
+      const execution2 = beginWorkRun(store, { flowId: flow.id, source: "direct_message" })!;
       const task2 = store.createTask({
         flowId: flow.id,
-        userTurnId: execution2.id,
+        workRunId: execution2.id,
         title: "优化 Hello World 页面",
         description: "optimize page",
         expertId: "exp-coder",
@@ -98,7 +98,7 @@ describe("Flow workbench projection", () => {
       })!;
       const session2 = store.createAgentSession({
         flowId: flow.id,
-        userTurnId: execution2.id,
+        workRunId: execution2.id,
         taskId: task2.id,
         expertId: "exp-coder",
         flowExpertId: flowExpert.id,

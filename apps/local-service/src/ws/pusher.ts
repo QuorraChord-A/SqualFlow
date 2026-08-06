@@ -76,6 +76,7 @@ export async function finishInterruptedTurn(input: {
 
 export class WsPusher {
   private readonly flowExpertId: string;
+  private readonly transcriptId: string;
 
   constructor(
     private readonly flowId: string,
@@ -85,8 +86,10 @@ export class WsPusher {
     private readonly chatJournal: ChatJournal,
     private readonly onOutputCompleted?: (flowId: string) => Promise<void> | void,
     flowExpertId?: string,
+    transcriptId?: string,
   ) {
     this.flowExpertId = flowExpertId ?? agentSessionId;
+    this.transcriptId = transcriptId ?? this.flowExpertId;
   }
 
   async consume(event: PushedChunk): Promise<void> {
@@ -97,7 +100,7 @@ export class WsPusher {
       this.flowId,
       sessionId,
       chunk,
-      this.flowExpertId,
+      this.transcriptId,
       this.agentSessionId,
     );
     if (result.ignored) return;
@@ -143,7 +146,7 @@ export class WsPusher {
       content,
       messageId,
       createdAt,
-      this.flowExpertId,
+      this.transcriptId,
       metadata,
       this.agentSessionId,
     );

@@ -9,24 +9,24 @@ const MAX_LCS_CELLS = 200_000;
 const controlledEditCapabilities = new Set<RuntimeCapability>(["write", "edit"]);
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
-export type UserTurnReviewLine = {
+export type WorkRunReviewLine = {
   kind: "context" | "added" | "removed";
   old_line: number | null;
   new_line: number | null;
   text: string;
 };
 
-export type UserTurnReviewFile = {
+export type WorkRunReviewFile = {
   path: string;
   status: "modified" | "added" | "deleted";
   additions: number;
   deletions: number;
-  lines: UserTurnReviewLine[];
+  lines: WorkRunReviewLine[];
 };
 
-export type UserTurnReview = {
+export type WorkRunReview = {
   flow_id: string;
-  user_turn_id: string;
+  work_run_id: string;
   completed_at: string | null;
   totals: {
     files: number;
@@ -36,12 +36,12 @@ export type UserTurnReview = {
     added: number;
     deleted: number;
   };
-  files: UserTurnReviewFile[];
+  files: WorkRunReviewFile[];
 };
 
 type PendingControlledEdit = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string;
   toolUseId: string;
   capability: RuntimeCapability;
   absolutePath: string;
@@ -57,7 +57,7 @@ type DraftFile = {
 
 type DraftReview = {
   flowId: string;
-  userTurnId: string;
+  workRunId: string;
   files: Map<string, DraftFile>;
 };
 
@@ -120,7 +120,7 @@ function readTextSnapshot(filePath: string): { content: string | null; skipped: 
 
 export function beginControlledEditReview(input: {
   flowId: string;
-  userTurnId: string | null | undefined;
+  workRunId: string | null | undefined;
   rootPath: string;
   toolName: string;
   capability?: RuntimeCapability | null;
@@ -128,7 +128,7 @@ export function beginControlledEditReview(input: {
   toolUseId: string | null | undefined;
 }) {
   const capability = input.capability ?? null;
-  if (!input.userTurnId || !input.toolUseId || !capability || !controlledEditCapabilities.has(capability)) return;
+  if (!input.workRunId || !input.toolUseId || !capability || !controlledEditCapabilities.has(capability)) return;
   const inputPath = toolPath(input.toolInput);
   if (!inputPath) return;
   const resolved = resolveInsideRoot(input.rootPath, inputPath);
@@ -138,7 +138,7 @@ export function beginControlledEditReview(input: {
 
   pendingEdits.set(input.toolUseId, {
     flowId: input.flowId,
-    userTurnId: input.userTurnId,
+    workRunId: input.workRunId,
     toolUseId: input.toolUseId,
     capability,
     absolutePath: resolved.absolutePath,
@@ -159,9 +159,9 @@ export function consumeControlledEditToolResults(eventOrRaw: unknown) {
 
     const after = readTextSnapshot(pending.absolutePath);
     if (after.skipped) continue;
-    const draft = draftReviews.get(pending.userTurnId) ?? {
+    const draft = draftReviews.get(pending.workRunId) ?? {
       flowId: pending.flowId,
-      userTurnId: pending.userTurnId,
+      workRunId: pending.workRunId,
       files: new Map<string, DraftFile>(),
     };
     const file = draft.files.get(pending.absolutePath) ?? {
@@ -171,29 +171,29 @@ export function consumeControlledEditToolResults(eventOrRaw: unknown) {
     };
     file.after = after.content;
     draft.files.set(pending.absolutePath, file);
-    draftReviews.set(pending.userTurnId, draft);
+    draftReviews.set(pending.workRunId, draft);
   }
 }
 
-export function finalizeUserTurnReview(
+export function finalizeWorkRunReview(
   store: Store,
   flowId: string,
-  userTurnId: string,
+  workRunId: string,
   completedAt: string | null,
 ) {
   for (const [toolUseId, pending] of pendingEdits) {
-    if (pending.userTurnId === userTurnId) pendingEdits.delete(toolUseId);
+    if (pending.workRunId === workRunId) pendingEdits.delete(toolUseId);
   }
 
-  const draft = draftReviews.get(userTurnId);
-  draftReviews.delete(userTurnId);
+  const draft = draftReviews.get(workRunId);
+  draftReviews.delete(workRunId);
   if (!draft) {
-    store.deleteLatestUserTurnReview(flowId);
+    store.deleteLatestWorkRunReview(flowId);
     return null;
   }
 
   const files = [...draft.files.values()]
-    .flatMap((file): UserTurnReviewFile[] => {
+    .flatMap((file): WorkRunReviewFile[] => {
       if (file.before === file.after) return [];
       if (file.before === null && file.after === null) return [];
       const status = file.before === null
@@ -215,13 +215,13 @@ export function finalizeUserTurnReview(
     .sort((left, right) => left.path.localeCompare(right.path));
 
   if (files.length === 0) {
-    store.deleteLatestUserTurnReview(flowId);
+    store.deleteLatestWorkRunReview(flowId);
     return null;
   }
 
-  const review: UserTurnReview = {
+  const review: WorkRunReview = {
     flow_id: flowId,
-    user_turn_id: userTurnId,
+    work_run_id: workRunId,
     completed_at: completedAt,
     totals: {
       files: files.length,
@@ -233,29 +233,29 @@ export function finalizeUserTurnReview(
     },
     files,
   };
-  store.replaceLatestUserTurnReview({
+  store.replaceLatestWorkRunReview({
     flowId,
-    userTurnId,
+    workRunId,
     reviewJson: JSON.stringify(review),
   });
   return review;
 }
 
-export function latestUserTurnReview(store: Store, flowId: string): UserTurnReview | null {
-  const stored = store.getLatestUserTurnReview(flowId);
+export function latestWorkRunReview(store: Store, flowId: string): WorkRunReview | null {
+  const stored = store.getLatestWorkRunReview(flowId);
   if (!stored) return null;
   try {
-    const review = JSON.parse(stored.reviewJson) as UserTurnReview;
-    return review.flow_id === flowId && review.user_turn_id === stored.userTurnId ? review : null;
+    const review = JSON.parse(stored.reviewJson) as WorkRunReview;
+    return review.flow_id === flowId && review.work_run_id === stored.workRunId ? review : null;
   } catch {
     return null;
   }
 }
 
-export function clearUserTurnReview(flowId: string, store?: Store) {
-  store?.deleteLatestUserTurnReview(flowId);
-  for (const [userTurnId, draft] of draftReviews) {
-    if (draft.flowId === flowId) draftReviews.delete(userTurnId);
+export function clearWorkRunReview(flowId: string, store?: Store) {
+  store?.deleteLatestWorkRunReview(flowId);
+  for (const [workRunId, draft] of draftReviews) {
+    if (draft.flowId === flowId) draftReviews.delete(workRunId);
   }
   for (const [toolUseId, pending] of pendingEdits) {
     if (pending.flowId === flowId) pendingEdits.delete(toolUseId);
@@ -285,7 +285,7 @@ function splitLines(value: string) {
   return lines;
 }
 
-function diffLines(before: string, after: string): UserTurnReviewLine[] {
+function diffLines(before: string, after: string): WorkRunReviewLine[] {
   const oldLines = splitLines(before);
   const newLines = splitLines(after);
   let prefix = 0;
@@ -313,7 +313,7 @@ function diffLines(before: string, after: string): UserTurnReviewLine[] {
   return [...leading, ...middle, ...trailing];
 }
 
-function contextLine(text: string, oldLine: number, newLine: number): UserTurnReviewLine {
+function contextLine(text: string, oldLine: number, newLine: number): WorkRunReviewLine {
   return { kind: "context", old_line: oldLine, new_line: newLine, text };
 }
 
@@ -322,7 +322,7 @@ function fallbackDiff(
   newLines: string[],
   oldStart: number,
   newStart: number,
-): UserTurnReviewLine[] {
+): WorkRunReviewLine[] {
   return [
     ...oldLines.map((text, index) => ({ kind: "removed" as const, old_line: oldStart + index, new_line: null, text })),
     ...newLines.map((text, index) => ({ kind: "added" as const, old_line: null, new_line: newStart + index, text })),
@@ -334,7 +334,7 @@ function lcsDiff(
   newLines: string[],
   oldStart: number,
   newStart: number,
-): UserTurnReviewLine[] {
+): WorkRunReviewLine[] {
   const columns = newLines.length + 1;
   const table = new Uint16Array((oldLines.length + 1) * columns);
   for (let i = oldLines.length - 1; i >= 0; i -= 1) {
@@ -345,7 +345,7 @@ function lcsDiff(
     }
   }
 
-  const lines: UserTurnReviewLine[] = [];
+  const lines: WorkRunReviewLine[] = [];
   let i = 0;
   let j = 0;
   while (i < oldLines.length && j < newLines.length) {

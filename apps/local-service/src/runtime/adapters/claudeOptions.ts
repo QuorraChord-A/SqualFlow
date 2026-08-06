@@ -7,7 +7,7 @@ import {
   claudeRuntimeModelName,
   runtimeModelContextWindowK,
 } from "../../config/runtimeModelContext.js";
-import { parseRuntimeReasoningEffort } from "../codexReasoningEffort.js";
+import { parseRuntimeReasoningEffort } from "../../config/runtimeReasoningEffort.js";
 import type { RuntimeToolPermission } from "./runtimeAdapter.js";
 import type { RuntimeToolInput } from "../capabilities.js";
 import { prepareClaudeNativeContext } from "../nativeContextDiscovery.js";
@@ -66,19 +66,38 @@ function selectedModelName(runtimeConfig: RuntimeConfig | undefined): string | u
   return modelName || undefined;
 }
 
+function isOfficialAnthropicBaseUrl(baseUrl: string): boolean {
+  const trimmed = baseUrl.trim();
+  if (!trimmed) return true;
+  try {
+    return new URL(trimmed).hostname.toLowerCase() === "api.anthropic.com";
+  } catch {
+    return false;
+  }
+}
+
+export function claudeRuntimeAuthEnv(
+  runtimeConfig: Pick<RuntimeConfig, "apiKey" | "authMode" | "baseUrl"> | undefined,
+): Record<string, string> {
+  if (runtimeConfig?.authMode !== "apiKey") return {};
+  const env: Record<string, string> = {};
+  const apiKey = runtimeConfig.apiKey.trim();
+  const baseUrl = runtimeConfig.baseUrl.trim();
+  if (apiKey) {
+    if (isOfficialAnthropicBaseUrl(baseUrl)) env.ANTHROPIC_API_KEY = apiKey;
+    else env.ANTHROPIC_AUTH_TOKEN = apiKey;
+  }
+  if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
+  return env;
+}
+
 function buildRuntimeEnv(
   runtimeConfig: RuntimeConfig | undefined,
   modelName: string | undefined,
   contextWindowK: number | null | undefined,
 ): Options["env"] | undefined {
   if (!runtimeConfig && !modelName) return undefined;
-  const env: Record<string, string> = {};
-  if (runtimeConfig?.authMode === "apiKey") {
-    const apiKey = runtimeConfig.apiKey.trim();
-    const baseUrl = runtimeConfig.baseUrl.trim();
-    if (apiKey) env.ANTHROPIC_API_KEY = apiKey;
-    if (baseUrl) env.ANTHROPIC_BASE_URL = baseUrl;
-  }
+  const env: Record<string, string> = claudeRuntimeAuthEnv(runtimeConfig);
   if (modelName) env.ANTHROPIC_MODEL = modelName;
   if (runtimeConfig?.sdk === "claudecode" && contextWindowK !== undefined && contextWindowK !== null) {
     if (contextWindowK !== 1_000) env.CLAUDE_CODE_DISABLE_1M_CONTEXT = "1";
@@ -86,19 +105,23 @@ function buildRuntimeEnv(
   return Object.keys(env).length > 0 ? env : undefined;
 }
 
-export function inheritedProcessEnv(): NodeJS.ProcessEnv {
-  // Anthropic auth and routing must come from app configuration only. The launching
-  // environment may carry these vars (e.g. a terminal session), and Claude Code
-  // prefers ANTHROPIC_AUTH_TOKEN over ANTHROPIC_API_KEY, so a leaked token would
-  // silently override the configured key.
+function withoutClaudeProviderEnv(env: NodeJS.ProcessEnv | undefined): NodeJS.ProcessEnv {
   const {
     ANTHROPIC_API_KEY: _apiKey,
     ANTHROPIC_AUTH_TOKEN: _authToken,
     ANTHROPIC_BASE_URL: _baseUrl,
     ANTHROPIC_MODEL: _model,
     ...rest
-  } = process.env;
+  } = env ?? {};
   return rest;
+}
+
+export function inheritedProcessEnv(): NodeJS.ProcessEnv {
+  // Anthropic auth and routing must come from app configuration only. The launching
+  // environment may carry these vars (e.g. a terminal session), and Claude Code
+  // prefers ANTHROPIC_AUTH_TOKEN over ANTHROPIC_API_KEY, so a leaked token would
+  // silently override the configured key.
+  return withoutClaudeProviderEnv(process.env);
 }
 
 function buildInlineSettings(
@@ -119,9 +142,12 @@ function buildInlineSettings(
     ? claudeRuntimeModelName(configuredModelName, contextWindowK)
     : configuredModelName;
   const runtimeEnv = buildRuntimeEnv(runtimeConfig, modelName, contextWindowK);
+  const isolatedSettingsEnv = runtimeConfig
+    ? withoutClaudeProviderEnv(settingsEnv)
+    : settingsEnv;
   const env: Options["env"] = {
     ...inheritedProcessEnv(),
-    ...settingsEnv,
+    ...isolatedSettingsEnv,
     ...runtimeEnv,
     ...(scratchDir ? {
       CLAUDE_CODE_TMPDIR: path.resolve(scratchDir),
@@ -149,7 +175,7 @@ function normalizeCanUseTool(canUseTool: Options["canUseTool"]): Options["canUse
   if (!canUseTool) return undefined;
   return async (toolName, input, options) => {
     const result = await canUseTool(toolName, input, options);
-    if (result.behavior === "allow" && result.updatedInput === undefined) {
+    if (result && result.behavior === "allow" && result.updatedInput === undefined) {
       return { ...result, updatedInput: input };
     }
     return result;

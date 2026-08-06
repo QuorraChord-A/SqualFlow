@@ -1,7 +1,7 @@
 import type { OrchestrationPlanView } from "../../types/orchestration";
 
 export const orchestrationPlanFixture: OrchestrationPlanView = {
-  plan_id: "plan-1", flow_id: "flow-1", user_turn_id: "turn-1",
+  plan_id: "plan-1", flow_id: "flow-1", work_run_id: "turn-1",
   revision: { plan_revision_id: "revision-1", revision_number: 1, status: "pending_approval", title: "成员邀请编排计划", objective: "完成成员邀请", work_kind: "change", risk_level: "medium", lint: [], diff: {}, created_at: "2026-07-11T00:00:00Z" },
   approval: { plan_approval_id: "approval-1", status: "pending", created_at: "2026-07-11T00:00:00Z" },
   run: null,

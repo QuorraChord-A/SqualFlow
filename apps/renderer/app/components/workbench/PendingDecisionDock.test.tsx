@@ -122,7 +122,7 @@ describe("PendingDecisionDock", () => {
     expect(within(scrollArea).getByText(/第二组问题/)).toBeInTheDocument();
   });
 
-  it("keeps stopping the whole user turn separate from cancelling the current card", async () => {
+  it("keeps stopping the current Leader reply separate from cancelling the current card", async () => {
     const user = userEvent.setup();
     const onStopCurrentTurn = vi.fn();
     const { wsClient } = await import("../../lib/ws");

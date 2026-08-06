@@ -5,11 +5,11 @@ import path from "node:path";
 import { setImmediate as yieldImmediate } from "node:timers/promises";
 import { promisify } from "node:util";
 
-export type UserTurnBaseline =
+export type WorkRunBaseline =
   | { kind: "git"; root_path: string; base_commit: string; files: Record<string, string>; dirty_files?: Record<string, string>; strategy?: "hash" | "status"; skipped?: boolean }
   | { kind: "hash"; root_path: string; files: Record<string, string>; skipped?: boolean };
 
-export type UserTurnDiffSummary = {
+export type WorkRunDiffSummary = {
   changedFiles: Array<{ path: string; status: "added" | "modified" | "deleted" }>;
   text: string;
   filesChangedSkipped?: boolean;
@@ -148,7 +148,7 @@ async function captureFileHashesAsync(rootPath: string): Promise<{ files: Record
   return { files };
 }
 
-export function captureUserTurnBaseline(rootPath: string): UserTurnBaseline {
+export function captureWorkRunBaseline(rootPath: string): WorkRunBaseline {
   fs.mkdirSync(rootPath, { recursive: true });
   const files = captureFileHashes(rootPath);
   const baseCommit = gitCommit(rootPath);
@@ -157,7 +157,7 @@ export function captureUserTurnBaseline(rootPath: string): UserTurnBaseline {
     : { kind: "hash", root_path: rootPath, files };
 }
 
-export async function captureUserTurnBaselineAsync(rootPath: string): Promise<UserTurnBaseline> {
+export async function captureWorkRunBaselineAsync(rootPath: string): Promise<WorkRunBaseline> {
   await fs.promises.mkdir(rootPath, { recursive: true });
   const baseCommit = await gitCommitAsync(rootPath);
   if (baseCommit) {
@@ -175,13 +175,13 @@ export async function captureUserTurnBaselineAsync(rootPath: string): Promise<Us
   return { kind: "hash", root_path: rootPath, files, ...(skipped ? { skipped } : {}) };
 }
 
-export function summarizeUserTurnDiff(rootPath: string, baseline: UserTurnBaseline): UserTurnDiffSummary {
+export function summarizeWorkRunDiff(rootPath: string, baseline: WorkRunBaseline): WorkRunDiffSummary {
   if (baseline.skipped) {
     return { changedFiles: [], text: "", filesChangedSkipped: true };
   }
   fs.mkdirSync(rootPath, { recursive: true });
   const current = captureFileHashes(rootPath);
-  const changedFiles: UserTurnDiffSummary["changedFiles"] = [];
+  const changedFiles: WorkRunDiffSummary["changedFiles"] = [];
 
   for (const [relative, hash] of Object.entries(current)) {
     if (!baseline.files[relative]) changedFiles.push({ path: relative, status: "added" });
@@ -211,14 +211,14 @@ function statusFromDirtyTransition(beforeStatus: string, currentStatus: string |
   return statusFromGitStatus(currentStatus);
 }
 
-export async function summarizeUserTurnDiffAsync(rootPath: string, baseline: UserTurnBaseline): Promise<UserTurnDiffSummary> {
+export async function summarizeWorkRunDiffAsync(rootPath: string, baseline: WorkRunBaseline): Promise<WorkRunDiffSummary> {
   if (baseline.skipped) {
     return { changedFiles: [], text: "", filesChangedSkipped: true };
   }
   await fs.promises.mkdir(rootPath, { recursive: true });
   if (baseline.kind === "git" && baseline.strategy === "status") {
     const current = await gitStatus(rootPath);
-    const changedFiles: UserTurnDiffSummary["changedFiles"] = [];
+    const changedFiles: WorkRunDiffSummary["changedFiles"] = [];
     const paths = new Set([...Object.keys(current), ...Object.keys(baseline.files)]);
     for (const relative of paths) {
       const beforeStatus = baseline.files[relative];
@@ -243,7 +243,7 @@ export async function summarizeUserTurnDiffAsync(rootPath: string, baseline: Use
 
   const current = await captureFileHashesAsync(rootPath);
   if (current.skipped) return { changedFiles: [], text: "", filesChangedSkipped: true };
-  const changedFiles: UserTurnDiffSummary["changedFiles"] = [];
+  const changedFiles: WorkRunDiffSummary["changedFiles"] = [];
 
   for (const [relative, hash] of Object.entries(current.files)) {
     if (!baseline.files[relative]) changedFiles.push({ path: relative, status: "added" });

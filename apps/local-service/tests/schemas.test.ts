@@ -4,7 +4,7 @@ import {
   FlowStatusSchema,
   TaskSchema,
   TaskItemSchema,
-  UserTurnSchema,
+  WorkRunSchema,
 } from "../src/domain/schemas.js";
 import { ClientWsMessageSchema, ServerWsMessageSchema } from "../src/protocol/wsMessages.js";
 
@@ -36,8 +36,8 @@ describe("domain schemas", () => {
     expect(flow.status).toBe("ready");
   });
 
-  it("parses a UserTurn row shape", () => {
-    const userTurn = UserTurnSchema.parse({
+  it("parses a WorkRun row shape", () => {
+    const workRun = WorkRunSchema.parse({
       id: "utn-abc",
       flow_id: "flow-abc",
       trigger_message_id: "msg-abc",
@@ -46,8 +46,10 @@ describe("domain schemas", () => {
       target_project_id: null,
       work_root_path: "/repo",
       input_snapshot_json: "{}",
-      status: "active",
+      status: "executing",
+      revision: 2,
       started_at: "2026-06-06T12:00:00+08:00",
+      execution_started_at: "2026-06-06T12:00:00+08:00",
       active_started_at: "2026-06-06T12:00:00+08:00",
       active_duration_ms: 0,
       waiting_started_at: null,
@@ -55,14 +57,14 @@ describe("domain schemas", () => {
       created_at: "2026-06-06T12:00:00+08:00",
       updated_at: "2026-06-06T12:00:00+08:00",
     });
-    expect(userTurn.status).toBe("active");
+    expect(workRun.status).toBe("executing");
   });
 
   it("parses a task row shape", () => {
     const task = TaskSchema.parse({
       id: "task-abc",
       flow_id: "flow-abc",
-      user_turn_id: "utn-abc",
+      work_run_id: "utn-abc",
       title: "Create script",
       description: "Create hello.py",
       expert_id: "exp-backend",
@@ -82,14 +84,14 @@ describe("domain schemas", () => {
       finished_at: null,
       updated_at: "2026-06-06T12:00:00+08:00",
     });
-    expect(task.user_turn_id).toBe("utn-abc");
+    expect(task.work_run_id).toBe("utn-abc");
   });
 
   it("parses a task row shape with nullable expert_id", () => {
     const task = TaskSchema.parse({
       id: "task-no-expert",
       flow_id: "flow-abc",
-      user_turn_id: "utn-abc",
+      work_run_id: "utn-abc",
       title: "Unassigned task",
       description: "No expert assigned yet",
       expert_id: null,

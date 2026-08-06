@@ -481,6 +481,25 @@ wsClient.onEvent("flow:state", (msg) => {
     ?? flowSummary?.leader_runtime_reasoning_effort
     ?? null;
   useFlowStore.setState({
+    flows: flows.map((flow) => flow.id === msg.flow_id
+      ? {
+          ...flow,
+          name: data.name || flow.name,
+          name_generation_status: data.name_generation_status ?? flow.name_generation_status,
+          type: data.type || flow.type,
+          status: data.status ?? flow.status,
+          current_stage: mapLegacyStage(data.current_stage || null),
+          project_id: data.project_id ?? null,
+          updated_at: data.updated_at || flow.updated_at,
+          is_pinned: data.is_pinned,
+          has_pending_decision: data.has_pending_decision,
+          has_active_execution: data.has_active_execution,
+          leader_runtime_sdk: leaderRuntimeSdk,
+          leader_runtime_config_id: leaderRuntimeConfigId,
+          leader_runtime_model_id: leaderRuntimeModelId,
+          leader_runtime_reasoning_effort: leaderRuntimeReasoningEffort,
+        }
+      : flow),
     selectedFlow: {
       id: msg.flow_id,
       name: data.name || '',
@@ -538,13 +557,6 @@ wsClient.onEvent("flow:name_updated", (msg) => {
       ? { ...state.selectedFlow, name: msg.data.name as string, name_generation_status: status } as FlowDetail
       : state.selectedFlow,
   }));
-});
-
-wsClient.onEvent("user_turn:event", (msg) => {
-  if (["completed", "failed", "cancelled"].includes(msg.data?.status)) {
-    clearFlowStreaming(msg.flow_id);
-  }
-  updateFlowRuntimeStatus(msg.flow_id, msg.data?.flow_status || "active");
 });
 
 wsClient.onEvent("session:event", (msg) => {

@@ -62,11 +62,11 @@ function deferred<T>() {
 
 const runtimeSnapshot = {
   roles: [
-    { role: "leader", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
-    { role: "coder", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
-    { role: "research", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
-    { role: "verify", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
-    { role: "codereview", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25" },
+    { role: "leader", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25", reasoningEffort: "high" },
+    { role: "coder", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25", reasoningEffort: "high" },
+    { role: "research", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25", reasoningEffort: "high" },
+    { role: "verify", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25", reasoningEffort: "high" },
+    { role: "codereview", enabled: true, configId: "default-agent-sdk", modelId: "mimo-v25", reasoningEffort: "high" },
   ],
   configs: [
     {
@@ -185,6 +185,7 @@ describe("AppSettingsDialog", () => {
       enabled: true,
       configId: "codex-glm",
       modelId: "glm-47",
+      reasoningEffort: "high",
     });
 
     render(<AppSettingsDialog open onOpenChange={vi.fn()} initialSection="agents" />);
@@ -206,9 +207,36 @@ describe("AppSettingsDialog", () => {
         configId: "codex-glm",
         modelId: "glm-47",
         enabled: true,
+        reasoningEffort: "high",
       });
     });
     expect(screen.queryByTestId("role-model-picker")).not.toBeInTheDocument();
+  });
+
+  it("updates and displays the default effort for each role", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
+    apiMocks.updateAgentRuntimeRole.mockResolvedValue({
+      ...runtimeSnapshot.roles[0],
+      reasoningEffort: "max",
+    });
+
+    render(<AppSettingsDialog open onOpenChange={vi.fn()} initialSection="agents" />);
+
+    const effortSelect = await screen.findByRole("combobox", { name: "选择 Leader Effort" });
+    expect(effortSelect).toHaveTextContent("high");
+    await user.click(effortSelect);
+    await user.click(await screen.findByRole("option", { name: "max" }));
+
+    await waitFor(() => {
+      expect(apiMocks.updateAgentRuntimeRole).toHaveBeenCalledWith("leader", {
+        enabled: true,
+        configId: "default-agent-sdk",
+        modelId: "mimo-v25",
+        reasoningEffort: "max",
+      });
+    });
+    expect(effortSelect).toHaveTextContent("max");
   });
 
   it("rolls back the role binding when the update fails", async () => {

@@ -22,23 +22,17 @@ export const EMPTY_RUNNING_QUEUE: RunningQueuedMessage[] = [];
 type RunningMessageQueueState = {
   queuesByFlow: Record<string, RunningQueuedMessage[] | undefined>;
   hydratedFlows: Record<string, boolean | undefined>;
-  knownRunningByFlow: Record<string, boolean | undefined>;
-  hydratedKnownRunningFlows: Record<string, boolean | undefined>;
   hydrateFlowQueue: (flowId: string) => RunningQueuedMessage[];
-  hydrateKnownRunningFlow: (flowId: string) => boolean;
   updateFlowQueue: (
     flowId: string,
     updater: (messages: RunningQueuedMessage[]) => RunningQueuedMessage[],
   ) => void;
   setFlowQueue: (flowId: string, messages: RunningQueuedMessage[]) => void;
-  setKnownRunningFlow: (flowId: string, isRunning: boolean) => void;
 };
 
 export const useRunningMessageQueueStore = create<RunningMessageQueueState>((set, get) => ({
   queuesByFlow: {},
   hydratedFlows: {},
-  knownRunningByFlow: {},
-  hydratedKnownRunningFlows: {},
   hydrateFlowQueue: (flowId: string) => {
     const state = get();
     if (state.hydratedFlows[flowId]) {
@@ -50,18 +44,6 @@ export const useRunningMessageQueueStore = create<RunningMessageQueueState>((set
       hydratedFlows: { ...current.hydratedFlows, [flowId]: true },
     }));
     return messages;
-  },
-  hydrateKnownRunningFlow: (flowId: string) => {
-    const state = get();
-    if (state.hydratedKnownRunningFlows[flowId]) {
-      return Boolean(state.knownRunningByFlow[flowId]);
-    }
-    const isRunning = Boolean(state.knownRunningByFlow[flowId]);
-    set((current) => ({
-      knownRunningByFlow: { ...current.knownRunningByFlow, [flowId]: isRunning },
-      hydratedKnownRunningFlows: { ...current.hydratedKnownRunningFlows, [flowId]: true },
-    }));
-    return isRunning;
   },
   updateFlowQueue: (flowId, updater) => {
     const state = get();
@@ -78,19 +60,11 @@ export const useRunningMessageQueueStore = create<RunningMessageQueueState>((set
       hydratedFlows: { ...current.hydratedFlows, [flowId]: true },
     }));
   },
-  setKnownRunningFlow: (flowId, isRunning) => {
-    set((current) => ({
-      knownRunningByFlow: { ...current.knownRunningByFlow, [flowId]: isRunning },
-      hydratedKnownRunningFlows: { ...current.hydratedKnownRunningFlows, [flowId]: true },
-    }));
-  },
 }));
 
 export function resetRunningMessageQueueStoreForTests() {
   useRunningMessageQueueStore.setState({
     queuesByFlow: {},
     hydratedFlows: {},
-    knownRunningByFlow: {},
-    hydratedKnownRunningFlows: {},
   });
 }

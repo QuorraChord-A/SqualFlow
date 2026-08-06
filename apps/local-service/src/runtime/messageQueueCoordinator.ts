@@ -67,7 +67,7 @@ export class MessageQueueCoordinator {
   }
 
   private readonly onEvent = (message: ServerWsMessage) => {
-    if (message.type !== "user_turn:event") return;
+    if (message.type !== "work_run:event") return;
     const status = (message.data as { status?: unknown } | null)?.status;
     if (["completed", "failed", "cancelled"].includes(String(status ?? ""))) {
       this.request(message.flow_id);

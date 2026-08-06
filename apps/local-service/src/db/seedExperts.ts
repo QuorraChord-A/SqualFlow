@@ -24,6 +24,9 @@ const leaderMcpTools = [
   "dispatch_agent",
   "cancel_agent",
   "send_message",
+  "interrupt_work_run",
+  "resume_work_run",
+  "cancel_work_run",
 ].map((tool) => `mcp__squadflow-leader__${tool}`);
 
 const stableExperts: Array<{
@@ -191,7 +194,7 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
 
 export function composeExpertSystemPrompt(role: string, name: string) {
   const roleSpecificPrompt = EXPERT_ROLE_SYSTEM_PROMPTS[role]
-    ?? `You are SquadFlow ${name}. Follow the current UserTurn task contract and end your final reply with a clear conclusion.`;
+    ?? `You are SquadFlow ${name}. Follow the current WorkRun task contract and end your final reply with a clear conclusion.`;
   return [COMMON_EXPERT_SYSTEM_PROMPT, roleSpecificPrompt].join("\n\n");
 }
 

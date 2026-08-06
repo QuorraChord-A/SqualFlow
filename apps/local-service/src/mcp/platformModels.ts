@@ -104,6 +104,11 @@ export const SendMessageInput = z.object({
   summary: z.string().optional(),
 }).strict();
 
+export const WorkRunActionInput = z.object({
+  flow_id: z.string().min(1),
+  work_run_id: z.string().min(1),
+}).strict();
+
 export type QuestionOptionInputValue = z.input<typeof QuestionOptionInput>;
 export type QuestionInputValue = z.input<typeof QuestionInput>;
 export type GetContextInputValue = z.input<typeof GetContextInput>;
@@ -119,3 +124,4 @@ export type GetTaskInputValue = z.input<typeof GetTaskInput>;
 export type DispatchAgentInputValue = z.input<typeof DispatchAgentInput>;
 export type CancelAgentInputValue = z.input<typeof CancelAgentInput>;
 export type SendMessageInputValue = z.input<typeof SendMessageInput>;
+export type WorkRunActionInputValue = z.input<typeof WorkRunActionInput>;

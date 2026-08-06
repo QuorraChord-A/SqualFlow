@@ -166,4 +166,19 @@ describe("ToolRow", () => {
 
     expect(screen.getByRole("button", { expanded: false })).toBeVisible();
   });
+
+  it("keeps the complete command available when the one-line summary is truncated", () => {
+    const command = "/bin/zsh -lc 'printf a-very-long-command-that-must-stay-on-one-line'";
+    const tool: TimelineTool = {
+      toolCallId: "call-long-command",
+      toolName: "Bash",
+      state: "completed",
+      input: { command },
+      output: { content: "ok", is_error: false },
+    };
+
+    render(<ToolRow id="call-long-command:0" tool={tool} />);
+
+    expect(screen.getByTitle(command)).toHaveTextContent(command);
+  });
 });

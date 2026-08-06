@@ -1,12 +1,12 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
-import type { UserTurnReview } from "../../hooks/useFlowWorkbench";
+import type { WorkRunReview } from "../../hooks/useFlowWorkbench";
 import ReviewDiffPanel from "./ReviewDiffPanel";
 
-const review: UserTurnReview = {
+const review: WorkRunReview = {
   flow_id: "flow-review",
-  user_turn_id: "turn-review",
+  work_run_id: "turn-review",
   completed_at: "2026-07-21T00:00:00.000Z",
   totals: { files: 1, additions: 1, deletions: 1, modified: 1, added: 0, deleted: 0 },
   files: [{

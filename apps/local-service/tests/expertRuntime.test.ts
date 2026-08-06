@@ -10,7 +10,7 @@ import { config } from "../src/config.js";
 import { createStore } from "../src/db/store.js";
 import { createExpertRuntime, type ExpertTaskFinishedEvent } from "../src/runtime/expertRuntime.js";
 import { AsyncMessageQueue } from "../src/runtime/adapters/asyncMessageQueue.js";
-import type { RuntimeSdk } from "../src/config/agentRuntimeConfig.js";
+import { updateRoleRuntimeBinding, type RuntimeSdk } from "../src/config/agentRuntimeConfig.js";
 import { parseMessageSegments } from "../src/protocol/platformEvent.js";
 import type { AgentRuntimeAdapter, BuildExpertRuntimeOptionsInput, RuntimeOutputAdapter } from "../src/runtime/adapters/runtimeAdapter.js";
 import type { RuntimeEvent } from "../src/runtime/runtimeEvents.js";
@@ -303,27 +303,35 @@ async function firstPromptText(prompt: ClaudeQueryInput["prompt"]): Promise<stri
   return "";
 }
 
-function createWorkingUserTurn(store: ReturnType<typeof createStore>, flowId: string) {
+function createWorkingWorkRun(store: ReturnType<typeof createStore>, flowId: string) {
   let flow = store.getFlow(flowId)!;
   if (!flow.projectId) {
     const project = store.createProject({ name: `Project ${flowId}`, localPath: `/tmp/${flowId}` });
     flow = store.updateFlow(flowId, { projectId: project.id })!;
   }
-  const turn = store.createUserTurn({ flowId, triggerMessageId: `msg-${flowId}-${Date.now()}` })!;
-  return store.startUserTurnWork({
+  const turn = store.createWorkRun({ flowId, triggerMessageId: `msg-${flowId}-${Date.now()}` })!;
+  const prepared = store.startWorkRunWork({
     flowId,
-    userTurnId: turn.id,
+    workRunId: turn.id,
     workSource: "direct_message",
     targetProjectId: flow.projectId!,
     inputSnapshotJson: "{}",
   })!;
+  const executionStartedAt = new Date().toISOString();
+  store.sqlite.prepare(`
+    UPDATE work_runs
+    SET status = 'executing', revision = revision + 1,
+        execution_started_at = ?, active_started_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(executionStartedAt, executionStartedAt, executionStartedAt, prepared.id);
+  return store.getWorkRun(prepared.id)!;
 }
 
 function createAssignedTaskForFlowExpert(
   store: ReturnType<typeof createStore>,
   input: {
     flowId: string;
-    userTurnId: string;
+    workRunId: string;
     expertId: string;
     flowExpertId: string;
     title: string;
@@ -331,7 +339,7 @@ function createAssignedTaskForFlowExpert(
 ) {
   const task = store.createTask({
     flowId: input.flowId,
-    userTurnId: input.userTurnId,
+    workRunId: input.workRunId,
     title: input.title,
     description: input.title,
     expertId: input.expertId,
@@ -339,7 +347,7 @@ function createAssignedTaskForFlowExpert(
   })!;
   const session = store.createAgentSession({
     flowId: input.flowId,
-    userTurnId: input.userTurnId,
+    workRunId: input.workRunId,
     taskId: task.id,
     expertId: input.expertId,
     flowExpertId: input.flowExpertId,
@@ -347,7 +355,7 @@ function createAssignedTaskForFlowExpert(
     status: "queued",
   });
   store.assignTaskFlowExpert(task.id, input.flowExpertId, session.id);
-  store.setTaskRuntimeStatus(task.id, "in_progress");
+  store.startTask(task.id, session.id);
   return { task: store.getTask(task.id)!, session };
 }
 
@@ -357,10 +365,10 @@ function createRunningTask(store: ReturnType<typeof createStore>, expertId = "ex
     name: "Hello",
     description: "",
   });
-  const userTurn = createWorkingUserTurn(store, flow.id);
+  const workRun = createWorkingWorkRun(store, flow.id);
   const task = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Verify",
     description: "验证 hello world",
     expertId,
@@ -368,14 +376,14 @@ function createRunningTask(store: ReturnType<typeof createStore>, expertId = "ex
   })!;
   const session = store.createAgentSession({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     taskId: task.id,
     expertId,
     displayName: expertId,
     status: "streaming",
   });
   store.startTask(task.id, session.id);
-  return { flow, userTurn, task, session };
+  return { flow, workRun, task, session };
 }
 
 afterEach(() => {
@@ -387,7 +395,7 @@ afterEach(() => {
 describe("ExpertRuntime", () => {
   it("runs through a non-Claude adapter using system capabilities", async () => {
     const store = tempStore("codex");
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const capturedOptions: BuildExpertRuntimeOptionsInput[] = [];
     const runtime = createExpertRuntime({
       store,
@@ -401,7 +409,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -424,18 +432,18 @@ describe("ExpertRuntime", () => {
       name: "Expert Conversation",
       description: "",
     });
-    const userTurn = store.createUserTurn({
+    const workRun = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-expert-conversation",
     })!;
-    expect(userTurn.workRootPath).toBe("");
+    expect(workRun.workRootPath).toBe("");
     const flowExpert = store.getOrCreateFlowExpert({
       flowId: flow.id,
       expertId: "exp-research",
     });
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: null,
       expertId: "exp-research",
       flowExpertId: flowExpert.id,
@@ -464,7 +472,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runConversation({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       flowExpertId: flowExpert.id,
       agentSessionId: session.id,
       expertId: "exp-research",
@@ -488,7 +496,7 @@ describe("ExpertRuntime", () => {
     expect(completions).toEqual([
       expect.objectContaining({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         agentSessionId: session.id,
         expertId: "exp-research",
         status: "completed",
@@ -499,7 +507,7 @@ describe("ExpertRuntime", () => {
 
   it("gives every running Expert an actor-scoped Task MCP and persists only its explicit Task update", async () => {
     const store = tempStore("codex");
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const capturedOptions: BuildExpertRuntimeOptionsInput[] = [];
     const updates: Array<{ flowId: string; task: { task_id: string; status: string } }> = [];
     let taskServer: McpServer | null = null;
@@ -560,7 +568,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -587,7 +595,7 @@ describe("ExpertRuntime", () => {
 
   it("keeps a stable Task MCP bridge dynamically scoped when a FlowExpert starts its next execution record", async () => {
     const store = tempStore("codex");
-    const { flow, userTurn, task: firstTask, session: firstSession } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task: firstTask, session: firstSession } = createRunningTask(store, "exp-verify");
     let retainedTaskServer: McpServer | null = null;
     let taskClient: Awaited<ReturnType<typeof connectBrowserMcpClient>> | null = null;
     let queryCount = 0;
@@ -653,7 +661,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: firstTask.id,
       agentSessionId: firstSession.id,
     });
@@ -667,7 +675,7 @@ describe("ExpertRuntime", () => {
     const flowExpert = store.getTask(firstTask.id)!.flowExpertId!;
     const second = createAssignedTaskForFlowExpert(store, {
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       expertId: "exp-verify",
       flowExpertId: flowExpert,
       title: "Second task",
@@ -676,7 +684,7 @@ describe("ExpertRuntime", () => {
     secondSessionId = second.session.id;
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: second.task.id,
       flowExpertId: flowExpert,
       agentSessionId: second.session.id,
@@ -691,7 +699,8 @@ describe("ExpertRuntime", () => {
 
   it("locks a Flow Expert runtime after first start while unstarted experts use the latest role config", async () => {
     const store = tempStore("codex");
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-research");
+    await updateRoleRuntimeBinding("research", { reasoningEffort: "ultra" });
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-research");
     const capturedOptions: BuildExpertRuntimeOptionsInput[] = [];
     const sdkCalls: RuntimeSdk[] = [];
     const runtime = createExpertRuntime({
@@ -706,7 +715,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -715,20 +724,23 @@ describe("ExpertRuntime", () => {
     expect(researchFlowExpert).toEqual(expect.objectContaining({
       runtimeSdk: "codex",
       runtimeConfigId: "default-agent-sdk",
+      runtimeReasoningEffort: "ultra",
     }));
+    expect(capturedOptions[0]?.runtimeConfig).toEqual(expect.objectContaining({ reasoningEffort: "ultra" }));
+    expect(store.getAgentSession(session.id)).toEqual(expect.objectContaining({ runtimeReasoningEffort: "ultra" }));
 
     switchAllRolesRuntimeConfig(config.agentRuntimeConfigRoot, "claude-agent-sdk", "claudecode");
 
     const secondResearch = createAssignedTaskForFlowExpert(store, {
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       expertId: "exp-research",
       flowExpertId: researchFlowExpert.id,
       title: "Research again",
     });
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: secondResearch.task.id,
       flowExpertId: researchFlowExpert.id,
       agentSessionId: secondResearch.session.id,
@@ -736,7 +748,7 @@ describe("ExpertRuntime", () => {
 
     const backendTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Backend first run",
       description: "Backend first run",
       expertId: "exp-coder",
@@ -744,7 +756,7 @@ describe("ExpertRuntime", () => {
     })!;
     const backendSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: backendTask.id,
       expertId: "exp-coder",
       displayName: "Backend",
@@ -753,7 +765,7 @@ describe("ExpertRuntime", () => {
     store.startTask(backendTask.id, backendSession.id);
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: backendTask.id,
       agentSessionId: backendSession.id,
     });
@@ -772,12 +784,12 @@ describe("ExpertRuntime", () => {
   it("keeps a legacy started Flow Expert session on claudecode after the role config changes", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-legacy-expert", name: "Legacy Expert" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     store.updateFlowExpertSession(flowExpert.id, "legacy-frontend-sdk");
     const assigned = createAssignedTaskForFlowExpert(store, {
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
       title: "Legacy frontend task",
@@ -785,9 +797,12 @@ describe("ExpertRuntime", () => {
     switchAllRolesRuntimeConfig(config.agentRuntimeConfigRoot, "codex-agent-sdk", "codex");
 
     const sdkCalls: RuntimeSdk[] = [];
+    const events: unknown[] = [];
+    const eventBus = new EventBus();
+    eventBus.subscribe(flow.id, "agent-session-transition-test", (message) => events.push(message));
     const runtime = createExpertRuntime({
       store,
-      eventBus: new EventBus(),
+      eventBus,
       chatJournal: new ChatJournal(),
       runtimeAdapterFactory: (input) => {
         sdkCalls.push(input.sdk);
@@ -804,7 +819,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: assigned.task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: assigned.session.id,
@@ -823,11 +838,33 @@ describe("ExpertRuntime", () => {
       sessionId: "legacy-frontend-sdk",
       status: "completed",
     }));
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "session:event",
+        data: expect.objectContaining({
+          agent_session_id: assigned.session.id,
+          work_run_id: workRun.id,
+          task_id: assigned.task.id,
+          expert_id: "exp-coder",
+          status: "streaming",
+        }),
+      }),
+      expect.objectContaining({
+        type: "session:event",
+        data: expect.objectContaining({
+          agent_session_id: assigned.session.id,
+          work_run_id: workRun.id,
+          task_id: assigned.task.id,
+          expert_id: "exp-coder",
+          status: "completed",
+        }),
+      }),
+    ]));
   });
 
   it("records a normal Expert turn without completing the Task", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const finished: unknown[] = [];
     const events: unknown[] = [];
     const eventBus = new EventBus();
@@ -859,7 +896,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -913,6 +950,16 @@ describe("ExpertRuntime", () => {
     ]);
     expect(events).toEqual(expect.arrayContaining([
       expect.objectContaining({
+        type: "session:event",
+        data: expect.objectContaining({
+          agent_session_id: session.id,
+          work_run_id: workRun.id,
+          task_id: task.id,
+          expert_id: "exp-verify",
+          status: "completed",
+        }),
+      }),
+      expect.objectContaining({
         type: "task:event",
         data: expect.objectContaining({ task_id: task.id, status: "in_progress", session_status: "completed" }),
       }),
@@ -939,7 +986,7 @@ describe("ExpertRuntime", () => {
 
   it("notifies the Leader queue before publishing an Expert turn report", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const publishStarted = deferred<void>();
     const releasePublish = deferred<void>();
     let leaderNotified = false;
@@ -966,7 +1013,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -980,7 +1027,7 @@ describe("ExpertRuntime", () => {
 
   it("releases the browser lease held by an AgentSession once its turn completes successfully", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const desktopBridge = new DesktopBridge();
     desktopBridge.acquireLease(session.id, "Verify", flow.id);
     const runtime = createExpertRuntime({
@@ -1000,7 +1047,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1010,7 +1057,7 @@ describe("ExpertRuntime", () => {
 
   it("closes a completed streaming query so the runtime lease can be reused", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const close = vi.fn();
     const runtime = createExpertRuntime({
       store,
@@ -1031,7 +1078,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1041,7 +1088,7 @@ describe("ExpertRuntime", () => {
 
   it("keeps a silent Expert turn running until the user cancels it", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const started = deferred<void>();
     const release = deferred<void>();
     const close = vi.fn(() => release.resolve());
@@ -1062,7 +1109,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1070,14 +1117,14 @@ describe("ExpertRuntime", () => {
 
     expect(close).not.toHaveBeenCalled();
     expect(store.getAgentSession(session.id)?.status).toBe("streaming");
-    expect(runtime.cancelUserTurn({ flowId: flow.id, userTurnId: userTurn.id })).toBe(1);
+    expect(runtime.cancelWorkRun({ flowId: flow.id, workRunId: workRun.id })).toBe(1);
     await running;
     expect(close).toHaveBeenCalled();
   });
 
   it("starts the next Expert task even when prior context usage never returns and the iterator stays open", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
 
     let queryCount = 0;
     const closeFns: Array<ReturnType<typeof vi.fn>> = [];
@@ -1119,7 +1166,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1128,14 +1175,14 @@ describe("ExpertRuntime", () => {
 
     const secondTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Second verify",
       description: "Second verify",
       expertId: "exp-verify",
     })!;
     const secondSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: secondTask.id,
       expertId: "exp-verify",
       displayName: "exp-verify",
@@ -1146,7 +1193,7 @@ describe("ExpertRuntime", () => {
     const secondStartedAt = Date.now();
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: secondTask.id,
       agentSessionId: secondSession.id,
     });
@@ -1160,7 +1207,7 @@ describe("ExpertRuntime", () => {
 
   it("releases the browser lease held by an AgentSession when its turn fails", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const desktopBridge = new DesktopBridge();
     desktopBridge.acquireLease(session.id, "Verify", flow.id);
     const runtime = createExpertRuntime({
@@ -1180,7 +1227,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1192,10 +1239,10 @@ describe("ExpertRuntime", () => {
   it("uses the active turn AgentSession id for browser tools across queued tasks on one FlowExpertWorker", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-browser-context", name: "Browser Context" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first browser task" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second browser task" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first browser task" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second browser task" });
     const desktopBridge = new RecordingDesktopBridge();
     desktopBridge.connect({ send: () => {} });
     let browserServer: McpServer | null = null;
@@ -1243,8 +1290,8 @@ describe("ExpertRuntime", () => {
     });
 
     await Promise.all([
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
     ]);
 
     expect(toolResults).toEqual([
@@ -1259,10 +1306,10 @@ describe("ExpertRuntime", () => {
   it("keeps browser lease revocation scoped to the reclaimed AgentSession on a reused FlowExpertWorker", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-browser-reclaim", name: "Browser Reclaim" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first browser task" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second browser task" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first browser task" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second browser task" });
     const desktopBridge = new RecordingDesktopBridge();
     desktopBridge.connect({ send: () => {} });
     let browserServer: McpServer | null = null;
@@ -1313,8 +1360,8 @@ describe("ExpertRuntime", () => {
     });
 
     await Promise.all([
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
     ]);
 
     expect(toolResults).toEqual([
@@ -1329,9 +1376,9 @@ describe("ExpertRuntime", () => {
   it("releases the active browser lease when a FlowExpertWorker is closed mid-turn", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-browser-close", name: "Browser Close" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const assigned = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "active browser task" });
+    const assigned = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "active browser task" });
     const desktopBridge = new RecordingDesktopBridge();
     desktopBridge.connect({ send: () => {} });
     let browserServer: McpServer | null = null;
@@ -1376,7 +1423,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: assigned.task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: assigned.session.id,
@@ -1392,12 +1439,12 @@ describe("ExpertRuntime", () => {
     expect(desktopBridge.getLease()).toBeNull();
   });
 
-  it("releases the active browser lease and closes the MCP binding when a UserTurn is cancelled mid-turn", async () => {
+  it("releases the active browser lease and closes the MCP binding when a WorkRun is cancelled mid-turn", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-browser-cancel", name: "Browser Cancel" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const assigned = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "cancel browser task" });
+    const assigned = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "cancel browser task" });
     const desktopBridge = new RecordingDesktopBridge();
     desktopBridge.connect({ send: () => {} });
     let browserServer: McpServer | null = null;
@@ -1450,7 +1497,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: assigned.task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: assigned.session.id,
@@ -1459,7 +1506,7 @@ describe("ExpertRuntime", () => {
     await leaseAcquired.promise;
     expect(desktopBridge.getLease()?.agentSessionId).toBe(assigned.session.id);
 
-    expect(runtime.cancelUserTurn({ flowId: flow.id, userTurnId: userTurn.id })).toBe(1);
+    expect(runtime.cancelWorkRun({ flowId: flow.id, workRunId: workRun.id })).toBe(1);
     await running;
 
     expect(desktopBridge.releaseCalls).toContain(assigned.session.id);
@@ -1469,7 +1516,7 @@ describe("ExpertRuntime", () => {
 
   it("cancels one running Task and publishes a cancelled expert_result", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const started = deferred();
     const releaseQuery = deferred();
     const finished: ExpertTaskFinishedEvent[] = [];
@@ -1499,7 +1546,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
       prompt: "hold task",
@@ -1514,7 +1561,7 @@ describe("ExpertRuntime", () => {
 
     await expect(runtime.cancelTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     })).resolves.toBe(true);
@@ -1557,7 +1604,7 @@ describe("ExpertRuntime", () => {
 
   it("persists the temporary runtime session before the SDK result arrives", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const chatJournal = new ChatJournal();
     let releaseQuery!: () => void;
     const queryGate = new Promise<void>((resolve) => {
@@ -1585,7 +1632,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1611,7 +1658,7 @@ describe("ExpertRuntime", () => {
 
   it("persists the SDK session id as soon as the runtime announces it", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const chatJournal = new ChatJournal();
     let releaseQuery!: () => void;
     const queryGate = new Promise<void>((resolve) => { releaseQuery = resolve; });
@@ -1630,7 +1677,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1642,14 +1689,14 @@ describe("ExpertRuntime", () => {
       expect(store.getAgentSession(session.id)?.sessionId).toBe("sdk-expert-early");
       expect(chatJournal.getCurrentMessage(flow.id, "sdk-expert-early")).toEqual(expect.objectContaining({ role: "assistant" }));
     } finally {
-      runtime.cancelUserTurn({ flowId: flow.id, userTurnId: userTurn.id });
+      runtime.cancelWorkRun({ flowId: flow.id, workRunId: workRun.id });
       await running;
     }
   });
 
   it("records a successful Expert turn without completing the Task when the Expert leaves no final assistant text", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     const runtime = createExpertRuntime({
       store,
       eventBus: new EventBus(),
@@ -1661,7 +1708,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1682,10 +1729,13 @@ describe("ExpertRuntime", () => {
 
   it("records an errored Expert session without changing the Task when the SDK turn ends in error", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
+    const events: unknown[] = [];
+    const eventBus = new EventBus();
+    eventBus.subscribe(flow.id, "failed-session-test", (message) => events.push(message));
     const runtime = createExpertRuntime({
       store,
-      eventBus: new EventBus(),
+      eventBus,
       chatJournal: new ChatJournal(),
       runtimeAdapterFactory: createClaudeTestAdapterFactory({ expertQuery: () => createQuery([
         {
@@ -1699,7 +1749,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1709,6 +1759,18 @@ describe("ExpertRuntime", () => {
       errorMessage: null,
     }));
     expect(store.listAgentSessions(flow.id)[0]?.status).toBe("failed");
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "session:event",
+        data: expect.objectContaining({
+          agent_session_id: session.id,
+          work_run_id: workRun.id,
+          task_id: task.id,
+          expert_id: "exp-coder",
+          status: "failed",
+        }),
+      }),
+    ]));
     expect(store.listEventLog(flow.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         agentSessionId: session.id,
@@ -1720,7 +1782,7 @@ describe("ExpertRuntime", () => {
 
   it("passes expert tool authorization into the SDK permission callback", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     store.updateFlow(flow.id, { riskMode: "full_access" });
     let captured: ClaudeQueryInput | null = null;
     const runtime = createExpertRuntime({
@@ -1742,7 +1804,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -1768,9 +1830,9 @@ describe("ExpertRuntime", () => {
     });
   });
 
-  it("waits on an auto-edit risk card and denies when the UserTurn is cancelled", async () => {
+  it("waits on an auto-edit risk card and denies when the WorkRun is cancelled", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     let captured: ClaudeQueryInput | null = null;
     const runtime = createExpertRuntime({
       store,
@@ -1787,7 +1849,7 @@ describe("ExpertRuntime", () => {
       } }),
     });
 
-    await runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: task.id, agentSessionId: session.id });
+    await runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: task.id, agentSessionId: session.id });
     const canUseTool = captured?.options?.canUseTool;
     if (!canUseTool) throw new Error("expected Expert permission callback");
     const permissionPromise = canUseTool(
@@ -1797,12 +1859,12 @@ describe("ExpertRuntime", () => {
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     const card = store.listDecisionCards(flow.id).find((item) => item.cardType === "permission_confirmation");
-    expect(card).toEqual(expect.objectContaining({ status: "pending", userTurnId: userTurn.id }));
+    expect(card).toEqual(expect.objectContaining({ status: "pending", workRunId: workRun.id }));
 
-    runtime.cancelUserTurn({ flowId: flow.id, userTurnId: userTurn.id });
+    runtime.cancelWorkRun({ flowId: flow.id, workRunId: workRun.id });
     await expect(permissionPromise).resolves.toEqual({
       behavior: "deny",
-      message: "用户已停止当前 UserTurn，未确认的风险操作已拒绝。",
+      message: "用户已停止当前 WorkRun，未确认的风险操作已拒绝。",
     });
     expect(store.getDecisionCard(card!.id)?.status).toBe("cancelled");
     expect(store.listEventLog(flow.id).filter((event) => event.eventType === "permission_command.user_denied")).toHaveLength(0);
@@ -1811,7 +1873,7 @@ describe("ExpertRuntime", () => {
 
   it("distinguishes card cancellation and runtime close from explicit denial memory", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     const cwd = store.getProject(flow.projectId!)!.localPath;
     const command = "rm runtime-close-target";
     const runtime = createExpertRuntime({
@@ -1822,7 +1884,7 @@ describe("ExpertRuntime", () => {
     });
     const permission = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope: { kind: "expert_task", taskId: task.id, agentSessionId: session.id },
       request: {
         capability: "shell",
@@ -1854,14 +1916,14 @@ describe("ExpertRuntime", () => {
 
     await expect(permission).resolves.toEqual({
       behavior: "deny",
-      message: "用户已取消当前风险确认，操作已拒绝；当前 Task 或 UserTurn 可继续。",
+      message: "用户已取消当前风险确认，操作已拒绝；当前 Task 或 WorkRun 可继续。",
     });
     expect(store.getDecisionCard(cancelledCard.id)?.answers).toBeNull();
     expect(store.listEventLog(flow.id).filter((event) => event.eventType === "permission_command.user_denied")).toHaveLength(0);
 
     const runtimeClosePermission = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope: { kind: "expert_task", taskId: task.id, agentSessionId: session.id },
       request: {
         capability: "shell",
@@ -1898,7 +1960,7 @@ describe("ExpertRuntime", () => {
     vi.useFakeTimers();
     try {
       const store = tempStore();
-      const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+      const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
       let captured: ClaudeQueryInput | null = null;
       const runtime = createExpertRuntime({
         store,
@@ -1915,7 +1977,7 @@ describe("ExpertRuntime", () => {
         } }),
       });
 
-      await runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: task.id, agentSessionId: session.id });
+      await runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: task.id, agentSessionId: session.id });
       const canUseTool = captured?.options?.canUseTool;
       if (!canUseTool) throw new Error("expected Expert permission callback");
       const permissionPromise = canUseTool(
@@ -1946,7 +2008,7 @@ describe("ExpertRuntime", () => {
 
   it("remembers only an exactly matching user-denied command in the same Task across runtime restart", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     const cwd = store.getProject(flow.projectId!)!.localPath;
     const permissionArgs = (command: string) => ({
       toolName: "Bash",
@@ -1977,7 +2039,7 @@ describe("ExpertRuntime", () => {
 
     const first = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope,
       request: request("rm target"),
       permissionArgs: permissionArgs("rm target"),
@@ -2005,7 +2067,7 @@ describe("ExpertRuntime", () => {
     const cardCount = store.listDecisionCards(flow.id).length;
     await expect(runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope,
       request: request("rm target"),
       permissionArgs: permissionArgs("rm target"),
@@ -2018,7 +2080,7 @@ describe("ExpertRuntime", () => {
     const otherCwd = path.join(cwd, "nested");
     const differentCwd = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope,
       request: request("rm target"),
       permissionArgs: { ...permissionArgs("rm target"), cwd: otherCwd },
@@ -2031,7 +2093,7 @@ describe("ExpertRuntime", () => {
 
     const different = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope,
       request: request("rm  target"),
       permissionArgs: permissionArgs("rm  target"),
@@ -2052,7 +2114,7 @@ describe("ExpertRuntime", () => {
     });
     await expect(restarted.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       scope,
       request: request("rm target"),
       permissionArgs: permissionArgs("rm target"),
@@ -2063,9 +2125,9 @@ describe("ExpertRuntime", () => {
     await restarted.close?.();
   });
 
-  it("scopes an exact command denial to the current Leader UserTurn", async () => {
+  it("scopes an exact command denial to the current Leader WorkRun", async () => {
     const store = tempStore();
-    const { flow, userTurn } = createRunningTask(store, "exp-coder");
+    const { flow, workRun } = createRunningTask(store, "exp-coder");
     const cwd = store.getProject(flow.projectId!)!.localPath;
     const command = "rm leader-target";
     const request = {
@@ -2096,8 +2158,8 @@ describe("ExpertRuntime", () => {
 
     const first = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
-      scope: { kind: "leader_user_turn" },
+      workRunId: workRun.id,
+      scope: { kind: "leader_work_run" },
       request,
       permissionArgs,
     });
@@ -2106,22 +2168,22 @@ describe("ExpertRuntime", () => {
     await runtime.resolvePermissionCard({ flowId: flow.id, cardId: firstCard.id, outcome: "user_denied" });
     await expect(first).resolves.toEqual({
       behavior: "deny",
-      message: expect.stringContaining("当前 UserTurn"),
+      message: expect.stringContaining("当前 WorkRun"),
     });
     expect(store.listEventLog(flow.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: null,
         eventType: "permission_command.user_denied",
-        payloadJson: expect.stringContaining('"scope_kind":"leader_user_turn"'),
+        payloadJson: expect.stringContaining('"scope_kind":"leader_work_run"'),
       }),
     ]));
 
     const cardCount = store.listDecisionCards(flow.id).length;
     await expect(runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: userTurn.id,
-      scope: { kind: "leader_user_turn" },
+      workRunId: workRun.id,
+      scope: { kind: "leader_work_run" },
       request,
       permissionArgs,
     })).resolves.toEqual({
@@ -2130,18 +2192,18 @@ describe("ExpertRuntime", () => {
     });
     expect(store.listDecisionCards(flow.id)).toHaveLength(cardCount);
 
-    store.completeUserTurn(userTurn.id);
-    const nextTurn = createWorkingUserTurn(store, flow.id);
+    store.completeWorkRun(workRun.id);
+    const nextTurn = createWorkingWorkRun(store, flow.id);
     const next = runtime.confirmPermission({
       flowId: flow.id,
-      userTurnId: nextTurn.id,
-      scope: { kind: "leader_user_turn" },
+      workRunId: nextTurn.id,
+      scope: { kind: "leader_work_run" },
       request,
       permissionArgs,
     });
     await new Promise<void>((resolve) => setImmediate(resolve));
     const nextCard = store.listDecisionCards(flow.id).find((card) => card.status === "pending")!;
-    expect(nextCard.userTurnId).toBe(nextTurn.id);
+    expect(nextCard.workRunId).toBe(nextTurn.id);
     await runtime.resolvePermissionCard({ flowId: flow.id, cardId: nextCard.id, outcome: "approved" });
     await expect(next).resolves.toEqual({ behavior: "allow" });
     await runtime.close?.();
@@ -2149,10 +2211,10 @@ describe("ExpertRuntime", () => {
 
   it("cancels persisted permission cards on runtime restart", async () => {
     const store = tempStore();
-    const { flow, userTurn } = createRunningTask(store, "exp-coder");
+    const { flow, workRun } = createRunningTask(store, "exp-coder");
     const card = store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-permission-restart",
       sessionId: "tool-restart",
       cardType: "permission_confirmation",
@@ -2177,7 +2239,7 @@ describe("ExpertRuntime", () => {
 
   it("keeps verify Bash in read-only project mode", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-verify");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-verify");
     let captured: ClaudeQueryInput | null = null;
     const runtime = createExpertRuntime({
       store,
@@ -2198,7 +2260,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
     });
@@ -2220,7 +2282,7 @@ describe("ExpertRuntime", () => {
 
   it("steers a Leader follow-up into the running Expert turn while keeping the Task as the fact source", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     const received: string[] = [];
     const priorities: Array<string | undefined> = [];
     const chatJournal = new ChatJournal();
@@ -2268,7 +2330,7 @@ describe("ExpertRuntime", () => {
 
     const running = runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
       prompt: "task_id: task-1\n---\nInitial implementation prompt\n---\nKeep this separator visible",
@@ -2333,7 +2395,7 @@ describe("ExpertRuntime", () => {
 
   it("uses the Task description as the fact source and carries the dispatch prompt as a supplemental Leader message", async () => {
     const store = tempStore();
-    const { flow, userTurn, task, session } = createRunningTask(store, "exp-coder");
+    const { flow, workRun, task, session } = createRunningTask(store, "exp-coder");
     let captured: ClaudeQueryInput | null = null;
     const runtime = createExpertRuntime({
       store,
@@ -2352,7 +2414,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       agentSessionId: session.id,
       prompt: "DISPATCH PROMPT CONTENT",
@@ -2371,10 +2433,10 @@ describe("ExpertRuntime", () => {
   it("uses one active SDK query for two queued tasks of the same Flow Expert", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-shared", name: "Shared" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
     const queryInputs: ClaudeQueryInput[] = [];
     const received: string[] = [];
     const runtime = createExpertRuntime({
@@ -2404,8 +2466,8 @@ describe("ExpertRuntime", () => {
     });
 
     await Promise.all([
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "task one" }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "task two" }),
     ]);
 
     expect(queryInputs).toHaveLength(1);
@@ -2418,10 +2480,10 @@ describe("ExpertRuntime", () => {
   it("uses the active Task permission scope across queued tasks on one FlowExpertWorker", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-permission-scope", name: "Permission Scope" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first permission task" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second permission task" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first permission task" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second permission task" });
     const permissionResults: unknown[] = [];
     const runtime = createExpertRuntime({
       store,
@@ -2459,8 +2521,8 @@ describe("ExpertRuntime", () => {
     };
 
     const running = Promise.all([
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id }),
-      runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id }),
+      runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id }),
     ]);
     const seen = new Set<string>();
     const firstCard = await waitForNewPendingCard(seen);
@@ -2483,10 +2545,10 @@ describe("ExpertRuntime", () => {
   it("resumes the stable SDK session for a later task after natural release", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-resume", name: "Resume" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
     const inputs: ClaudeQueryInput[] = [];
     const runtime = createExpertRuntime({
       store,
@@ -2498,22 +2560,22 @@ describe("ExpertRuntime", () => {
       } }),
     });
 
-    await runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "first" });
-    await runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "second" });
+    await runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "first" });
+    await runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "second" });
 
     expect(inputs).toHaveLength(2);
     expect(inputs[1]?.options?.resume).toBe("sdk-stable");
     expect(store.getTask(second.task.id)?.status).toBe("in_progress");
   });
 
-  it("keeps read-only FlowExpert SDK sessions on the stable project cwd across UserTurns", async () => {
+  it("keeps read-only FlowExpert SDK sessions on the stable project cwd across WorkRuns", async () => {
     const store = tempStore();
     const { flow, projectRoot } = createFlowWithProject(store, { id: "flow-readonly-resume", name: "Readonly Resume" });
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-verify" });
-    const firstExecution = createWorkingUserTurn(store, flow.id)!;
+    const firstExecution = createWorkingWorkRun(store, flow.id)!;
     const first = createAssignedTaskForFlowExpert(store, {
       flowId: flow.id,
-      userTurnId: firstExecution.id,
+      workRunId: firstExecution.id,
       expertId: "exp-verify",
       flowExpertId: flowExpert.id,
       title: "first verify",
@@ -2531,17 +2593,17 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: firstExecution.id,
+      workRunId: firstExecution.id,
       taskId: first.task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: first.session.id,
       prompt: "first",
     });
-    store.completeUserTurn(firstExecution.id);
-    const secondExecution = createWorkingUserTurn(store, flow.id)!;
+    store.completeWorkRun(firstExecution.id);
+    const secondExecution = createWorkingWorkRun(store, flow.id)!;
     const second = createAssignedTaskForFlowExpert(store, {
       flowId: flow.id,
-      userTurnId: secondExecution.id,
+      workRunId: secondExecution.id,
       expertId: "exp-verify",
       flowExpertId: flowExpert.id,
       title: "second verify",
@@ -2549,7 +2611,7 @@ describe("ExpertRuntime", () => {
 
     await runtime.runTask({
       flowId: flow.id,
-      userTurnId: secondExecution.id,
+      workRunId: secondExecution.id,
       taskId: second.task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: second.session.id,
@@ -2567,10 +2629,10 @@ describe("ExpertRuntime", () => {
   it("waits for a draining stream before starting the next SDK query", async () => {
     const store = tempStore();
     const { flow } = createFlowWithProject(store, { id: "flow-draining", name: "Draining" });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
-    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
+    const first = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "first" });
+    const second = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "second" });
     let releaseFirst!: () => void;
     const firstMayExit = new Promise<void>((resolve) => { releaseFirst = resolve; });
     let queryCount = 0;
@@ -2588,8 +2650,8 @@ describe("ExpertRuntime", () => {
       }) }),
     });
 
-    await runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "first" });
-    const secondRun = runtime.runTask({ flowId: flow.id, userTurnId: userTurn.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "second" });
+    await runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: first.task.id, flowExpertId: flowExpert.id, agentSessionId: first.session.id, prompt: "first" });
+    const secondRun = runtime.runTask({ flowId: flow.id, workRunId: workRun.id, taskId: second.task.id, flowExpertId: flowExpert.id, agentSessionId: second.session.id, prompt: "second" });
     await Promise.resolve();
     expect(queryCount).toBe(1);
     releaseFirst();
@@ -2598,23 +2660,24 @@ describe("ExpertRuntime", () => {
     expect(store.getTask(second.task.id)?.status).toBe("in_progress");
   });
 
-  it("recovers queued and interrupted Flow Expert tasks in dispatch order", () => {
+  it("interrupts stale Expert sessions without automatically restarting their Tasks", () => {
     const store = tempStore();
     const flow = store.createFlow({ id: "flow-recovery", workspaceId: "ws-default", name: "Recovery", description: "", projectId: null });
-    const userTurn = createWorkingUserTurn(store, flow.id)!;
+    const workRun = createWorkingWorkRun(store, flow.id)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     store.updateFlowExpertSession(flowExpert.id, "sdk-existing");
-    const queued = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "queued" });
-    const interrupted = createAssignedTaskForFlowExpert(store, { flowId: flow.id, userTurnId: userTurn.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "interrupted" });
+    const queued = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "queued" });
+    const interrupted = createAssignedTaskForFlowExpert(store, { flowId: flow.id, workRunId: workRun.id, expertId: "exp-coder", flowExpertId: flowExpert.id, title: "interrupted" });
     store.activateFlowExpertTask(interrupted.task.id, interrupted.session.id);
 
-    const work = store.recoverFlowExpertRuntimeWork();
+    const result = store.interruptStaleExpertSessions();
 
-    expect(work.map((item) => item.taskId)).toEqual([queued.task.id, interrupted.task.id]);
-    expect(work[0]).toEqual(expect.objectContaining({ prompt: "queued", resumeSessionId: "sdk-existing" }));
-    expect(work[1]?.prompt).toContain(`继续任务 ${interrupted.task.id}`);
+    expect(result).toEqual({ interruptedSessionCount: 2 });
+    expect(store.getTask(queued.task.id)?.status).toBe("in_progress");
     expect(store.getTask(interrupted.task.id)?.status).toBe("in_progress");
+    expect(store.getAgentSession(queued.session.id)?.status).toBe("interrupted");
     expect(store.getAgentSession(interrupted.session.id)?.status).toBe("interrupted");
+    expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
     expect(store.getFlowExpert(flowExpert.id)?.sdkSessionId).toBe("sdk-existing");
   });
 });

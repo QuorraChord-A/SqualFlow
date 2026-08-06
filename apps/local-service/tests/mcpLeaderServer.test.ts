@@ -37,13 +37,13 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
     askUser: (input) => ({
       id: input.cardId,
       status: "pending",
-      userTurnId: "utn-1",
+      workRunId: "utn-1",
     }),
     createTask: () => ({
-      user_turn_id: "utn-1",
+      work_run_id: "utn-1",
       task: {
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -58,7 +58,7 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
     saveExecutionPlan: (input) => ({
       id: "art-plan",
       flow_id: input.flowId,
-      user_turn_id: "utn-1",
+      work_run_id: "utn-1",
       task_id: null,
       type: "execution_plan",
       title: input.title,
@@ -69,7 +69,7 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
     }),
     updateTask: (input) => ({
       task_id: input.taskId,
-      user_turn_id: "utn-1",
+      work_run_id: "utn-1",
       subject: input.subject ?? "Build",
       description: input.description ?? "Build feature",
       active_form: input.activeForm ?? "",
@@ -83,7 +83,7 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
     listTasks: () => [
       {
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -97,7 +97,7 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
     ],
     getTask: ({ taskId }) => ({
       task_id: taskId,
-      user_turn_id: "utn-1",
+      work_run_id: "utn-1",
       subject: "Build",
       description: "Build feature",
       active_form: "",
@@ -115,11 +115,11 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
         status: "streaming",
         expert_id: input.expertId,
         task_id: input.taskId,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
       },
       task: {
         task_id: input.taskId,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -135,11 +135,11 @@ function fakeStore(overrides: Partial<StorePort> = {}): StorePort {
         agent_session_id: "ags-task",
         status: "interrupted",
         task_id: input.taskId,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
       },
       task: {
         task_id: input.taskId,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -177,13 +177,16 @@ describe("leader MCP handlers", () => {
     expect(Object.keys(handlers).sort()).toEqual([
       "askUser",
       "cancelAgent",
+      "cancelWorkRun",
       "createPlan",
       "createTask",
       "dispatchAgent",
       "getContext",
       "getTask",
+      "interruptWorkRun",
       "listTasks",
       "resolvePlanFeedback",
+      "resumeWorkRun",
       "saveExecutionPlan",
       "sendMessage",
       "submitOrchestrationPlan",
@@ -277,7 +280,7 @@ describe("leader MCP handlers", () => {
     }, {
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         spec_requested: true,
         created_at: "2026-06-15T10:00:00.000Z",
       },
@@ -314,7 +317,7 @@ describe("leader MCP handlers", () => {
       plan: "# Plan",
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         spec_requested: true,
         created_at: "2026-06-15T10:00:00.000Z",
       },
@@ -327,7 +330,7 @@ describe("leader MCP handlers", () => {
       status: "pending",
       fileName: "spec.md",
       overview: "overview",
-      userTurnId: null,
+      workRunId: null,
     }]);
   });
 
@@ -335,7 +338,7 @@ describe("leader MCP handlers", () => {
     const handlers = createLeaderToolHandlers(fakeStore(), {}, {
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         spec_requested: false,
         created_at: "2026-06-15T10:00:00.000Z",
       },
@@ -351,7 +354,10 @@ describe("leader MCP handlers", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "SPEC_REQUEST_REQUIRED", message: "create_plan requires this message to request Spec." },
+      error: {
+        code: "SPEC_REQUEST_REQUIRED",
+        message: "当前消息不是计划模式请求，不能创建审批计划。请提示用户切换到计划模式后重新发送，不要重试。",
+      },
     });
   });
 
@@ -361,7 +367,7 @@ describe("leader MCP handlers", () => {
     }), {}, {
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         spec_requested: true,
         created_at: "2026-06-15T10:00:00.000Z",
       },
@@ -375,8 +381,13 @@ describe("leader MCP handlers", () => {
       plan: "# Plan",
     }));
 
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe("PENDING_USER_ACTION");
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "PENDING_USER_ACTION",
+        message: "当前已有待用户处理的卡片。请等待用户处理后再创建计划。",
+      },
+    });
   });
 
   it("saves an execution plan through the V1 contract", async () => {
@@ -388,7 +399,7 @@ describe("leader MCP handlers", () => {
         return {
           id: "art-plan",
           flow_id: args.flowId,
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           task_id: null,
           type: "execution_plan",
           title: args.title,
@@ -417,7 +428,7 @@ describe("leader MCP handlers", () => {
       artifact: {
         id: "art-plan",
         flow_id: "flow-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         task_id: null,
         type: "execution_plan",
         title: "Execution Plan",
@@ -452,7 +463,7 @@ describe("leader MCP handlers", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "ACTIVE_USER_TURN_REQUIRED", message: "编排计划需要一个活跃的 UserTurn。" },
+      error: { code: "WORK_RUN_REQUIRED", message: "编排计划需要一个可执行的 WorkRun。" },
     });
   });
 
@@ -496,7 +507,7 @@ describe("leader MCP handlers", () => {
     const handlers = createLeaderToolHandlers(fakeStore(), {}, {
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         spec_requested: true,
         created_at: "2026-06-15T10:00:00.000Z",
       },
@@ -509,8 +520,45 @@ describe("leader MCP handlers", () => {
       plan: "# Plan",
     }));
 
-    expect(result.ok).toBe(false);
-    expect(result.error.code).toBe("INVALID_SPEC_REVISION");
+    expect(result).toEqual({
+      ok: false,
+      error: {
+        code: "INVALID_ARGUMENTS",
+        message: "创建新计划缺少 name。请补全 name 后重试。",
+      },
+    });
+  });
+
+  it("forwards actionable create_plan store errors without changing the response shape", async () => {
+    const handlers = createLeaderToolHandlers(fakeStore({
+      createPlan: () => ({
+        error: {
+          code: "WORK_RUN_INTERRUPTED",
+          message: "当前协作已中断，不能创建计划。请等待用户明确要求继续。",
+        },
+      }),
+    }), {}, {
+      currentTurnInput: {
+        trigger_kind: "user_message",
+        work_run_id: "utn-1",
+        spec_requested: true,
+        created_at: "2026-06-15T10:00:00.000Z",
+      },
+    });
+
+    expect(jsonResult(await handlers.createPlan({
+      flow_id: "flow-1",
+      mode: "write",
+      name: "Plan",
+      overview: "overview",
+      plan: "# Plan",
+    }))).toEqual({
+      ok: false,
+      error: {
+        code: "WORK_RUN_INTERRUPTED",
+        message: "当前协作已中断，不能创建计划。请等待用户明确要求继续。",
+      },
+    });
   });
 
   it("creates a task through the V1 contract", async () => {
@@ -520,10 +568,10 @@ describe("leader MCP handlers", () => {
       createTask(args) {
         created.push(args);
         return {
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           task: {
             task_id: "task-1",
-            user_turn_id: "utn-1",
+            work_run_id: "utn-1",
             subject: args.subject,
             description: args.description,
             active_form: args.activeForm ?? "",
@@ -560,7 +608,7 @@ describe("leader MCP handlers", () => {
     }]);
     expect(events).toEqual([{
       flowId: "flow-1",
-      userTurnId: "utn-1",
+      workRunId: "utn-1",
       task: result.task,
     }]);
   });
@@ -578,7 +626,7 @@ describe("leader MCP handlers", () => {
 
     expect(result).toEqual({
       ok: false,
-      error: { code: "ACTIVE_USER_TURN_REQUIRED", message: "Task could not be created for the current UserTurn." },
+      error: { code: "WORK_RUN_REQUIRED", message: "Task could not be created for the current WorkRun." },
     });
   });
 
@@ -590,7 +638,7 @@ describe("leader MCP handlers", () => {
         updated.push(args);
         return {
           task_id: args.taskId,
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           subject: args.subject ?? "Build",
           description: args.description ?? "Build feature",
           active_form: args.activeForm ?? "",
@@ -625,7 +673,7 @@ describe("leader MCP handlers", () => {
       ok: true,
       task: {
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "done",
@@ -668,7 +716,7 @@ describe("leader MCP handlers", () => {
         updated.push(args);
         return {
           task_id: args.taskId,
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           subject: "Build",
           description: "Build feature",
           active_form: "",
@@ -725,7 +773,7 @@ describe("leader MCP handlers", () => {
       tasks: [
         {
           task_id: "task-1",
-          user_turn_id: "utn-1",
+          work_run_id: "utn-1",
           subject: "Build",
           description: "Build feature",
           active_form: "",
@@ -742,7 +790,7 @@ describe("leader MCP handlers", () => {
       ok: true,
       task: {
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -762,7 +810,7 @@ describe("leader MCP handlers", () => {
     const handlers = createLeaderToolHandlers(fakeStore({
       askUser(args) {
         created.push(args);
-        return { id: args.cardId, status: "pending", userTurnId: "utn-1" };
+        return { id: args.cardId, status: "pending", workRunId: "utn-1" };
       },
     }), {
       onDecisionCardCreated: (event) => {
@@ -790,7 +838,7 @@ describe("leader MCP handlers", () => {
       cardType: "clarification",
       questions: [question],
       status: "pending",
-      userTurnId: "utn-1",
+      workRunId: "utn-1",
     }]);
   });
 
@@ -838,11 +886,11 @@ describe("leader MCP handlers", () => {
             status: "streaming",
             expert_id: args.expertId,
             task_id: args.taskId,
-            user_turn_id: "utn-1",
+            work_run_id: "utn-1",
           },
           task: {
             task_id: args.taskId,
-            user_turn_id: "utn-1",
+            work_run_id: "utn-1",
             subject: "Build",
             description: "Build feature",
             active_form: "",
@@ -869,11 +917,11 @@ describe("leader MCP handlers", () => {
         status: "streaming",
         expert_id: "exp-frontend",
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
       },
       task: {
         task_id: "task-1",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         subject: "Build",
         description: "Build feature",
         active_form: "",
@@ -926,7 +974,7 @@ describe("leader MCP handlers", () => {
     }), {}, {
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         created_at: "2026-07-11T00:00:00.000Z",
       },
     });
@@ -941,7 +989,7 @@ describe("leader MCP handlers", () => {
     expect(calls).toEqual([{
       flowId: "flow-1",
       taskId: "task-1",
-      currentTurnInput: expect.objectContaining({ user_turn_id: "utn-1" }),
+      currentTurnInput: expect.objectContaining({ work_run_id: "utn-1" }),
     }]);
   });
 
@@ -1076,13 +1124,16 @@ describe("leader MCP server", () => {
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         "ask_user",
         "cancel_agent",
+        "cancel_work_run",
         "create_plan",
         "create_task",
         "dispatch_agent",
         "get_context",
         "get_task",
+        "interrupt_work_run",
         "list_tasks",
         "resolve_plan_feedback",
+        "resume_work_run",
         "save_execution_plan",
         "send_message",
         "submit_orchestration_plan",

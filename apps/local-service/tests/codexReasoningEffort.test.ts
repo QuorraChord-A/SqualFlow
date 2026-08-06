@@ -3,7 +3,7 @@ import {
   defaultRuntimeReasoningEffortForSdk,
   parseRuntimeReasoningEffort,
   runtimeReasoningEffortsForSdk,
-} from "../src/runtime/codexReasoningEffort.js";
+} from "../src/config/runtimeReasoningEffort.js";
 
 describe("SDK reasoning effort values", () => {
   it("uses fixed SDK-level values", () => {

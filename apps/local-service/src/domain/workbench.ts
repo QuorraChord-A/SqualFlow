@@ -1,5 +1,5 @@
 import type { Store } from "../db/store.js";
-import { latestUserTurnReview } from "./userTurnReview.js";
+import { latestWorkRunReview } from "./workRunReview.js";
 import { currentPlanView } from "./orchestrationView.js";
 
 function roleTitle(store: Store, expertId: string | null | undefined) {
@@ -50,14 +50,14 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
   const flow = store.getFlow(flowId);
   if (!flow) return null;
 
-  const openUserTurn = store.getOpenUserTurn(flowId);
+  const openWorkRun = store.getOpenWorkRun(flowId);
   const sessions = store.listAgentSessions(flowId);
   const artifacts = store.listArtifacts(flowId);
   const project = flow.projectId ? store.getProject(flow.projectId) : null;
 
-  const leaderSession = sessions.find((session) =>
+  const leaderSession = sessions.filter((session) =>
     session.expertId === "exp-leader" && session.taskId === null
-  ) ?? null;
+  ).at(-1) ?? null;
   const flowExperts = store.listFlowExperts(flowId);
   const allTasks = store.listTasks(flowId);
 
@@ -140,7 +140,7 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
       const ownerExpertId = flowExpert?.expertId ?? ownerSession?.expertId ?? task.expertId ?? null;
       return {
         id: task.id,
-        user_turn_id: task.userTurnId,
+        work_run_id: task.workRunId,
         subject: task.title,
         status: task.status,
         owner_flow_expert_id: flowExpert?.id ?? null,
@@ -153,9 +153,9 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
       };
     }),
     files: {
-      root_path: openUserTurn?.workRootPath || project?.localPath || null,
-      tree_available: Boolean(openUserTurn?.workRootPath || project?.localPath),
+      root_path: openWorkRun?.workRootPath || project?.localPath || null,
+      tree_available: Boolean(openWorkRun?.workRootPath || project?.localPath),
     },
-    review: latestUserTurnReview(store, flowId),
+    review: latestWorkRunReview(store, flowId),
   };
 }

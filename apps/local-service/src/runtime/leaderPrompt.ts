@@ -12,7 +12,7 @@ export type LeaderTurnInput = {
   flowId: string;
   userMessage?: string;
   specRequested?: boolean;
-  kind?: "user" | "expert_result" | "expert_message" | "decision" | "decision_cancelled" | "spec_run" | "user_turn_recovery" | "plan_approved";
+  kind?: "user" | "expert_result" | "expert_message" | "decision" | "decision_cancelled" | "spec_run" | "plan_approved";
   planApprovedTasks?: Array<{
     taskId: string;
     title: string;
@@ -46,7 +46,7 @@ export type LeaderTurnInput = {
   decisionUserMessage?: string;
   decisionCardId?: string;
   decisionMessageId?: string;
-  userTurnId?: string;
+  workRunId?: string;
   currentTurnInput?: CurrentTurnInput;
   attachments?: MessageImageAttachment[];
   planFeedback?: LeaderPlanFeedback[];
@@ -196,7 +196,7 @@ export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInpu
   if (turn.kind === "decision" || turn.kind === "decision_cancelled") {
     return {
       trigger_kind: turn.kind === "decision_cancelled" ? "decision_cancelled" : "decision_resolved",
-      user_turn_id: turn.userTurnId,
+      work_run_id: turn.workRunId,
       card_id: turn.decisionCardId,
       message_id: turn.decisionMessageId,
       content: turn.decisionUserMessage ?? "",
@@ -206,12 +206,12 @@ export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInpu
     };
   }
   if (turn.kind === "spec_run") {
-    return { trigger_kind: "spec_run", user_turn_id: turn.userTurnId, created_at: createdAt };
+    return { trigger_kind: "spec_run", work_run_id: turn.workRunId, created_at: createdAt };
   }
   if (turn.kind === "expert_result") {
     return {
       trigger_kind: "expert_result",
-      user_turn_id: turn.userTurnId,
+      work_run_id: turn.workRunId,
       ...(turn.specRequested === true ? { spec_requested: true } : {}),
       created_at: createdAt,
     };
@@ -219,22 +219,14 @@ export function currentTurnInputFromTurn(turn: LeaderTurnInput): CurrentTurnInpu
   if (turn.kind === "expert_message") {
     return {
       trigger_kind: "expert_message",
-      user_turn_id: turn.userTurnId,
-      created_at: createdAt,
-    };
-  }
-  if (turn.kind === "user_turn_recovery") {
-    return {
-      trigger_kind: "user_turn_recovery",
-      user_turn_id: turn.userTurnId,
-      ...(turn.specRequested === true ? { spec_requested: true } : {}),
+      work_run_id: turn.workRunId,
       created_at: createdAt,
     };
   }
   if (turn.kind === "plan_approved") {
     return {
       trigger_kind: "plan_approved",
-      user_turn_id: turn.userTurnId,
+      work_run_id: turn.workRunId,
       created_at: createdAt,
     };
   }
@@ -301,16 +293,6 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
       body: planApprovedBody(input.planApprovedTasks ?? []),
     });
   }
-  if (input.kind === "user_turn_recovery") {
-    return buildPlatformEvent({
-      flowId: input.flowId,
-      type: "turn_recovery",
-      body: input.specRequested === true
-        ? "恢复当前 UserTurn:原始用户消息要求 Spec;若 Spec 尚未创建,先调用 create_plan,不要创建执行 Task。"
-        : "恢复当前 UserTurn:读取当前 Task、卡片与专家结果,继续处理或形成最终结论。",
-    });
-  }
-
   return joinSegments([
     input.userMessage ?? "",
     input.specRequested === true

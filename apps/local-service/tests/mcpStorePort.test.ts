@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createStorePort } from "../src/mcp/storePort.js";
 
 const dirs: string[] = [];
@@ -24,10 +24,10 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
-function currentTurnInput(userTurnId: string) {
+function currentTurnInput(workRunId: string) {
   return {
     trigger_kind: "user_message" as const,
-    user_turn_id: userTurnId,
+    work_run_id: workRunId,
     message_id: "msg-current",
     content: "continue",
     created_at: "2026-06-15T10:00:00.000Z",
@@ -52,7 +52,7 @@ describe("createStorePort", () => {
       name: "后台登录系统名称过长",
       currentTurnInput: {
         trigger_kind: "flow_name_generation",
-        user_turn_id: "turn-name",
+        work_run_id: "turn-name",
         created_at: new Date().toISOString(),
       },
     });
@@ -82,7 +82,7 @@ describe("createStorePort", () => {
 
     expect(port.getContext(flow.id)).toEqual(expect.objectContaining({
       flow_id: flow.id,
-      status: "ready",
+      status: "idle",
     }));
     expect(port.getContext(flow.id)).toEqual(expect.objectContaining({ legacy_spec_flow: false }));
   });
@@ -96,16 +96,16 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-local-time" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-local-time" })!;
     store.appendEventLog({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       eventType: "test.timestamp",
       payload: { observed_at: "2026-07-23T03:28:10.473Z" },
     });
 
     const context = createStorePort(store).getContext(flow.id)!;
-    const turns = context.user_turns as Array<Record<string, unknown>>;
+    const turns = context.work_runs as Array<Record<string, unknown>>;
     const events = context.recent_events as Array<Record<string, unknown>>;
     const payload = events[0]!.payload as Record<string, unknown>;
 
@@ -123,7 +123,7 @@ describe("createStorePort", () => {
     expect(new Date(String(payload.observed_at)).toISOString()).toBe("2026-07-23T03:28:10.473Z");
   });
 
-  it("creates and lists current-UserTurn tasks through the V1 API", () => {
+  it("creates and lists current-WorkRun tasks through the V1 API", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-tasks",
@@ -132,7 +132,7 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "leader",
@@ -143,24 +143,24 @@ describe("createStorePort", () => {
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(created).toEqual(expect.objectContaining({
-      user_turn_id: userTurn.id,
+      work_run_id: workRun.id,
       task: expect.objectContaining({
         task_id: expect.stringMatching(/^task-/),
         subject: "Build",
         status: "pending",
       }),
     }));
-    expect(port.listTasks({ flowId: flow.id, currentTurnInput: currentTurnInput(userTurn.id) })[0]).toEqual(expect.objectContaining({
+    expect(port.listTasks({ flowId: flow.id, currentTurnInput: currentTurnInput(workRun.id) })[0]).toEqual(expect.objectContaining({
       subject: "Build",
       status: "pending",
     }));
   });
 
-  it("allows create_task on a new UserTurn without orchestration plan (single-expert path)", () => {
+  it("allows create_task on a new WorkRun without orchestration plan (single-expert path)", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Direct", localPath: "/repo/direct" });
     const flow = store.createFlow({
@@ -172,7 +172,7 @@ describe("createStorePort", () => {
     });
     const port = createStorePort(store);
     const createdAt = "2026-06-15T10:00:00.000Z";
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1", startedAt: createdAt })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1", startedAt: createdAt })!;
 
     const created = port.createTask({
       flowId: flow.id,
@@ -180,7 +180,7 @@ describe("createStorePort", () => {
       description: "Build feature",
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
         message_id: "msg-1",
         content: "build it",
         created_at: createdAt,
@@ -188,13 +188,13 @@ describe("createStorePort", () => {
     });
 
     expect(created).toEqual(expect.objectContaining({
-      user_turn_id: userTurn.id,
+      work_run_id: workRun.id,
       task: expect.objectContaining({ subject: "Build", status: "pending" }),
     }));
     expect(store.listTasks(flow.id)).toHaveLength(1);
   });
 
-  it("rejects direct UserTurn work outside execute mode or valid triggers", () => {
+  it("rejects direct WorkRun work outside execute mode or valid triggers", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-direct-reject",
@@ -204,7 +204,7 @@ describe("createStorePort", () => {
       projectId: null,
     });
     const port = createStorePort(store);
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
 
     expect(port.createTask({
       flowId: flow.id,
@@ -212,7 +212,7 @@ describe("createStorePort", () => {
       description: "Build feature",
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
         message_id: "msg-1",
         content: "build it",
         created_at: new Date().toISOString(),
@@ -224,7 +224,7 @@ describe("createStorePort", () => {
       cardId: "dc-1",
       sessionId: "ags-leader",
       cardType: "clarification",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       questions: [],
     });
 
@@ -234,7 +234,7 @@ describe("createStorePort", () => {
       description: "Build feature",
       currentTurnInput: {
         trigger_kind: "user_message",
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
         message_id: "msg-2",
         content: "build it",
         created_at: new Date().toISOString(),
@@ -256,7 +256,7 @@ describe("createStorePort", () => {
       description: "Build feature",
       currentTurnInput: {
         trigger_kind: "expert_result",
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
         message_id: "msg-3",
         content: "build it",
         created_at: new Date().toISOString(),
@@ -267,10 +267,10 @@ describe("createStorePort", () => {
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-    })).toMatchObject({ error: { code: "ACTIVE_USER_TURN_REQUIRED" } });
+    })).toMatchObject({ error: { code: "WORK_RUN_REQUIRED" } });
   });
 
-  it("returns a structured error when creating a task without an active UserTurn", () => {
+  it("returns a structured error when creating a task without an active WorkRun", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-no-exec",
@@ -285,10 +285,10 @@ describe("createStorePort", () => {
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-    })).toMatchObject({ error: { code: "ACTIVE_USER_TURN_REQUIRED" } });
+    })).toMatchObject({ error: { code: "WORK_RUN_REQUIRED" } });
   });
 
-  it("saves an execution plan artifact on the active UserTurn", () => {
+  it("saves an execution plan artifact on the active WorkRun", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-plan-artifact",
@@ -297,7 +297,7 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "leader",
@@ -310,12 +310,12 @@ describe("createStorePort", () => {
       title: "Execution Plan",
       plan: "# Execution Plan",
       sourceAgentSessionId: "ags-leader",
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(artifact).toEqual(expect.objectContaining({
       flow_id: flow.id,
-      user_turn_id: userTurn.id,
+      work_run_id: workRun.id,
       task_id: null,
       type: "execution_plan",
       title: "Execution Plan",
@@ -325,7 +325,7 @@ describe("createStorePort", () => {
     expect(store.listArtifacts(flow.id)).toEqual([
       expect.objectContaining({
         id: artifact?.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         taskId: null,
         type: "execution_plan",
         title: "Execution Plan",
@@ -335,7 +335,7 @@ describe("createStorePort", () => {
     ]);
   });
 
-  it("returns null when saving an execution plan without an active UserTurn", () => {
+  it("returns null when saving an execution plan without an active WorkRun", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-no-plan-exec",
@@ -363,7 +363,7 @@ describe("createStorePort", () => {
       description: "",
       projectId: project.id,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "leader",
@@ -381,7 +381,7 @@ describe("createStorePort", () => {
         { node_id: "verify", expert_id: "exp-verify", title: "验证", description: "验证限制", depends_on: [], acceptance_criteria: ["通过"], risk_tags: [], side_effects: [], resource_keys: [] },
         { node_id: "review", expert_id: "exp-codereview", title: "审查", description: "审查限制", depends_on: [], acceptance_criteria: ["通过"], risk_tags: [], side_effects: [], resource_keys: [] },
       ],
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(result).toEqual(expect.objectContaining({
@@ -406,7 +406,7 @@ describe("createStorePort", () => {
         projectId: project.id,
         planApproval,
       });
-      const turn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "leader" })!;
+      const turn = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "leader" })!;
       return createStorePort(store).submitOrchestrationPlan({
         flow_id: flow.id,
         title: "实现页面",
@@ -457,7 +457,7 @@ describe("createStorePort", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Single role", localPath: "/repo/single-role" });
     const flow = store.createFlow({ id: "flow-single-role", name: "Single role", description: "", projectId: project.id });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const port = createStorePort(store);
     const input = currentTurnInput(turn.id);
 
@@ -480,7 +480,7 @@ describe("createStorePort", () => {
       },
     });
     expect(store.listOrchestrationPlans(flow.id)).toEqual([]);
-    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+    expect(store.getWorkRun(turn.id)?.workSource).toBeFalsy();
 
     expect(port.createTask({
       flowId: flow.id,
@@ -488,7 +488,7 @@ describe("createStorePort", () => {
       description: "Build feature",
       currentTurnInput: input,
     })).toEqual(expect.objectContaining({
-      user_turn_id: turn.id,
+      work_run_id: turn.id,
       task: expect.objectContaining({ subject: "Build", status: "pending" }),
     }));
   });
@@ -497,7 +497,7 @@ describe("createStorePort", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Alias", localPath: "/repo/alias" });
     const flow = store.createFlow({ id: "flow-alias", name: "Alias", description: "", projectId: project.id });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
 
     const rejected = createStorePort(store).submitOrchestrationPlan({
       flow_id: flow.id,
@@ -524,7 +524,7 @@ describe("createStorePort", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Disabled", localPath: "/repo/disabled" });
     const flow = store.createFlow({ id: "flow-disabled", name: "Disabled", description: "", projectId: project.id, planApproval: "off" });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const input = currentTurnInput(turn.id);
     const nodes = [
       { node_id: "research", expert_id: "exp-research", title: "调研", description: "调研", depends_on: [], acceptance_criteria: ["完成"], risk_tags: [], side_effects: [], resource_keys: [] },
@@ -551,7 +551,7 @@ describe("createStorePort", () => {
       },
     });
     expect(store.listOrchestrationPlans(flow.id)).toEqual([]);
-    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+    expect(store.getWorkRun(turn.id)?.workSource).toBeFalsy();
 
     const enabledPort = createStorePort(store, undefined, {
       getEnabledExpertIds: () => new Set(["exp-coder", "exp-research", "exp-verify", "exp-codereview"]),
@@ -573,7 +573,7 @@ describe("createStorePort", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Unknown", localPath: "/repo/unknown" });
     const flow = store.createFlow({ id: "flow-unknown", name: "Unknown", description: "", projectId: project.id });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const input = currentTurnInput(turn.id);
     const port = createStorePort(store);
 
@@ -594,21 +594,21 @@ describe("createStorePort", () => {
         issues: expect.arrayContaining([expect.objectContaining({ code: "EXPERT_UNAVAILABLE" })]),
       },
     });
-    expect(store.getUserTurn(turn.id)?.workSource).toBeFalsy();
+    expect(store.getWorkRun(turn.id)?.workSource).toBeFalsy();
 
     expect(port.createTask({
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
       currentTurnInput: input,
-    })).toEqual(expect.objectContaining({ user_turn_id: turn.id }));
+    })).toEqual(expect.objectContaining({ work_run_id: turn.id }));
   });
 
   it("blocks create_task with a dedicated error once an orchestration plan exists for the turn", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Plan active", localPath: "/repo/plan-active" });
     const flow = store.createFlow({ id: "flow-plan-active", name: "Plan active", description: "", projectId: project.id, planApproval: "off" });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const input = currentTurnInput(turn.id);
     const port = createStorePort(store);
 
@@ -634,7 +634,7 @@ describe("createStorePort", () => {
     })).toMatchObject({ error: { code: "ORCHESTRATION_PLAN_ACTIVE" } });
   });
 
-  it("requires a saved execution plan before creating tasks for spec UserTurns", () => {
+  it("requires a saved execution plan before creating tasks for spec WorkRuns", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-spec-task-order",
@@ -643,7 +643,7 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
@@ -655,23 +655,23 @@ describe("createStorePort", () => {
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     })).toMatchObject({ error: { code: "EXECUTION_PLAN_REQUIRED" } });
 
     port.saveExecutionPlan({
       flowId: flow.id,
       title: "Execution Plan",
       plan: "# Execution Plan",
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(port.createTask({
       flowId: flow.id,
       subject: "Build",
       description: "Build feature",
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     })).toEqual(expect.objectContaining({
-      user_turn_id: userTurn.id,
+      work_run_id: workRun.id,
       task: expect.objectContaining({
         subject: "Build",
         status: "pending",
@@ -688,21 +688,21 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "leader",
     })!;
     const taskA = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "A",
       description: "A",
       dependsOnTaskIds: [],
     })!;
     const taskB = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "B",
       description: "B",
       dependsOnTaskIds: [],
@@ -715,7 +715,7 @@ describe("createStorePort", () => {
       owner: "exp-frontend",
       metadata: { priority: "P0" },
       addBlockedBy: [taskB.id],
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(updated).toEqual(expect.objectContaining({
@@ -727,7 +727,7 @@ describe("createStorePort", () => {
     expect(store.listTaskDependencies(taskA.id)).toEqual([taskB.id]);
   });
 
-  it("returns flat UserTurn task snapshot without legacy run fields", () => {
+  it("returns flat WorkRun task snapshot without legacy run fields", () => {
     const store = tempStore();
     const flow = store.createFlow({
       id: "flow-snapshot",
@@ -736,21 +736,21 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: JSON.stringify({ prompt: "build" }),
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build feature",
       dependsOnTaskIds: [],
     })!;
     store.appendEventLog({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       eventType: "task.created",
       payload: { task_id: task.id },
@@ -759,9 +759,9 @@ describe("createStorePort", () => {
     const snapshot = createStorePort(store).getContext(flow.id);
 
     expect(snapshot).toMatchObject({
-      status: "active",
-      active_user_turn_id: userTurn.id,
-      tasks: [expect.objectContaining({ id: task.id, title: "Build", user_turn_id: userTurn.id })],
+      status: "idle",
+      current_work_run_id: workRun.id,
+      tasks: [expect.objectContaining({ id: task.id, title: "Build", work_run_id: workRun.id })],
     });
     expect(snapshot).not.toHaveProperty("current_run");
     expect(JSON.stringify(snapshot)).not.toContain("current_phase");
@@ -776,7 +776,7 @@ describe("createStorePort", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-plan" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id });
     const port = createStorePort(store);
 
     const plan = port.createPlan({
@@ -785,7 +785,7 @@ describe("createStorePort", () => {
       name: "Plan",
       overview: "overview",
       plan: "# Plan",
-      currentTurnInput: { ...currentTurnInput(userTurn.id), spec_requested: true },
+      currentTurnInput: { ...currentTurnInput(workRun.id), spec_requested: true },
     });
 
     expect(plan).toEqual({
@@ -804,14 +804,71 @@ describe("createStorePort", () => {
     });
   });
 
+  it("returns an actionable error when rewrite has no prior Spec revision", () => {
+    const store = tempStore();
+    const flow = store.createFlow({
+      id: "flow-plan-rewrite-missing",
+      workspaceId: "ws-default",
+      name: "Plan",
+      description: "",
+      projectId: null,
+    });
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-plan" })!;
+    const port = createStorePort(store);
+
+    expect(port.createPlan({
+      flowId: flow.id,
+      mode: "rewrite",
+      overview: "overview",
+      plan: "# Plan",
+      currentTurnInput: { ...currentTurnInput(workRun.id), spec_requested: true },
+    })).toEqual({
+      error: {
+        code: "SPEC_REVISION_NOT_FOUND",
+        message: "没有可重写的旧计划。请改用 write 模式创建新计划。",
+      },
+    });
+  });
+
+  it.each([
+    ["interrupted", "WORK_RUN_INTERRUPTED", "当前协作已中断，不能创建计划。请等待用户明确要求继续。"],
+    ["waiting_user", "WORK_RUN_WAITING_USER", "当前正在等待用户操作，不能创建新计划。请等待用户处理。"],
+    ["completed", "WORK_RUN_NOT_EXECUTABLE", "当前 WorkRun 状态不允许创建计划。请重新读取上下文后决定下一步。"],
+  ] as const)("returns an actionable error for a %s WorkRun", (status, code, message) => {
+    const store = tempStore();
+    const flow = store.createFlow({
+      id: `flow-plan-${status}`,
+      workspaceId: "ws-default",
+      name: "Plan",
+      description: "",
+      projectId: null,
+    });
+    const workRun = beginWorkRun(store, { flowId: flow.id });
+    if (status === "interrupted") {
+      store.interruptWorkRun({ flowId: flow.id, workRunId: workRun.id, expectedRevision: workRun.revision });
+    }
+    if (status === "waiting_user") store.waitWorkRunForUserAction(workRun.id);
+    if (status === "completed") store.completeWorkRun(workRun.id);
+    const port = createStorePort(store);
+
+    expect(port.createPlan({
+      flowId: flow.id,
+      mode: "write",
+      name: "Plan",
+      overview: "overview",
+      plan: "# Plan",
+      currentTurnInput: { ...currentTurnInput(workRun.id), spec_requested: true },
+    })).toEqual({ error: { code, message } });
+  });
+
   it("blocks execution tools while the current message still requires Spec approval", () => {
     const store = tempStore();
     const project = store.createProject({ name: "Spec guard", localPath: "/repo/spec-guard" });
     const flow = store.createFlow({ id: "flow-spec-guard", name: "Spec guard", description: "", projectId: project.id });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-spec-guard", specRequested: true })!;
-    store.startUserTurnWork({
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-spec-guard", specRequested: true })!;
+    store.startWorkRunWork({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       workSource: "direct_message",
       targetProjectId: project.id,
       inputSnapshotJson: turn.inputSnapshotJson,
@@ -852,7 +909,7 @@ describe("createStorePort", () => {
       projectId: null,
     });
     const port = createStorePort(store);
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-card" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-card" })!;
 
     const card = port.askUser({
       flowId: flow.id,
@@ -865,13 +922,13 @@ describe("createStorePort", () => {
           { label: "调整", description: "继续讨论" },
         ],
       }],
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
 
     expect(card).toEqual(expect.objectContaining({
       id: "dc-1",
       status: "pending",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     }));
     expect(port.listPendingUserActions({ flowId: flow.id })).toEqual([
       { id: "dc-1", type: "clarification", status: "pending" },
@@ -903,13 +960,13 @@ describe("createStorePort", () => {
     });
   });
 
-  it("only cancels the current UserTurn's running Task", async () => {
+  it("only cancels the current WorkRun's running Task", async () => {
     const store = tempStore();
     const flow = store.createFlow({ id: "flow-cancel-agent", name: "Cancel", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id });
+    const workRun = beginWorkRun(store, { flowId: flow.id });
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -917,7 +974,7 @@ describe("createStorePort", () => {
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       status: "streaming",
@@ -934,7 +991,7 @@ describe("createStorePort", () => {
     const cancelled = await port.cancelAgent({
       flowId: flow.id,
       taskId: task.id,
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
     expect(cancelled).toEqual(expect.objectContaining({
       ok: true,
@@ -945,11 +1002,43 @@ describe("createStorePort", () => {
     const rejected = await port.cancelAgent({
       flowId: flow.id,
       taskId: task.id,
-      currentTurnInput: currentTurnInput(userTurn.id),
+      currentTurnInput: currentTurnInput(workRun.id),
     });
     expect(rejected).toEqual({
       ok: false,
       error: { code: "TASK_NOT_RUNNING", message: `task is not running: ${task.id}` },
     });
+  });
+
+  it("interrupts, explicitly resumes, and permanently cancels a WorkRun", () => {
+    const store = tempStore();
+    const flow = store.createFlow({ id: "flow-work-run-actions", name: "Actions", description: "", projectId: null });
+    const workRun = beginWorkRun(store, { flowId: flow.id });
+    const task = store.createTask({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      title: "Build",
+      description: "Build",
+      expertId: "exp-coder",
+    })!;
+    const port = createStorePort(store);
+
+    expect(port.interruptWorkRun({ flowId: flow.id, workRunId: workRun.id })).toEqual(expect.objectContaining({
+      ok: true,
+      work_run: expect.objectContaining({ work_run_id: workRun.id, status: "interrupted" }),
+    }));
+    expect(store.getTask(task.id)?.status).toBe("pending");
+
+    expect(port.resumeWorkRun({ flowId: flow.id, workRunId: workRun.id })).toEqual(expect.objectContaining({
+      ok: true,
+      work_run: expect.objectContaining({ work_run_id: workRun.id, status: "executing" }),
+    }));
+    expect(store.listAgentSessions(flow.id)).toEqual([]);
+
+    expect(port.cancelWorkRun({ flowId: flow.id, workRunId: workRun.id })).toEqual(expect.objectContaining({
+      ok: true,
+      work_run: expect.objectContaining({ work_run_id: workRun.id, status: "cancelled" }),
+    }));
+    expect(store.getTask(task.id)?.status).toBe("cancelled");
   });
 });

@@ -8,7 +8,7 @@ import type { OrchestrationPlanView } from "../types/orchestration";
 export interface TaskData {
   id: string;
   flow_id?: string;
-  user_turn_id: string;
+  work_run_id: string;
   title: string;
   description: string;
   expert_id: string | null;
@@ -29,7 +29,7 @@ export type DecisionAnswers = Record<string, DecisionAnswer>;
 export interface DecisionCardData {
   card_id: string;
   card_type?: string;
-  user_turn_id?: string | null;
+  work_run_id?: string | null;
   questions: Question[];
   status: "pending" | "resolved" | "cancelled";
   answers?: DecisionAnswers;
@@ -38,7 +38,7 @@ export interface DecisionCardData {
 export interface ArtifactData {
   id: string;
   flow_id: string;
-  user_turn_id?: string | null;
+  work_run_id?: string | null;
   task_id?: string | null;
   artifact_type: string;
   title: string;
@@ -63,17 +63,17 @@ export interface EventLogData {
   id: string;
   sequence: number;
   event_type: string;
-  user_turn_id?: string | null;
+  work_run_id?: string | null;
   task_id?: string | null;
   agent_session_id?: string | null;
   payload?: Record<string, unknown>;
   created_at?: string;
 }
 
-export interface UserTurnData {
+export interface WorkRunData {
   id: string;
   triggerMessageId: string;
-  status: "active" | "waiting_user" | "completed" | "failed" | "cancelled" | string;
+  status: "ready" | "executing" | "waiting_user" | "interrupted" | "completed" | "failed" | "cancelled" | string;
   startedAt: string | null;
   activeStartedAt: string | null;
   activeDurationMs: number;
@@ -82,12 +82,14 @@ export interface UserTurnData {
   specRevisionId: string | null;
   targetProjectId: string | null;
   workRootPath: string | null;
+  revision: number;
+  executionStartedAt: string | null;
 }
 
 type SpecCardState = {
   spec_approval_id: string;
   spec_revision_id: string;
-  user_turn_id?: string | null;
+  work_run_id?: string | null;
   status: "pending" | "approved" | "cancelled";
   file_name: string;
   overview: string;
@@ -98,7 +100,7 @@ export type { SpecCardState };
 export interface DashboardData {
   isFlowStateLoaded: boolean;
   flowStateLoadedFlowId: string | null;
-  activeUserTurnId: string | null;
+  activeWorkRunId: string | null;
   tasks: TaskData[];
   flowStatus: string;
   riskMode: "auto_edit" | "full_access";
@@ -107,13 +109,14 @@ export interface DashboardData {
   leaderSessionId: string | null;
   leaderSessionFlowId: string | null;
   leaderAgentSessionId: string | null;
+  activeLeaderAgentSessionId: string | null;
   leaderTranscriptReadyFlowId: string | null;
   leaderTranscriptReadyAgentSessionId: string | null;
   decisionCards: DecisionCardData[];
   specCards: Record<string, SpecCardState>;
   artifacts: ArtifactData[];
   specRevisions: SpecRevisionData[];
-  userTurns: UserTurnData[];
+  workRuns: WorkRunData[];
   recentEvents: EventLogData[];
   experts: AgentSession[];
   orchestrationPlans: OrchestrationPlanView[];
@@ -125,16 +128,16 @@ function mergeById<T extends { id: string }>(existing: T[], incoming: T[]) {
   return [...byId.values()];
 }
 
-function normalizeUserTurn(value: unknown): UserTurnData | null {
+function normalizeWorkRun(value: unknown): WorkRunData | null {
   if (!value || typeof value !== "object") return null;
   const turn = value as Record<string, unknown>;
-  const id = typeof turn.user_turn_id === "string" ? turn.user_turn_id : typeof turn.id === "string" ? turn.id : "";
+  const id = typeof turn.work_run_id === "string" ? turn.work_run_id : typeof turn.id === "string" ? turn.id : "";
   const triggerMessageId = typeof turn.trigger_message_id === "string" ? turn.trigger_message_id : "";
   if (!id || !triggerMessageId) return null;
   return {
     id,
     triggerMessageId,
-    status: typeof turn.status === "string" ? turn.status : "active",
+    status: typeof turn.status === "string" ? turn.status : "ready",
     startedAt: typeof turn.started_at === "string" ? turn.started_at : null,
     activeStartedAt: typeof turn.active_started_at === "string" ? turn.active_started_at : null,
     activeDurationMs: typeof turn.active_duration_ms === "number" ? turn.active_duration_ms : 0,
@@ -145,17 +148,19 @@ function normalizeUserTurn(value: unknown): UserTurnData | null {
     workRootPath: typeof turn.work_root_path === "string" && turn.work_root_path.trim().length > 0
       ? turn.work_root_path
       : null,
+    revision: typeof turn.revision === "number" ? turn.revision : 1,
+    executionStartedAt: typeof turn.execution_started_at === "string" ? turn.execution_started_at : null,
   };
 }
 
 function normalizeTask(value: Record<string, unknown>): TaskData | null {
   const id = typeof value.task_id === "string" ? value.task_id : typeof value.id === "string" ? value.id : "";
-  const userTurnId = typeof value.user_turn_id === "string" ? value.user_turn_id : "";
-  if (!id || !userTurnId) return null;
+  const workRunId = typeof value.work_run_id === "string" ? value.work_run_id : "";
+  if (!id || !workRunId) return null;
   return {
     id,
     flow_id: typeof value.flow_id === "string" ? value.flow_id : undefined,
-    user_turn_id: userTurnId,
+    work_run_id: workRunId,
     title: typeof value.title === "string" ? value.title : typeof value.subject === "string" ? value.subject : id,
     description: typeof value.description === "string" ? value.description : "",
     expert_id: typeof value.expert_id === "string" ? value.expert_id : null,
@@ -171,19 +176,20 @@ function normalizeTask(value: Record<string, unknown>): TaskData | null {
 
 export function useDashboardData(flowId: string | null): DashboardData {
   const [tasks, setTasks] = useState<TaskData[]>([]);
-  const [activeUserTurnId, setActiveUserTurnId] = useState<string | null>(null);
+  const [activeWorkRunId, setActiveWorkRunId] = useState<string | null>(null);
   const [flowStatus, setFlowStatus] = useState("");
   const [isFlowStateLoaded, setIsFlowStateLoaded] = useState(false);
   const [flowStateLoadedFlowId, setFlowStateLoadedFlowId] = useState<string | null>(null);
   const [leaderSessionId, setLeaderSessionId] = useState<string | null>(null);
   const [leaderSessionFlowId, setLeaderSessionFlowId] = useState<string | null>(null);
   const [leaderAgentSessionId, setLeaderAgentSessionId] = useState<string | null>(null);
+  const [activeLeaderAgentSessionId, setActiveLeaderAgentSessionId] = useState<string | null>(null);
   const [leaderTranscriptReadyFlowId, setLeaderTranscriptReadyFlowId] = useState<string | null>(null);
   const [leaderTranscriptReadyAgentSessionId, setLeaderTranscriptReadyAgentSessionId] = useState<string | null>(null);
   const [decisionCards, setDecisionCards] = useState<DecisionCardData[]>([]);
   const [artifacts, setArtifacts] = useState<ArtifactData[]>([]);
   const [specRevisions, setSpecRevisions] = useState<SpecRevisionData[]>([]);
-  const [userTurns, setUserTurns] = useState<UserTurnData[]>([]);
+  const [workRuns, setWorkRuns] = useState<WorkRunData[]>([]);
   const [recentEvents, setRecentEvents] = useState<EventLogData[]>([]);
   const [experts, setExperts] = useState<AgentSession[]>([]);
   const [riskMode, setRiskMode] = useState<"auto_edit" | "full_access">("auto_edit");
@@ -194,10 +200,10 @@ export function useDashboardData(flowId: string | null): DashboardData {
 
   useEffect(() => {
     const reset = () => {
-      setTasks([]); setActiveUserTurnId(null); setFlowStatus(""); setIsFlowStateLoaded(false); setFlowStateLoadedFlowId(null);
-      setLeaderSessionId(null); setLeaderSessionFlowId(null); setLeaderAgentSessionId(null);
+      setTasks([]); setActiveWorkRunId(null); setFlowStatus(""); setIsFlowStateLoaded(false); setFlowStateLoadedFlowId(null);
+      setLeaderSessionId(null); setLeaderSessionFlowId(null); setLeaderAgentSessionId(null); setActiveLeaderAgentSessionId(null);
       setLeaderTranscriptReadyFlowId(null); setLeaderTranscriptReadyAgentSessionId(null);
-      setDecisionCards([]); setArtifacts([]); setSpecRevisions([]); setUserTurns([]); setRecentEvents([]); setExperts([]);
+      setDecisionCards([]); setArtifacts([]); setSpecRevisions([]); setWorkRuns([]); setRecentEvents([]); setExperts([]);
       setRiskMode("auto_edit"); setPlanApproval("on"); setLegacySpecFlow(false); setSpecCards({}); setOrchestrationPlans([]);
     };
     reset();
@@ -208,15 +214,16 @@ export function useDashboardData(flowId: string | null): DashboardData {
         if (stale || msg.flow_id !== flowId) return;
         const data = msg.data || {};
         setTasks((data.tasks || []).map((task: Record<string, unknown>) => normalizeTask(task)).filter((task: TaskData | null): task is TaskData => task !== null));
-        setActiveUserTurnId(data.active_user_turn_id || null);
+        setActiveWorkRunId(data.current_work_run_id || null);
         setFlowStatus(data.status || ""); setIsFlowStateLoaded(true); setFlowStateLoadedFlowId(msg.flow_id);
         setRiskMode(data.risk_mode === "full_access" ? "full_access" : "auto_edit");
         setPlanApproval(data.plan_approval === "off" ? "off" : "on");
         setLegacySpecFlow(Boolean(data.legacy_spec_flow));
         setLeaderSessionId(data.leader_session_id || null); setLeaderSessionFlowId(data.leader_session_id ? msg.flow_id : null);
-        setLeaderAgentSessionId(data.leader_agent_session_id || null);
+        setLeaderAgentSessionId(data.latest_leader_agent_session_id || null);
+        setActiveLeaderAgentSessionId(data.active_leader_agent_session_id || null);
         setDecisionCards(data.decision_cards || []); setArtifacts(data.artifacts || []); setSpecRevisions(data.spec_revisions || []);
-        setUserTurns((data.user_turns || []).map(normalizeUserTurn).filter((turn: UserTurnData | null): turn is UserTurnData => turn !== null));
+        setWorkRuns((data.work_runs || []).map(normalizeWorkRun).filter((turn: WorkRunData | null): turn is WorkRunData => turn !== null));
         setRecentEvents(data.recent_events || []); setExperts(data.agent_sessions || []);
         setOrchestrationPlans(Array.isArray(data.orchestration_plan_history) ? data.orchestration_plan_history : data.current_orchestration_plan ? [data.current_orchestration_plan] : []);
         if (data.pending_spec_approval) setSpecCards((current) => ({ ...current, [data.pending_spec_approval.spec_approval_id]: data.pending_spec_approval }));
@@ -224,9 +231,11 @@ export function useDashboardData(flowId: string | null): DashboardData {
       wsClient.onEvent("flow:status", (msg) => {
         if (msg.flow_id !== flowId) return;
         setFlowStatus(msg.data?.status || "");
-        if ("active_user_turn_id" in (msg.data || {})) setActiveUserTurnId(msg.data.active_user_turn_id || null);
+        if ("current_work_run_id" in (msg.data || {})) setActiveWorkRunId(msg.data.current_work_run_id || null);
         if (msg.data?.leader_session_id) { setLeaderSessionId(msg.data.leader_session_id); setLeaderSessionFlowId(msg.flow_id); }
-        if (msg.data?.leader_agent_session_id) setLeaderAgentSessionId(msg.data.leader_agent_session_id);
+        if ("active_leader_agent_session_id" in (msg.data || {})) {
+          setActiveLeaderAgentSessionId(msg.data.active_leader_agent_session_id || null);
+        }
       }),
       wsClient.onEvent("task:event", (msg) => {
         if (msg.flow_id !== flowId) return;
@@ -251,16 +260,24 @@ export function useDashboardData(flowId: string | null): DashboardData {
           }),
         })));
       }),
-      wsClient.onEvent("user_turn:event", (msg) => {
+      wsClient.onEvent("work_run:event", (msg) => {
         if (msg.flow_id !== flowId) return;
-        const turn = normalizeUserTurn(msg.data);
+        const turn = normalizeWorkRun(msg.data);
         if (!turn) return;
-        setUserTurns((prev) => mergeById(prev, [turn]));
-        if (["completed", "failed", "cancelled"].includes(turn.status)) { setActiveUserTurnId((current) => current === turn.id ? null : current); setFlowStatus("idle"); }
+        setWorkRuns((prev) => mergeById(prev, [turn]));
+        if (["completed", "failed", "cancelled"].includes(turn.status)) { setActiveWorkRunId((current) => current === turn.id ? null : current); setFlowStatus("idle"); }
       }),
       wsClient.onEvent("session:event", (msg) => {
         if (msg.flow_id !== flowId || !msg.data?.agent_session_id) return;
         setExperts((prev) => prev.map((session) => session.id === msg.data.agent_session_id ? { ...session, status: msg.data.status || session.status } : session));
+        if (msg.data.expert_id === "exp-leader") {
+          setLeaderAgentSessionId(msg.data.agent_session_id);
+          setActiveLeaderAgentSessionId(
+            msg.data.status === "queued" || msg.data.status === "streaming"
+              ? msg.data.agent_session_id
+              : null,
+          );
+        }
       }),
       wsClient.onEvent("flow:decision_card", (msg) => { if (msg.flow_id === flowId) setDecisionCards((prev) => mergeById(prev.map((card) => ({ ...card, id: card.card_id })), [{ ...msg.data, id: msg.data.card_id }]).map(({ id: _id, ...card }) => card)); }),
       wsClient.onEvent("flow:decision_card_resolved", (msg) => { if (msg.flow_id === flowId) setDecisionCards((prev) => prev.map((card) => card.card_id === msg.data.card_id ? { ...card, status: msg.data.status, answers: msg.data.answers } : card)); }),
@@ -294,7 +311,7 @@ export function useDashboardData(flowId: string | null): DashboardData {
   return {
     isFlowStateLoaded,
     flowStateLoadedFlowId: isCurrentFlowState ? flowStateLoadedFlowId : null,
-    activeUserTurnId,
+    activeWorkRunId,
     tasks,
     flowStatus,
     riskMode: isCurrentFlowState ? riskMode : "auto_edit",
@@ -303,13 +320,14 @@ export function useDashboardData(flowId: string | null): DashboardData {
     leaderSessionId: isCurrentFlowState ? leaderSessionId : null,
     leaderSessionFlowId: isCurrentFlowState ? leaderSessionFlowId : null,
     leaderAgentSessionId: isCurrentFlowState ? leaderAgentSessionId : null,
+    activeLeaderAgentSessionId: isCurrentFlowState ? activeLeaderAgentSessionId : null,
     leaderTranscriptReadyFlowId: isCurrentFlowState ? leaderTranscriptReadyFlowId : null,
     leaderTranscriptReadyAgentSessionId: isCurrentFlowState ? leaderTranscriptReadyAgentSessionId : null,
     decisionCards,
     specCards,
     artifacts,
     specRevisions,
-    userTurns,
+    workRuns,
     recentEvents,
     experts,
     orchestrationPlans,

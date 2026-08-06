@@ -4,12 +4,14 @@ export const FlowStatusSchema = z.enum(["ready", "active", "idle"]);
 export const TaskStatusSchema = z.enum(["pending", "in_progress", "blocked", "completed", "failed", "cancelled"]);
 export const WorkSourceSchema = z.enum(["spec", "direct_message"]);
 
-export const UserTurnSchema = z.object({
+export const WorkRunSchema = z.object({
   id: z.string(),
   flow_id: z.string(),
   trigger_message_id: z.string(),
-  status: z.enum(["active", "waiting_user", "completed", "failed", "cancelled"]),
+  status: z.enum(["ready", "executing", "waiting_user", "interrupted", "completed", "failed", "cancelled"]),
+  revision: z.number().int().positive(),
   started_at: z.string(),
+  execution_started_at: z.string().nullable(),
   active_started_at: z.string().nullable(),
   active_duration_ms: z.number(),
   waiting_started_at: z.string().nullable(),
@@ -39,7 +41,7 @@ export const FlowSchema = z.object({
 export const TaskSchema = z.object({
   id: z.string(),
   flow_id: z.string(),
-  user_turn_id: z.string(),
+  work_run_id: z.string(),
   title: z.string(),
   description: z.string(),
   expert_id: z.string().nullable(),
@@ -70,6 +72,6 @@ export const TaskItemSchema = z.object({
 });
 
 export type Flow = z.infer<typeof FlowSchema>;
-export type UserTurn = z.infer<typeof UserTurnSchema>;
+export type WorkRun = z.infer<typeof WorkRunSchema>;
 export type Task = z.infer<typeof TaskSchema>;
 export type TaskItem = z.infer<typeof TaskItemSchema>;

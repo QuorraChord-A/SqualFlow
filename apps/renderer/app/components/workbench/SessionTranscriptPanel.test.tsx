@@ -3,12 +3,16 @@ import userEvent from "@testing-library/user-event";
 import type { UIMessage } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { WsInMessage } from "../../lib/ws";
-import SessionTranscriptPanel, { ensureDurablePlanCard, formatMessageTimestamp, interleaveStatusDivider, reconcileDurablePlanCard, shouldBatchTranscriptEvent, type UserTurnDisplay } from "./SessionTranscriptPanel";
+import SessionTranscriptPanel, { formatMessageTimestamp, interleaveStatusDivider, reconcileDurablePlanCard, shouldBatchTranscriptEvent, type WorkRunDisplay } from "./SessionTranscriptPanel";
 import { orchestrationPlanFixture } from "../orchestration/orchestrationTestFixture";
 import { resetCollapseStoreForTests } from "./transcript/useCollapse";
 
 const wsHandlers = new Set<(message: any) => void>();
 const clipboardWriteText = vi.fn().mockResolvedValue(undefined);
+const stickToBottomMock = vi.hoisted(() => ({
+  isAtBottom: true,
+  scrollToBottom: vi.fn(),
+}));
 let transcriptCursor = 0;
 let hasTranscriptSnapshot = false;
 let activeMessageId = "";
@@ -49,13 +53,9 @@ it("batches every tool state update with text and reasoning deltas", () => {
   expect(shouldBatchTranscriptEvent({ type: "turn-finished", messageId: "msg-1", durationMs: 10, finishedAt: "2026-07-10T00:00:00.000Z" })).toBe(false);
 });
 
-it("restores a durable plan card when the SDK history no longer contains its tool result", () => {
-  const restored = ensureDurablePlanCard([{ id: "text-1", type: "text", text: "计划已提交", streaming: false }], orchestrationPlanFixture);
-  expect(restored).toContainEqual(expect.objectContaining({
-    type: "plan-card",
-    planRevisionId: orchestrationPlanFixture.revision.plan_revision_id,
-  }));
-  expect(ensureDurablePlanCard(restored, orchestrationPlanFixture)).toHaveLength(restored.length);
+it("does not synthesize a plan card without its transcript tool anchor", () => {
+  const blocks = [{ id: "text-1", type: "text" as const, text: "计划已提交", streaming: false }];
+  expect(reconcileDurablePlanCard(blocks, [orchestrationPlanFixture], orchestrationPlanFixture)).toEqual(blocks);
 });
 
 it("reconciles a persisted plan with a stale submit-plan tool state", () => {
@@ -73,7 +73,14 @@ it("reconciles a persisted plan with a stale submit-plan tool state", () => {
     defaultCollapsed: true,
     activeState: "running",
     currentToolCallId: "submit-plan-1",
+  }, {
+    id: "final-text",
+    type: "text",
+    text: "后续执行结果",
+    streaming: false,
   }], [orchestrationPlanFixture]);
+
+  expect(reconciled.map((block) => block.type)).toEqual(["tool-group", "plan-card", "text"]);
 
   expect(reconciled).toContainEqual(expect.objectContaining({
     type: "tool-group",
@@ -84,6 +91,7 @@ it("reconciles a persisted plan with a stale submit-plan tool state", () => {
   }));
   expect(reconciled).toContainEqual(expect.objectContaining({
     type: "plan-card",
+    id: "tool-card:submit-plan-1:orchestration-plan",
     planRevisionId: orchestrationPlanFixture.revision.plan_revision_id,
   }));
 });
@@ -122,6 +130,90 @@ it("shows a persisted pending plan when the reloaded SDK transcript keeps a stal
   expect(screen.queryByText("正在生成编排计划…")).not.toBeInTheDocument();
 });
 
+it("reloads the canonical transcript when a completed Leader turn is missing its pending plan anchor", async () => {
+  const { wsClient } = await import("../../lib/ws");
+  const { rerender } = render(
+    <SessionTranscriptPanel
+      flowId="flow-1"
+      agentSessionId="leader-1"
+      readonly
+      isAwaitingResponse
+      orchestrationPlans={[orchestrationPlanFixture]}
+    />,
+  );
+
+  emit({
+    type: "session:transcript_snapshot",
+    flow_id: "flow-1",
+    agent_session_id: "leader-1",
+    data: {
+      stream_epoch: "epoch-plan-recovery",
+      cursor: 12,
+      messages: [
+        { id: "msg-user-plan", role: "user", parts: [{ type: "text", text: "请提交计划" }] },
+        { id: "msg-assistant-plan", role: "assistant", parts: [{ type: "text", text: "正在提交计划" }] },
+      ],
+      active_turn: {
+        message_id: "msg-assistant-plan",
+        started_at: "2026-08-05T00:00:00.000Z",
+      },
+    },
+  });
+
+  expect(await screen.findByText("正在提交计划")).toBeVisible();
+  expect(screen.queryByTestId(`orchestration-plan-card-${orchestrationPlanFixture.revision.plan_revision_id}`)).not.toBeInTheDocument();
+  vi.mocked(wsClient.sendSessionGet).mockClear();
+
+  rerender(
+    <SessionTranscriptPanel
+      flowId="flow-1"
+      agentSessionId="leader-1"
+      readonly
+      isAwaitingResponse={false}
+      orchestrationPlans={[orchestrationPlanFixture]}
+    />,
+  );
+
+  await waitFor(() => {
+    expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(1);
+    expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", "leader-1", undefined);
+  });
+
+  stickToBottomMock.scrollToBottom.mockClear();
+  emit({
+    type: "session:transcript_snapshot",
+    flow_id: "flow-1",
+    agent_session_id: "leader-1",
+    data: {
+      stream_epoch: "epoch-plan-recovery",
+      cursor: 16,
+      messages: [
+        { id: "msg-user-plan", role: "user", parts: [{ type: "text", text: "请提交计划" }] },
+        {
+          id: "msg-assistant-plan",
+          role: "assistant",
+          parts: [{
+            type: "tool-mcp__squadflow-leader__submit_orchestration_plan",
+            toolCallId: "submit-plan-recovered",
+            toolName: "mcp__squadflow-leader__submit_orchestration_plan",
+            mcp: { server: "squadflow-leader", tool: "submit_orchestration_plan" },
+            state: "output-available",
+            input: { flow_id: "flow-1", title: orchestrationPlanFixture.revision.title },
+            output: {
+              content: JSON.stringify({
+                revision: { id: orchestrationPlanFixture.revision.plan_revision_id },
+              }),
+            },
+          }],
+        },
+      ],
+    },
+  });
+
+  expect(await screen.findByTestId(`orchestration-plan-card-${orchestrationPlanFixture.revision.plan_revision_id}`)).toBeVisible();
+  await waitFor(() => expect(stickToBottomMock.scrollToBottom).toHaveBeenCalledWith({ animation: "instant" }));
+});
+
 it("shows the durable plan instead of thinking when persisted session history is empty", async () => {
   render(
     <SessionTranscriptPanel
@@ -130,7 +222,7 @@ it("shows the durable plan instead of thinking when persisted session history is
       readonly
       isAwaitingResponse
       orchestrationPlans={[orchestrationPlanFixture]}
-      userTurns={[{
+      workRuns={[{
         id: "turn-1",
         triggerMessageId: "msg-user-plan",
         status: "waiting_user",
@@ -166,8 +258,8 @@ vi.mock("use-stick-to-bottom", () => ({
     },
   ),
   useStickToBottomContext: () => ({
-    isAtBottom: true,
-    scrollToBottom: vi.fn(),
+    isAtBottom: stickToBottomMock.isAtBottom,
+    scrollToBottom: stickToBottomMock.scrollToBottom,
   }),
 }));
 
@@ -323,6 +415,8 @@ describe("SessionTranscriptPanel", () => {
     reasoningBlockSequence = 0;
     cursorsByLegacySequence.clear();
     resetCollapseStoreForTests();
+    stickToBottomMock.isAtBottom = true;
+    stickToBottomMock.scrollToBottom.mockClear();
     clipboardWriteText.mockClear();
     Object.defineProperty(globalThis.navigator, "clipboard", {
       configurable: true,
@@ -339,6 +433,103 @@ describe("SessionTranscriptPanel", () => {
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
     expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", "leader-1");
+  });
+
+  it("requests one canonical snapshot when live transcript cursors have a gap", async () => {
+    const { wsClient } = await import("../../lib/ws");
+    render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
+
+    emit({
+      type: "session:transcript_snapshot",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: { stream_epoch: "epoch-gap", cursor: 1, messages: [] },
+    });
+    vi.mocked(wsClient.sendSessionGet).mockClear();
+
+    emit({
+      type: "session:transcript_event",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: {
+        stream_epoch: "epoch-gap",
+        cursor: 3,
+        event: { type: "message-added", message: userMessage("msg-after-gap", "断档后") },
+      },
+    });
+
+    await waitFor(() => {
+      expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(1);
+      expect(wsClient.sendSessionGet).toHaveBeenCalledWith("flow-1", "", "leader-1", undefined);
+    });
+
+    emit({
+      type: "session:transcript_event",
+      flow_id: "flow-1",
+      agent_session_id: "leader-1",
+      data: {
+        stream_epoch: "epoch-gap",
+        cursor: 4,
+        event: { type: "message-added", message: userMessage("msg-still-after-gap", "仍在断档后") },
+      },
+    });
+
+    await waitFor(() => expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText("断档后")).not.toBeInTheDocument();
+    expect(screen.queryByText("仍在断档后")).not.toBeInTheDocument();
+  });
+
+  it("keeps one stable Leader transcript when the current AgentSession changes", async () => {
+    const { wsClient } = await import("../../lib/ws");
+    const { rerender } = render(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-run-1"
+        stableTranscriptChannel
+        readonly
+      />,
+    );
+
+    emit({
+      type: "session:transcript_snapshot",
+      flow_id: "flow-1",
+      session_id: "leader:flow-1",
+      agent_session_id: "leader-run-1",
+      data: {
+        cursor: 1,
+        messages: [message("leader-first", "第一轮 Leader 回复")],
+      },
+    });
+    expect(await screen.findByText("第一轮 Leader 回复")).toBeInTheDocument();
+
+    rerender(
+      <SessionTranscriptPanel
+        flowId="flow-1"
+        agentSessionId="leader-run-2"
+        stableTranscriptChannel
+        readonly
+      />,
+    );
+
+    expect(wsClient.sendSessionGet).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("第一轮 Leader 回复")).toBeInTheDocument();
+
+    emit({
+      type: "session:transcript_event",
+      flow_id: "flow-1",
+      session_id: "leader:flow-1",
+      agent_session_id: "leader-run-2",
+      data: {
+        cursor: 2,
+        event: {
+          type: "message-added",
+          message: message("leader-second", "第二轮 Leader 回复"),
+        },
+      },
+    });
+
+    expect(await screen.findByText("第二轮 Leader 回复")).toBeInTheDocument();
+    expect(screen.getByText("第一轮 Leader 回复")).toBeInTheDocument();
   });
 
   it("shows live Codex reconnect status in place of the thinking label and clears it after recovery", () => {
@@ -447,13 +638,13 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.queryByText("历史运行记录：Frontend 5924")).not.toBeInTheDocument();
   });
 
-  it("renders consecutive completed user turns as separate assistant replies", () => {
+  it("renders consecutive completed Leader replies as separate assistant messages", () => {
     render(
       <SessionTranscriptPanel
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        userTurns={[
+        workRuns={[
           {
             id: "turn-hello",
             triggerMessageId: "msg-user-hello",
@@ -504,7 +695,7 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        userTurns={[{
+        workRuns={[{
           id: "turn-1",
           triggerMessageId: "msg-user-1",
           status: "completed",
@@ -591,7 +782,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getAllByText("已引导对话")).toHaveLength(1);
   });
 
-  it("renders the matching completed user-turn review summary and opens review", () => {
+  it("renders the matching completed WorkRun review summary and opens review", () => {
     vi.useFakeTimers();
     const onOpenReview = vi.fn();
     try {
@@ -600,7 +791,7 @@ describe("SessionTranscriptPanel", () => {
           flowId="flow-1"
           agentSessionId="leader-1"
           readonly
-          userTurns={[{
+          workRuns={[{
             id: "turn-review",
             triggerMessageId: "msg-user-review",
             status: "completed",
@@ -611,7 +802,7 @@ describe("SessionTranscriptPanel", () => {
           }]}
           review={{
             flow_id: "flow-1",
-            user_turn_id: "turn-review",
+            work_run_id: "turn-review",
             completed_at: "2026-06-29T06:00:03.000Z",
             totals: { files: 2, additions: 3, deletions: 1, modified: 2, added: 0, deleted: 0 },
             files: [
@@ -655,7 +846,7 @@ describe("SessionTranscriptPanel", () => {
       });
 
       const assistantMessage = screen.getByTestId("chat-message-assistant");
-      const reviewSummary = within(assistantMessage).getByTestId("user-turn-review-summary");
+      const reviewSummary = within(assistantMessage).getByTestId("work-run-review-summary");
       expect(reviewSummary).toHaveClass("w-full");
       expect(reviewSummary).toHaveClass("max-w-[820px]");
       expect(reviewSummary).toHaveTextContent("已编辑 2 个文件");
@@ -717,7 +908,7 @@ describe("SessionTranscriptPanel", () => {
     }
   });
 
-  it("keeps a running guided turn grouped when active snapshot arrives before user turn state", () => {
+  it("keeps a running guided reply grouped when its active snapshot arrives first", () => {
     render(<SessionTranscriptPanel flowId="flow-1" agentSessionId="leader-1" readonly />);
 
     emit({
@@ -756,7 +947,7 @@ describe("SessionTranscriptPanel", () => {
     const activeTurn = {
       id: "turn-live-guided",
       triggerMessageId: "msg-user-live",
-      status: "active",
+      status: "executing",
       startedAt: "2026-06-29T08:58:56.000Z",
       activeStartedAt: "2026-06-29T08:58:56.000Z",
       activeDurationMs: 0,
@@ -767,7 +958,7 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        userTurns={[activeTurn]}
+        workRuns={[activeTurn]}
       />,
     );
 
@@ -878,7 +1069,7 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        userTurns={[{
+        workRuns={[{
           ...activeTurn,
           status: "completed",
           activeStartedAt: null,
@@ -895,7 +1086,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByText("过程 A")).toBeInTheDocument();
   });
 
-  it("keeps the final canonical guide segment when live user turn state is not available", () => {
+  it("keeps the final canonical guide segment when live execution state is unavailable", () => {
     render(
       <SessionTranscriptPanel
         flowId="flow-1"
@@ -1256,7 +1447,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getByTestId("decision-card-result-summary")).toHaveTextContent("重新优化 Hello World");
   });
 
-  it("keeps cancelled card results as decision cards inside grouped user turns", async () => {
+  it("keeps cancelled card results as decision cards inside grouped Leader replies", async () => {
     render(
       <SessionTranscriptPanel
         flowId="flow-1"
@@ -1269,7 +1460,7 @@ describe("SessionTranscriptPanel", () => {
           questions: [{ header: "类型", question: "选择任务类型", multiSelect: false, options: [] }],
           answers: {},
         }]}
-        userTurns={[{
+        workRuns={[{
           id: "turn-1",
           triggerMessageId: "msg-user-1",
           status: "completed",
@@ -2211,7 +2402,7 @@ describe("SessionTranscriptPanel", () => {
         },
       },
     } as UIMessage;
-    const previousTurn: UserTurnDisplay = {
+    const previousTurn: WorkRunDisplay = {
       id: "turn-previous",
       triggerMessageId: previousUser.id,
       status: "completed",
@@ -2224,10 +2415,10 @@ describe("SessionTranscriptPanel", () => {
       ...userMessage("msg-user-next", "下一轮立即发送"),
       createdAt: "2026-07-18T06:10:50.314Z",
     } as UIMessage;
-    const nextTurn: UserTurnDisplay = {
+    const nextTurn: WorkRunDisplay = {
       id: "turn-next",
       triggerMessageId: nextUser.id,
-      status: "active",
+      status: "executing",
       startedAt: "2026-07-18T06:10:50.314Z",
       activeStartedAt: "2026-07-18T06:10:50.314Z",
       activeDurationMs: 0,
@@ -2239,7 +2430,7 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        userTurns={[previousTurn]}
+        workRuns={[previousTurn]}
       />,
     );
 
@@ -2257,7 +2448,7 @@ describe("SessionTranscriptPanel", () => {
         agentSessionId="leader-1"
         readonly
         optimisticMessages={[nextUser]}
-        userTurns={[previousTurn, nextTurn]}
+        workRuns={[previousTurn, nextTurn]}
         isAwaitingResponse
       />,
     );

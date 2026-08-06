@@ -38,12 +38,14 @@ export const flowReadStates = sqliteTable("flow_read_states", {
   updatedAt: text("updated_at").notNull(),
 });
 
-export const userTurns = sqliteTable("user_turns", {
+export const workRuns = sqliteTable("work_runs", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
   triggerMessageId: text("trigger_message_id").notNull(),
-  status: text("status").notNull().default("active"),
+  status: text("status").notNull().default("ready"),
+  revision: integer("revision").notNull().default(1),
   startedAt: text("started_at").notNull(),
+  executionStartedAt: text("execution_started_at"),
   activeStartedAt: text("active_started_at"),
   activeDurationMs: integer("active_duration_ms").notNull().default(0),
   waitingStartedAt: text("waiting_started_at"),
@@ -56,15 +58,15 @@ export const userTurns = sqliteTable("user_turns", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
-  uniqueIndex("user_turns_one_open_per_flow")
+  uniqueIndex("work_runs_one_open_per_flow")
     .on(table.flowId)
-    .where(sql`${table.status} IN ('active', 'waiting_user')`),
+    .where(sql`${table.status} IN ('ready', 'executing', 'waiting_user', 'interrupted')`),
 ]);
 
 export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id").notNull(),
+  workRunId: text("work_run_id").notNull(),
   title: text("title").notNull(),
   description: text("description").notNull(),
   expertId: text("expert_id"),
@@ -106,7 +108,7 @@ export const specApprovals = sqliteTable("spec_approvals", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
   specRevisionId: text("spec_revision_id").notNull(),
-  userTurnId: text("user_turn_id"),
+  workRunId: text("work_run_id"),
   status: text("status").notNull().default("pending"),
   fileName: text("file_name").notNull(),
   overview: text("overview").notNull().default(""),
@@ -125,12 +127,12 @@ export const taskDependencies = sqliteTable("task_dependencies", {
 export const orchestrationPlans = sqliteTable("orchestration_plans", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id").notNull(),
+  workRunId: text("work_run_id").notNull(),
   specRevisionId: text("spec_revision_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
-  uniqueIndex("orchestration_plans_user_turn_unique").on(table.userTurnId),
+  uniqueIndex("orchestration_plans_work_run_unique").on(table.workRunId),
 ]);
 
 export const planRevisions = sqliteTable("plan_revisions", {
@@ -182,7 +184,7 @@ export const planDependencies = sqliteTable("plan_dependencies", {
 export const planApprovals = sqliteTable("plan_approvals", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id").notNull(),
+  workRunId: text("work_run_id").notNull(),
   planRevisionId: text("plan_revision_id").notNull(),
   status: text("status").notNull().default("pending"),
   resolutionActionId: text("resolution_action_id"),
@@ -195,7 +197,7 @@ export const planApprovals = sqliteTable("plan_approvals", {
 export const planFeedback = sqliteTable("plan_feedback", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id").notNull(),
+  workRunId: text("work_run_id").notNull(),
   planRevisionId: text("plan_revision_id").notNull(),
   planNodeId: text("plan_node_id"),
   sourceMessageId: text("source_message_id").notNull(),
@@ -210,7 +212,7 @@ export const planFeedback = sqliteTable("plan_feedback", {
 export const planRuns = sqliteTable("plan_runs", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id").notNull(),
+  workRunId: text("work_run_id").notNull(),
   planRevisionId: text("plan_revision_id").notNull(),
   status: text("status").notNull().default("pending"),
   createdAt: text("created_at").notNull(),
@@ -246,7 +248,7 @@ export const orchestrationRules = sqliteTable("orchestration_rules", {
 export const eventLog = sqliteTable("event_log", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id"),
+  workRunId: text("work_run_id"),
   taskId: text("task_id"),
   agentSessionId: text("agent_session_id"),
   eventType: text("event_type").notNull(),
@@ -281,6 +283,7 @@ export const flowExperts = sqliteTable(
     runtimeSdk: text("runtime_sdk"),
     runtimeConfigId: text("runtime_config_id"),
     runtimeModelId: text("runtime_model_id"),
+    runtimeReasoningEffort: text("runtime_reasoning_effort"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },
@@ -292,7 +295,7 @@ export const flowExperts = sqliteTable(
 export const agentSessions = sqliteTable("agent_sessions", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id"),
+  workRunId: text("work_run_id"),
   taskId: text("task_id"),
   expertId: text("expert_id").notNull(),
   flowExpertId: text("flow_expert_id"),
@@ -300,9 +303,10 @@ export const agentSessions = sqliteTable("agent_sessions", {
   runtimeSdk: text("runtime_sdk"),
   runtimeConfigId: text("runtime_config_id"),
   runtimeModelId: text("runtime_model_id"),
+  runtimeReasoningEffort: text("runtime_reasoning_effort"),
   displayName: text("display_name").notNull().default(""),
   resumeFromAgentSessionId: text("resume_from_agent_session_id").notNull().default(""),
-  status: text("status").notNull().default("idle"),
+  status: text("status").notNull().default("queued"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -340,7 +344,7 @@ export const agentContextUsageSnapshots = sqliteTable(
 export const decisionCards = sqliteTable("decision_cards", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id"),
+  workRunId: text("work_run_id"),
   sessionId: text("session_id").notNull().default(""),
   cardType: text("card_type").notNull().default("generic"),
   questions: text("questions").notNull(),
@@ -379,7 +383,7 @@ export const decisionCardLeaderInputs = sqliteTable(
 export const artifacts = sqliteTable("artifacts", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  userTurnId: text("user_turn_id"),
+  workRunId: text("work_run_id"),
   taskId: text("task_id"),
   type: text("type").notNull(),
   title: text("title").notNull(),

@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ClaudeQueryLike } from "../src/harness/agentRunner.js";
 import { config } from "../src/config.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn, createWorkingUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun, createWorkingWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createAgentDispatcher } from "../src/runtime/agentDispatcher.js";
 import { createExpertRuntime } from "../src/runtime/expertRuntime.js";
 import { ChatJournal } from "../src/ws/chatJournal.js";
@@ -78,14 +78,14 @@ describe("AgentDispatcher exp-verify runtime failures", () => {
       description: "",
       projectId: project.id,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: "{}",
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Run tests",
       description: "Run npm test",
       expertId: "exp-verify",
@@ -157,14 +157,14 @@ describe("AgentDispatcher exp-verify runtime failures", () => {
         description: "",
         projectId: project.id,
       });
-      const userTurn = beginUserTurn(store, {
+      const workRun = beginWorkRun(store, {
         flowId: flow.id,
         inputSnapshotJson: "{}",
         createdBy: "user",
       })!;
       const task = store.createTask({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         title: "Read-only task",
         description: "Inspect and report",
         expertId,

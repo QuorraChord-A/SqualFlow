@@ -6,12 +6,14 @@ import { useStickToBottomContext } from "use-stick-to-bottom";
 type TranscriptScrollContextValue = {
   toggle: <T extends HTMLElement>(event: React.MouseEvent<T>, change: () => void) => void;
   follow: () => void;
+  followIfAtBottom: () => boolean;
   registerThread: (element: HTMLDivElement | null) => void;
 };
 
 const TranscriptScrollContext = createContext<TranscriptScrollContextValue>({
   toggle: (_event, change) => change(),
   follow: () => {},
+  followIfAtBottom: () => false,
   registerThread: () => {},
 });
 
@@ -73,7 +75,7 @@ export function TranscriptScrollProvider({
   isLoadingHistory?: boolean;
   historyLoadVersion?: number;
 }) {
-  const { scrollRef, scrollToBottom, stopScroll = () => {} } = useStickToBottomContext();
+  const { scrollRef, scrollToBottom, stopScroll = () => {}, isAtBottom = false } = useStickToBottomContext();
   const [thread, setThread] = useState<HTMLDivElement | null>(null);
   const anchorRef = useRef<{ element: HTMLElement; top: number } | null>(null);
   const programmaticScrollTopRef = useRef<number | null>(null);
@@ -197,8 +199,15 @@ export function TranscriptScrollProvider({
     scrollToBottom({ animation: "instant" });
   }, [flowId, scrollRef, scrollToBottom]);
 
+  const followIfAtBottom = useCallback(() => {
+    const remembered = flowId ? flowScrollMemoryRef.current.get(flowId) : undefined;
+    if (!(remembered?.followBottom ?? isAtBottom)) return false;
+    follow();
+    return true;
+  }, [flowId, follow, isAtBottom]);
+
   return (
-    <TranscriptScrollContext.Provider value={{ toggle, follow, registerThread: setThread }}>
+    <TranscriptScrollContext.Provider value={{ toggle, follow, followIfAtBottom, registerThread: setThread }}>
       {children}
     </TranscriptScrollContext.Provider>
   );

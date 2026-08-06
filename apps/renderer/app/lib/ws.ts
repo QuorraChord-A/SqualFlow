@@ -2,8 +2,8 @@
  * SquadFlow WebSocket client — singleton, auto-reconnects.
  *
  * Protocol (namespace:action):
- *   Client → Server: flow, spec, UserTurn, and session commands.
- *   Server → Client: flow, UserTurn, task, session, decision-card, and artifact events.
+ *   Client → Server: flow, spec, WorkRun, and session commands.
+ *   Server → Client: flow, WorkRun, task, session, decision-card, and artifact events.
  */
 
 import { API_BASE } from './api';
@@ -32,7 +32,6 @@ export type TranscriptActiveTurn = {
 };
 
 export type WsInMessage =
-  | { type: "leader:runtime_state"; flow_id: string; log_id?: string; data: { status: "idle" | "starting" | "streaming"; leader_agent_session_id: string | null } }
   | { type: "flow:state"; flow_id: string; data: any }
   | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
   | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
@@ -42,7 +41,7 @@ export type WsInMessage =
   | { type: "flow:status"; flow_id: string; data: any }
   | { type: "flow:name_updated"; flow_id: string; data: { name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }
   | { type: "task:event"; flow_id: string; data: any }
-  | { type: "user_turn:event"; flow_id: string; data: any }
+  | { type: "work_run:event"; flow_id: string; data: any }
   | { type: "session:event"; flow_id: string; data: any }
   | { type: "flow_expert:event"; flow_id: string; data: any }
   | { type: "context_usage:event"; flow_id: string; data: any }
@@ -58,7 +57,7 @@ export type WsInMessage =
         attempt?: number;
         max_attempts?: number;
         runtime_role: "leader" | "expert";
-        user_turn_id?: string;
+        work_run_id?: string;
         task_id?: string;
       };
     }
@@ -451,11 +450,22 @@ export class SquadFlowWs {
     });
   }
 
-  sendUserTurnCancel(flowId: string, userTurnId: string) {
+  sendWorkRunInterrupt(flowId: string, workRunId: string, expectedRevision: number, clientActionId: string) {
     this.send({
-      type: "user_turn:cancel",
+      type: "work_run:interrupt",
       flow_id: flowId,
-      user_turn_id: userTurnId,
+      work_run_id: workRunId,
+      expected_revision: expectedRevision,
+      client_action_id: clientActionId,
+    });
+  }
+
+  sendAgentSessionInterrupt(flowId: string, agentSessionId: string, clientActionId: string) {
+    this.send({
+      type: "agent_session:interrupt",
+      flow_id: flowId,
+      agent_session_id: agentSessionId,
+      client_action_id: clientActionId,
     });
   }
 

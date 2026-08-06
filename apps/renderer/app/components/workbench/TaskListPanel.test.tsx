@@ -6,7 +6,7 @@ import type { TaskData } from "../../hooks/useDashboardData";
 function task(overrides: Partial<TaskData>): TaskData {
   return {
     id: "task-1",
-    user_turn_id: "utn-1",
+    work_run_id: "utn-1",
     title: "Implement form",
     description: "Add the form",
     expert_id: "exp-frontend",

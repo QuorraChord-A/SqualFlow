@@ -23,10 +23,10 @@ function setup() {
   const project = store.createProject({ name: "Project", localPath: fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-expert-task-project-")) });
   dirs.push(project.localPath);
   const flow = store.createFlow({ name: "Flow", description: "", projectId: project.id });
-  const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
-  const userTurn = store.startUserTurnWork({
+  const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+  const workRun = store.startWorkRunWork({
     flowId: flow.id,
-    userTurnId: turn.id,
+    workRunId: turn.id,
     workSource: "direct_message",
     targetProjectId: project.id,
     inputSnapshotJson: "{}",
@@ -35,7 +35,7 @@ function setup() {
   const verifier = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-verify" });
   const mine = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Implement the change",
     description: "Implement and verify the requested change.",
     expertId: "exp-coder",
@@ -44,7 +44,7 @@ function setup() {
   })!;
   const mineSession = store.createAgentSession({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     taskId: mine.id,
     expertId: "exp-coder",
     flowExpertId: coder.id,
@@ -56,7 +56,7 @@ function setup() {
 
   const mineLater = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Follow up",
     description: "Handle the follow-up after the first task.",
     expertId: "exp-coder",
@@ -66,7 +66,7 @@ function setup() {
 
   const peer = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Peer task",
     description: "A verifier-owned task.",
     expertId: "exp-verify",

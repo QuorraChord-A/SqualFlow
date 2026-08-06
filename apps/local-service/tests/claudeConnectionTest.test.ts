@@ -63,8 +63,14 @@ afterEach(() => {
 describe("Claude runtime connection test", () => {
   it("stops after a terminal result instead of waiting for process shutdown", async () => {
     vi.useFakeTimers();
-    claudeQueryMock.query.mockImplementation((request) =>
-      streamThatYieldsThenWaitsForAbort(request.options.abortController.signal, successfulResult));
+    claudeQueryMock.query.mockImplementation((request) => {
+      expect(request.options.env).toEqual(expect.objectContaining({
+        ANTHROPIC_AUTH_TOKEN: "test-key",
+        ANTHROPIC_BASE_URL: "https://agentrouter.org",
+      }));
+      expect(request.options.env.ANTHROPIC_API_KEY).toBeUndefined();
+      return streamThatYieldsThenWaitsForAbort(request.options.abortController.signal, successfulResult);
+    });
 
     const resultPromise = testClaudeRuntimeConnection(runtimeConfig, { model: "claude-opus-5" });
     await vi.advanceTimersByTimeAsync(15_001);

@@ -21,8 +21,8 @@ function setup() {
   store.seedExperts();
   const project = store.createProject({ id: "project-plan", name: "Plan", localPath: dir, description: "" });
   const flow = store.createFlow({ id: "flow-plan", name: "Plan", description: "", projectId: project.id });
-  const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
-  store.startUserTurnWork({ flowId: flow.id, userTurnId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
+  const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+  store.startWorkRunWork({ flowId: flow.id, workRunId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
   return { store, flow, turn };
 }
 
@@ -149,19 +149,19 @@ describe("structured orchestration", () => {
   it("persists approval, feedback, revision history and atomically materializes tasks", () => {
     const { store, flow, turn } = setup();
     const first = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "邀请计划", objective: "完成邀请", workKind: "change", riskLevel: "medium",
+      flowId: flow.id, workRunId: turn.id, title: "邀请计划", objective: "完成邀请", workKind: "change", riskLevel: "medium",
       status: "pending_approval", lint: [], diff: {},
       nodes: [
         { nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现邀请", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] },
         { nodeId: "verify", expertId: "exp-verify", title: "验证", description: "验证邀请", dependsOn: ["code"], acceptanceCriteria: ["通过"], riskTags: [], sideEffects: [], resourceKeys: [] },
       ],
     })!;
-    expect(store.getUserTurn(turn.id)?.status).toBe("waiting_user");
+    expect(store.getWorkRun(turn.id)?.status).toBe("waiting_user");
     const codeNode = store.listPlanNodes(first.revision.id).find((node) => node.stableKey === "code")!;
     expect(store.setPlanApprovalFeedbackPending({ approvalId: first.approval.id, sourceMessageId: "feedback-1", feedback: [{ planNodeId: codeNode.id, markerNumber: 1, comment: "收窄范围" }] })?.status).toBe("feedback_pending");
-    expect(store.getUserTurn(turn.id)?.status).toBe("active");
+    expect(store.getWorkRun(turn.id)?.status).toBe("ready");
     expect(store.restorePlanApprovalAfterFeedback(first.approval.id, "无需修改")?.status).toBe("pending");
-    expect(store.getUserTurn(turn.id)?.status).toBe("waiting_user");
+    expect(store.getWorkRun(turn.id)?.status).toBe("waiting_user");
     const approved = store.resolvePlanApproval({ approvalId: first.approval.id, clientActionId: "approve-1" })!;
     expect(approved.status).toBe("approved");
     const run = store.materializePlanRun(first.revision.id)!;
@@ -178,16 +178,18 @@ describe("structured orchestration", () => {
   it("pauses a running plan for feedback and resumes it through the Leader handler", async () => {
     const { store, flow, turn } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "运行中反馈", objective: "继续执行", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "运行中反馈", objective: "继续执行", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] }],
     })!;
     const run = store.materializePlanRun(created.revision.id)!;
     expect(run.status).toBe("running");
+    const task = store.getTask(store.listPlanNodeTasks(run.id)[0]!.taskId)!;
+    expect(store.startTask(task.id, "ags-feedback-running")).toEqual(expect.objectContaining({ status: "in_progress" }));
 
     store.recordPlanFeedback({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       planRevisionId: created.revision.id,
       sourceMessageId: "feedback-running",
       feedback: [{ markerNumber: 1, comment: "不用修改计划" }],
@@ -198,7 +200,7 @@ describe("structured orchestration", () => {
     const handlers = createLeaderToolHandlers(
       createStorePort(store),
       { onPlanRunChanged: ({ run: changedRun }) => { resumedRun = changedRun; } },
-      { currentTurnInput: { trigger_kind: "user_message", user_turn_id: turn.id, created_at: new Date().toISOString() } },
+      { currentTurnInput: { trigger_kind: "user_message", work_run_id: turn.id, created_at: new Date().toISOString() } },
     );
     const resolution = JSON.parse(await handlers.resolvePlanFeedback({
       flow_id: flow.id,
@@ -217,7 +219,7 @@ describe("structured orchestration", () => {
   it("rejects feedback for a plan run that is no longer active", () => {
     const { store, flow, turn } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "历史计划", objective: "历史计划", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "历史计划", objective: "历史计划", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] }],
     })!;
@@ -226,7 +228,7 @@ describe("structured orchestration", () => {
 
     expect(store.recordPlanFeedback({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       planRevisionId: created.revision.id,
       sourceMessageId: "feedback-history",
       feedback: [{ markerNumber: 1, comment: "不应写入" }],
@@ -237,14 +239,14 @@ describe("structured orchestration", () => {
   it("publishes refreshed current and parent plan views after revision materialization", async () => {
     const { store, flow, turn } = setup();
     const first = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v1", objective: "v1", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v1", objective: "v1", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [{ nodeId: "old", expertId: "exp-coder", title: "旧任务", description: "旧任务", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["old"] }],
     })!;
     const firstRun = store.materializePlanRun(first.revision.id)!;
     const oldTaskId = store.listPlanNodeTasks(firstRun.id)[0]!.taskId;
     const second = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v2", objective: "v2", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v2", objective: "v2", workKind: "change", riskLevel: "low",
       basedOnRevisionId: first.revision.id, status: "approved", lint: [],
       diff: { added: ["new"], removed: ["old"], modified: [] },
       nodes: [{ nodeId: "new", expertId: "exp-coder", title: "新任务", description: "新任务", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["new"] }],
@@ -267,7 +269,7 @@ describe("structured orchestration", () => {
   it("migrates a revised run by reusing completed stable tasks and replacing pending tasks", () => {
     const { store, flow, turn } = setup();
     const first = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v1", objective: "旧计划", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v1", objective: "旧计划", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [
         { nodeId: "done", expertId: "exp-coder", title: "已完成", description: "已完成", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] },
@@ -279,14 +281,14 @@ describe("structured orchestration", () => {
     const firstMappings = store.listPlanNodeTasks(firstRun.id);
     const doneTask = store.getTask(firstMappings.find((mapping) => store.listPlanNodes(first.revision.id).find((node) => node.id === mapping.planNodeId)?.stableKey === "done")!.taskId)!;
     const pendingMapping = firstMappings.find((mapping) => store.listPlanNodes(first.revision.id).find((node) => node.id === mapping.planNodeId)?.stableKey === "pending")!;
-    store.setTaskRuntimeStatus(doneTask.id, "in_progress");
+    store.startTask(doneTask.id, "ags-revision-done");
     store.completeTask(doneTask.id);
     const stableTask = store.getTask(firstMappings.find((mapping) => store.listPlanNodes(first.revision.id).find((node) => node.id === mapping.planNodeId)?.stableKey === "stable")!.taskId)!;
-    store.setTaskRuntimeStatus(stableTask.id, "in_progress");
+    store.startTask(stableTask.id, "ags-revision-stable");
     store.completeTask(stableTask.id);
 
     const second = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v2", objective: "新计划", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v2", objective: "新计划", workKind: "change", riskLevel: "low",
       basedOnRevisionId: first.revision.id, status: "approved", lint: [],
       diff: { added: ["new"], removed: ["pending"], modified: [] },
       nodes: [
@@ -311,19 +313,19 @@ describe("structured orchestration", () => {
   it("keeps superseded running resources mutually exclusive with a revised run", async () => {
     const { store, flow, turn } = setup();
     const first = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v1", objective: "旧计划", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v1", objective: "旧计划", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "旧实现", description: "旧实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] }],
     })!;
     const firstRun = store.materializePlanRun(first.revision.id)!;
     const firstTask = store.getTask(store.listPlanNodeTasks(firstRun.id)[0]!.taskId)!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
-    const session = store.createAgentSession({ flowId: flow.id, userTurnId: turn.id, taskId: firstTask.id, expertId: "exp-coder", flowExpertId: flowExpert.id, status: "streaming" });
+    const session = store.createAgentSession({ flowId: flow.id, workRunId: turn.id, taskId: firstTask.id, expertId: "exp-coder", flowExpertId: flowExpert.id, status: "streaming" });
     store.assignTaskFlowExpert(firstTask.id, flowExpert.id, session.id);
     store.setTaskRuntimeStatus(firstTask.id, "in_progress");
 
     const second = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "v2", objective: "改写计划", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "v2", objective: "改写计划", workKind: "change", riskLevel: "low",
       basedOnRevisionId: first.revision.id, status: "approved", lint: [],
       diff: { added: [], removed: [], modified: [{ node_id: "code", fields: ["description"] }] },
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "新实现", description: "新实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] }],
@@ -347,7 +349,7 @@ describe("structured orchestration", () => {
     store.seedExperts();
     const project = store.createProject({ id: "project-auto", name: "Auto", localPath: dir, description: "" });
     const flow = store.createFlow({ id: "flow-auto", name: "Auto", description: "", projectId: project.id, planApproval: "off" });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
     const scheduler = createOrchestrationScheduler({ store, eventBus: new EventBus() });
     const handlers = createLeaderToolHandlers(
       createStorePort(store),
@@ -359,7 +361,7 @@ describe("structured orchestration", () => {
           }
         },
       },
-      { currentTurnInput: { trigger_kind: "user_message", user_turn_id: turn.id, created_at: new Date().toISOString() } },
+      { currentTurnInput: { trigger_kind: "user_message", work_run_id: turn.id, created_at: new Date().toISOString() } },
     );
 
     const response = JSON.parse(await handlers.submitOrchestrationPlan({
@@ -384,7 +386,7 @@ describe("structured orchestration", () => {
   it("materializes an approved revision without auto-dispatch and reconciles run status from tasks", async () => {
     const { store, flow, turn } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "账本", objective: "账本对账", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "账本", objective: "账本对账", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [
         { nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] },
@@ -395,36 +397,38 @@ describe("structured orchestration", () => {
     const run = (await scheduler.startRevision(created.revision.id))!;
     const mappings = store.listPlanNodeTasks(run.id);
     const tasks = mappings.map((mapping) => store.getTask(mapping.taskId)!);
+    const implementationTask = tasks.find((task) => store.listTaskDependencies(task.id).length === 0)!;
+    const verificationTask = tasks.find((task) => task.id !== implementationTask.id)!;
 
     // 物化后所有任务 pending，无自动派发
     expect(tasks.every((task) => task.status === "pending")).toBe(true);
     expect(run.status).toBe("running");
+    expect(store.startTask(implementationTask.id, "ags-scheduler-code")).toEqual(expect.objectContaining({ status: "in_progress" }));
 
     // The scheduler is a ledger only: an explicit Expert/Leader blocked state
     // is reflected in the Plan Run, and an explicit restart clears it.
-    store.updateTask(tasks[0]!.id, { status: "blocked" });
-    await scheduler.advanceForTask(tasks[0]!.id);
+    store.updateTask(implementationTask.id, { status: "blocked" });
+    await scheduler.advanceForTask(implementationTask.id);
     expect(store.getPlanRun(run.id)?.status).toBe("blocked");
-    store.updateTask(tasks[0]!.id, { status: "in_progress" });
-    await scheduler.advanceForTask(tasks[0]!.id);
+    store.updateTask(implementationTask.id, { status: "in_progress" });
+    await scheduler.advanceForTask(implementationTask.id);
     expect(store.getPlanRun(run.id)?.status).toBe("running");
 
     // 任务失败且无在跑任务 → blocked
-    store.setTaskRuntimeStatus(tasks[0]!.id, "in_progress");
-    store.failTask(tasks[0]!.id, "boom");
-    await scheduler.advanceForTask(tasks[0]!.id);
+    store.failTask(implementationTask.id, "boom");
+    await scheduler.advanceForTask(implementationTask.id);
     expect(store.getPlanRun(run.id)?.status).toBe("blocked");
 
     // 任务重新在跑 → running
-    store.setTaskRuntimeStatus(tasks[0]!.id, "in_progress");
-    await scheduler.advanceForTask(tasks[0]!.id);
+    store.setTaskRuntimeStatus(implementationTask.id, "in_progress");
+    await scheduler.advanceForTask(implementationTask.id);
     expect(store.getPlanRun(run.id)?.status).toBe("running");
 
     // 全部完成 → completed
-    store.completeTask(tasks[0]!.id);
-    store.setTaskRuntimeStatus(tasks[1]!.id, "in_progress");
-    store.completeTask(tasks[1]!.id);
-    await scheduler.advanceForTask(tasks[1]!.id);
+    store.completeTask(implementationTask.id);
+    store.startTask(verificationTask.id, "ags-scheduler-verify");
+    store.completeTask(verificationTask.id);
+    await scheduler.advanceForTask(verificationTask.id);
     expect(store.getPlanRun(run.id)?.status).toBe("completed");
   });
 
@@ -437,15 +441,17 @@ describe("structured orchestration", () => {
     firstStore.seedExperts();
     const project = firstStore.createProject({ id: "project-recovery", name: "Recovery", localPath: dir, description: "" });
     const flow = firstStore.createFlow({ id: "flow-recovery", name: "Recovery", description: "", projectId: project.id });
-    const turn = firstStore.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-recovery" })!;
-    firstStore.startUserTurnWork({ flowId: flow.id, userTurnId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
+    const turn = firstStore.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-recovery" })!;
+    firstStore.startWorkRunWork({ flowId: flow.id, workRunId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
     const plan = firstStore.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "Recovery", objective: "恢复", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "Recovery", objective: "恢复", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [{ nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] }],
     })!;
     const run = firstStore.materializePlanRun(plan.revision.id)!;
-    firstStore.recordPlanFeedback({ flowId: flow.id, userTurnId: turn.id, planRevisionId: plan.revision.id, sourceMessageId: "recovery-feedback", feedback: [{ markerNumber: 1, comment: "暂停" }] });
+    const task = firstStore.getTask(firstStore.listPlanNodeTasks(run.id)[0]!.taskId)!;
+    firstStore.startTask(task.id, "ags-recovery-running");
+    firstStore.recordPlanFeedback({ flowId: flow.id, workRunId: turn.id, planRevisionId: plan.revision.id, sourceMessageId: "recovery-feedback", feedback: [{ markerNumber: 1, comment: "暂停" }] });
     expect(firstStore.getPlanRun(run.id)?.status).toBe("paused_for_feedback");
     firstStore.sqlite.close();
 

@@ -2,13 +2,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ClaudeQueryInput, ClaudeQueryLike } from "../src/harness/agentRunner.js";
 import { config } from "../src/config.js";
 import type { RuntimeSdk } from "../src/config/agentRuntimeConfig.js";
 import { parseMessageSegments } from "../src/protocol/platformEvent.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
-import { captureUserTurnBaseline } from "../src/runtime/userTurnDiff.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
+import { leaderTranscriptChannelId } from "../src/domain/transcriptChannels.js";
+import { captureWorkRunBaseline } from "../src/runtime/workRunDiff.js";
 import { createExpertRuntime } from "../src/runtime/expertRuntime.js";
 import { createLeaderRuntime, leaderRuntimeTestExports } from "../src/runtime/leaderRuntime.js";
 import { createStorePort } from "../src/mcp/storePort.js";
@@ -164,7 +168,7 @@ function createFlowLeader(
   });
   const leader = store.createAgentSession({
     flowId: flow.id,
-    userTurnId: null,
+    workRunId: null,
     taskId: null,
     expertId: "exp-leader",
     sessionId,
@@ -180,6 +184,125 @@ afterEach(() => {
 });
 
 describe("LeaderRuntime platform event protocol", () => {
+  it("keeps the provider's first MCP bridge bound to the current WorkRun across Leader AgentSessions", async () => {
+    const store = tempStore();
+    const { flow, leader } = createFlowLeader(store);
+    const workRun = beginWorkRun(store, { flowId: flow.id })!;
+    const task = store.createTask({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      title: "Continue after approval",
+      description: "The second Leader AgentSession must still resolve this Task.",
+      expertId: "exp-coder",
+    })!;
+    const desktopBridge = new DesktopBridge();
+    const leaderBindingKeys: Array<string | undefined> = [];
+    const browserBindingKeys: Array<string | undefined> = [];
+    const servers: McpServer[] = [];
+    let retainedClient: Client | null = null;
+    let queryCount = 0;
+    const toolResults: Array<Record<string, unknown>> = [];
+    const baseFactory = createClaudeTestAdapterFactory({
+      leaderQuery: () => {
+        queryCount += 1;
+        const currentQuery = queryCount;
+        return {
+          async *[Symbol.asyncIterator]() {
+            if (currentQuery === 2) {
+              const client = retainedClient;
+              if (!client) throw new Error("retained Leader MCP client was not connected");
+              const result = await client.callTool({
+                name: "get_task",
+                arguments: { flow_id: flow.id, task_id: task.id },
+              });
+              const first = result.content[0];
+              if (first?.type !== "text") throw new Error("get_task did not return text");
+              toolResults.push(JSON.parse(first.text) as Record<string, unknown>);
+            }
+            yield { type: "result", subtype: "success", session_id: "leader-session-1", is_error: false };
+          },
+          close() {},
+        };
+      },
+    });
+    const runtime = createLeaderRuntime({
+      store,
+      eventBus: new EventBus(),
+      chatJournal: new ChatJournal(),
+      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-1", status: "streaming" }) },
+      desktopBridge,
+      runtimeAdapterFactory: (factoryInput) => {
+        const adapter = baseFactory(factoryInput);
+        return {
+          ...adapter,
+          prepareLeaderMcpServer: async (input) => {
+            leaderBindingKeys.push(input.bindingKey);
+            servers.push(input.server);
+            if (!retainedClient) {
+              const client = new Client({ name: "retained-provider-client", version: "0.1.0" });
+              const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+              await Promise.all([input.server.connect(serverTransport), client.connect(clientTransport)]);
+              retainedClient = client;
+            }
+            return adapter.prepareLeaderMcpServer(input);
+          },
+          prepareExpertMcpServer: async (input) => {
+            browserBindingKeys.push(input.bindingKey);
+            servers.push(input.server);
+            return adapter.prepareExpertMcpServer(input);
+          },
+        };
+      },
+    });
+
+    try {
+      await runtime.runLeaderTurn({
+        flowId: flow.id,
+        kind: "user",
+        userMessage: "Prepare the work.",
+        workRunId: workRun.id,
+        currentTurnInput: {
+          trigger_kind: "user_message",
+          work_run_id: workRun.id,
+          message_id: "msg-prepare",
+          content: "Prepare the work.",
+          created_at: "2026-08-05T10:00:00.000Z",
+        },
+        leaderAgentSessionId: leader.id,
+        leaderSessionId: leader.sessionId ?? leader.id,
+        resumeSessionId: leader.sessionId ?? undefined,
+      });
+      const nextLeader = store.createAgentSession({
+        flowId: flow.id,
+        workRunId: workRun.id,
+        taskId: null,
+        expertId: "exp-leader",
+        sessionId: leader.sessionId,
+        displayName: "Leader",
+      });
+      await runtime.runLeaderTurn({
+        flowId: flow.id,
+        kind: "plan_approved",
+        workRunId: workRun.id,
+        planApprovedTasks: [{ taskId: task.id, title: task.title, expertId: "exp-coder", dependsOnTaskIds: [] }],
+        leaderAgentSessionId: nextLeader.id,
+        leaderSessionId: leader.sessionId ?? leader.id,
+        resumeSessionId: leader.sessionId ?? undefined,
+      });
+
+      expect(toolResults).toEqual([expect.objectContaining({
+        ok: true,
+        task: expect.objectContaining({ task_id: task.id, work_run_id: workRun.id }),
+      })]);
+      expect(leaderBindingKeys).toEqual([`leader:${flow.id}`, `leader:${flow.id}`]);
+      expect(browserBindingKeys).toEqual([`leader-browser:${flow.id}`, `leader-browser:${flow.id}`]);
+    } finally {
+      await runtime.close();
+      await retainedClient?.close();
+      await Promise.all(servers.map((server) => server.close().catch(() => {})));
+    }
+  });
+
   it("keeps local AgentSession IDs out of provider options when multiple Flows start concurrently", async () => {
     const store = tempStore();
     const first = createFlowLeader(store, "flow-concurrent-a", null);
@@ -246,12 +369,12 @@ describe("LeaderRuntime platform event protocol", () => {
   it("encodes a resumed clarification answer as one decision event", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = store.createUserTurn({
+    const workRun = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-spec-request",
       specRequested: true,
     })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
+    store.waitWorkRunForUserAction(workRun.id);
     let captured: ClaudeQueryInput | null = null;
     const runtime = createLeaderRuntime({
       store,
@@ -267,7 +390,7 @@ describe("LeaderRuntime platform event protocol", () => {
     await runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "decision",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       decisionCardId: "dc-spec-clarification",
       decisionAnswers: { scope: "当前项目" },
       decisionUserMessage: "用户已确认范围。",
@@ -367,6 +490,7 @@ describe("LeaderRuntime platform event protocol", () => {
       runtimeSdk: "claudecode",
       runtimeConfigId: "bailian",
       runtimeModelId: "model-2",
+      runtimeReasoningEffort: "high",
     }));
   });
 
@@ -535,7 +659,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("does not start a queued Leader turn after cancelling the previous closing stream", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const firstUserTurn = store.createUserTurn({
+    const firstWorkRun = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-first",
     })!;
@@ -560,30 +684,26 @@ describe("LeaderRuntime platform event protocol", () => {
     await runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "user",
-      userTurnId: firstUserTurn.id,
+      workRunId: firstWorkRun.id,
       userMessage: "第一轮",
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
     });
-    const secondUserTurn = store.createUserTurn({
-      flowId: flow.id,
-      triggerMessageId: "msg-second",
-    })!;
     const secondTurn = runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "user",
-      userTurnId: secondUserTurn.id,
+      workRunId: firstWorkRun.id,
       userMessage: "第二轮立即中断",
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
     });
 
-    const cancelled = (runtime.cancelFlow as (flowId: string, userTurnId: string) => boolean)(flow.id, secondUserTurn.id);
+    const cancelled = (runtime.cancelFlow as (flowId: string, workRunId: string) => boolean)(flow.id, firstWorkRun.id);
     await secondTurn;
 
     expect(cancelled).toBe(true);
     expect(leaderQuery).toHaveBeenCalledTimes(1);
-    expect(store.getUserTurn(secondUserTurn.id)?.status).toBe("active");
+    expect(store.getWorkRun(firstWorkRun.id)?.status).toBe("ready");
   });
 
   it("compacts an idle Leader SDK session and persists the refreshed context snapshot", async () => {
@@ -865,7 +985,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("keeps a silent Leader turn running until the user cancels it", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
     const started = deferred<void>();
     const release = deferred<void>();
     const close = vi.fn(() => release.resolve());
@@ -889,7 +1009,7 @@ describe("LeaderRuntime platform event protocol", () => {
       flowId: flow.id,
       kind: "user",
       userMessage: "保持等待，直到用户中断",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
     });
@@ -897,7 +1017,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     expect(close).not.toHaveBeenCalled();
     expect(store.getAgentSession(leader.id)?.status).toBe("streaming");
-    expect(runtime.cancelFlow(flow.id, userTurn.id)).toBe(true);
+    expect(runtime.cancelFlow(flow.id, workRun.id)).toBe(true);
     await running;
     expect(close).toHaveBeenCalled();
   });
@@ -977,20 +1097,20 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(closeFns[1]).toHaveBeenCalled();
   });
 
-  it("keeps the UserTurn open while a failed Expert result and its recovery are queued", async () => {
+  it("keeps the WorkRun open while a failed Expert result and its recovery are queued", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
     const coderTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Implement",
       description: "Implement",
       expertId: "exp-coder",
     })!;
     const verifyTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Verify",
       description: "Verify",
       expertId: "exp-verify",
@@ -1026,7 +1146,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
     const expertTurn = (taskId: string, expertId: string, turnOutcome: string, error: string | null) => ({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result" as const,
       expertResult: {
         taskId,
@@ -1049,7 +1169,7 @@ describe("LeaderRuntime platform event protocol", () => {
     await coderResultTurn;
     await inputReady[1]!.promise;
 
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("active");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("executing");
     const dispatches: unknown[] = [];
     const port = createStorePort(store, {
       dispatchAgent: async (input) => {
@@ -1059,14 +1179,14 @@ describe("LeaderRuntime platform event protocol", () => {
           status: "streaming",
           expert_id: input.expertId,
           task_id: input.taskId,
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
         };
       },
       sendMessage: async () => ({ accepted: false }),
     });
     const currentTurnInput = {
       trigger_kind: "expert_result" as const,
-      user_turn_id: userTurn.id,
+      work_run_id: workRun.id,
       created_at: "2026-07-09T10:00:01.000Z",
     };
     const recovery = port.createTask({
@@ -1092,14 +1212,14 @@ describe("LeaderRuntime platform event protocol", () => {
     releaseResult[1]!.resolve();
     await verifyFailureTurn;
     await inputReady[2]!.promise;
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("active");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("executing");
 
     releaseResult[2]!.resolve();
     await recoveryResultTurn;
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("completed");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("completed");
     expect(published.filter((event) => (
       event as { type?: string; data?: { status?: string } }
-    ).type === "user_turn:event" && (
+    ).type === "work_run:event" && (
       event as { data?: { status?: string } }
     ).data?.status === "completed")).toHaveLength(1);
   });
@@ -1107,10 +1227,10 @@ describe("LeaderRuntime platform event protocol", () => {
   it("completes a recovery turn that forms a normal conclusion without creating another Task", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
     const failedTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Verify",
       description: "Verify",
       expertId: "exp-verify",
@@ -1132,7 +1252,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     await runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result",
       expertResult: {
         taskId: failedTask.id,
@@ -1148,78 +1268,16 @@ describe("LeaderRuntime platform event protocol", () => {
       leaderSessionId: leader.sessionId ?? leader.id,
     });
 
-    expect(store.listUserTurnTasks(userTurn.id).map((task) => task.id)).toEqual([failedTask.id]);
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("completed");
+    expect(store.listWorkRunTasks(workRun.id).map((task) => task.id)).toEqual([failedTask.id]);
+    expect(store.getWorkRun(workRun.id)?.status).toBe("completed");
   });
 
-  it("moves a feedback-paused turn to waiting_user after Leader becomes idle", async () => {
+  it("serializes concurrent Expert results and completes their WorkRun exactly once", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
-    const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      title: "Pause for feedback",
-      objective: "Pause safely",
-      workKind: "change",
-      riskLevel: "low",
-      status: "approved",
-      lint: [],
-      diff: {},
-      nodes: [{
-        nodeId: "verify",
-        expertId: "exp-verify",
-        title: "Verify",
-        description: "Verify",
-        dependsOn: [],
-        acceptanceCriteria: ["verified"],
-        riskTags: [],
-        sideEffects: [],
-        resourceKeys: [],
-      }],
-    })!;
-    const run = store.materializePlanRun(created.revision.id)!;
-    const task = store.getTask(store.listPlanNodeTasks(run.id)[0]!.taskId)!;
-    store.updateTask(task.id, { status: "in_progress" });
-    store.cancelTask(task.id);
-    store.recordPlanFeedback({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      planRevisionId: created.revision.id,
-      sourceMessageId: "msg-pause",
-      feedback: [{ markerNumber: 1, comment: "暂停并等待下一步" }],
-    });
-    const runtime = createLeaderRuntime({
-      store,
-      eventBus: new EventBus(),
-      chatJournal: new ChatJournal(),
-      agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: "ags-unused", status: "streaming" }) },
-      runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: () => createQuery([{
-        type: "result",
-        subtype: "success",
-        session_id: "sdk-leader-paused",
-        is_error: false,
-      }]) }),
-    });
-
-    await runtime.runLeaderTurn({
-      flowId: flow.id,
-      userTurnId: userTurn.id,
-      kind: "user_turn_recovery",
-      leaderAgentSessionId: leader.id,
-      leaderSessionId: leader.sessionId ?? leader.id,
-    });
-
-    expect(store.getPlanRun(run.id)?.status).toBe("paused_for_feedback");
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("waiting_user");
-  });
-
-  it("serializes concurrent Expert results and completes their UserTurn exactly once", async () => {
-    const store = tempStore();
-    const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
-    const firstTask = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "First", description: "First" })!;
-    const secondTask = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "Second", description: "Second" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const firstTask = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "First", description: "First" })!;
+    const secondTask = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "Second", description: "Second" })!;
     store.updateTask(firstTask.id, { status: "in_progress" });
     store.completeTask(firstTask.id);
     store.updateTask(secondTask.id, { status: "in_progress" });
@@ -1253,7 +1311,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
     const expertTurn = (taskId: string, turnOutcome: string, error: string | null) => runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result",
       expertResult: {
         taskId,
@@ -1274,27 +1332,27 @@ describe("LeaderRuntime platform event protocol", () => {
     const second = expertTurn(secondTask.id, "errored", "failed second");
     releases[0]!.resolve();
     await inputs[1]!.promise;
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("active");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("executing");
     releases[1]!.resolve();
     await Promise.all([first, second]);
 
     expect(prompts[0]).toContain(firstTask.id);
     expect(prompts[1]).toContain(secondTask.id);
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("completed");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("completed");
     expect(published.filter((event) => (
       event as { type?: string; data?: { status?: string } }
-    ).type === "user_turn:event" && (
+    ).type === "work_run:event" && (
       event as { data?: { status?: string } }
     ).data?.status === "completed")).toHaveLength(1);
   });
 
-  it("drops a late Expert result after its UserTurn was cancelled without starting Leader", async () => {
+  it("drops a late Expert result after its WorkRun was cancelled without starting Leader", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
-    const task = store.createTask({ flowId: flow.id, userTurnId: userTurn.id, title: "Cancelled", description: "Cancelled" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}" })!;
+    const task = store.createTask({ flowId: flow.id, workRunId: workRun.id, title: "Cancelled", description: "Cancelled" })!;
     store.cancelTask(task.id);
-    store.failUserTurn(userTurn.id, "cancelled");
+    store.failWorkRun(workRun.id, "cancelled");
     let queryCount = 0;
     const runtime = createLeaderRuntime({
       store,
@@ -1309,7 +1367,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     await runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result",
       expertResult: {
         taskId: task.id,
@@ -1326,7 +1384,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
 
     expect(queryCount).toBe(0);
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("cancelled");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("cancelled");
   });
 
   it("guides the active Leader turn with a now-priority user message", async () => {
@@ -1452,7 +1510,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("waits for a card-paused stream to exit before resuming the same Leader session", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-card" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-card" })!;
     let queryCount = 0;
     let signalFirstInput!: () => void;
     const firstInput = new Promise<void>((resolve) => { signalFirstInput = resolve; });
@@ -1490,14 +1548,14 @@ describe("LeaderRuntime platform event protocol", () => {
       flowId: flow.id,
       kind: "user",
       userMessage: "请先澄清",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
     });
     await firstInput;
     const card = store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-card",
       sessionId: leader.sessionId ?? leader.id,
       cardType: "clarification",
@@ -1507,11 +1565,11 @@ describe("LeaderRuntime platform event protocol", () => {
     await firstTurn;
 
     store.resolveDecisionCard(card.id, flow.id, { language: "TypeScript" });
-    store.resumeUserTurn(userTurn.id);
+    store.resumeWorkRun(workRun.id);
     const decision = runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "decision",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       decisionCardId: card.id,
       decisionAnswers: { language: "TypeScript" },
       leaderAgentSessionId: leader.id,
@@ -1525,7 +1583,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(queryCount).toBe(2);
   });
 
-  it("omits user_turn_id for ordinary Flow chat", async () => {
+  it("omits work_run_id for ordinary Flow chat", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     let captured: ClaudeQueryInput | null = null;
@@ -1554,7 +1612,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     const prompt = await firstPromptText(captured);
     expect(prompt).toBe("请你输出1到100 直接输出，不写文件内");
-    expect(prompt).not.toContain("user_turn_id:");
+    expect(prompt).not.toContain("work_run_id:");
     expect(store.listEventLog(flow.id)).toEqual(expect.arrayContaining([
       expect.objectContaining({
         agentSessionId: leader.id,
@@ -1607,7 +1665,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("sends Expert results with the Task ID only in the event attribute", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, inputSnapshotJson: "{}", createdBy: "user" })!;
     let captured: ClaudeQueryInput | null = null;
     const runtime = createLeaderRuntime({
       store,
@@ -1626,7 +1684,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     await runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result",
       expertResult: {
         taskId: "task-1",
@@ -1652,12 +1710,12 @@ describe("LeaderRuntime platform event protocol", () => {
         body: "Expert 本次回复（Task 仍为 in_progress）：built\n当前 Task 状态：in_progress",
       }),
     ]);
-    expect(prompt).not.toContain(userTurn.id);
+    expect(prompt).not.toContain(workRun.id);
     expect(prompt).not.toContain("agent_session_id");
     expect(prompt).not.toContain("expert_id");
   });
 
-  it("does not include commit_plan instructions in user turns", async () => {
+  it("does not include commit_plan instructions in Leader message executions", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     let captured: ClaudeQueryInput | null = null;
@@ -1713,7 +1771,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("persists the provider error text when a Leader turn fails", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id });
+    const workRun = beginWorkRun(store, { flowId: flow.id });
     const chatJournal = new ChatJournal(store);
     const eventBus = new EventBus();
     const published: unknown[] = [];
@@ -1743,16 +1801,16 @@ describe("LeaderRuntime platform event protocol", () => {
 
     await expect(runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn!.id,
+      workRunId: workRun!.id,
       kind: "user",
       userMessage: "你好",
       leaderAgentSessionId: leader.id,
-      leaderSessionId: leader.sessionId ?? leader.id,
+      leaderSessionId: leaderTranscriptChannelId(flow.id),
     })).rejects.toThrow(providerError);
 
     expect(store.getAgentSession(leader.id)?.status).toBe("failed");
-    expect(store.getUserTurn(userTurn!.id)?.status).toBe("failed");
-    expect(chatJournal.getTranscriptMessages(flow.id, leader.id)).toEqual([
+    expect(store.getWorkRun(workRun!.id)?.status).toBe("failed");
+    expect(chatJournal.getTranscriptMessages(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         role: "assistant",
         content: providerError,
@@ -1796,7 +1854,7 @@ describe("LeaderRuntime platform event protocol", () => {
   it("exposes all local Leader tools except web search and enforces read/write path policy", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id });
+    const workRun = beginWorkRun(store, { flowId: flow.id });
     let captured: ClaudeQueryInput | null = null;
     const permissionGate = vi.fn().mockResolvedValue({ behavior: "deny", message: "用户未批准该风险操作。" });
     const runtime = createLeaderRuntime({
@@ -1818,7 +1876,7 @@ describe("LeaderRuntime platform event protocol", () => {
     await runtime.runLeaderTurn({
       flowId: flow.id,
       kind: "user",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       userMessage: "build",
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
@@ -1883,8 +1941,8 @@ describe("LeaderRuntime platform event protocol", () => {
     ).resolves.toEqual({ behavior: "deny", message: "用户未批准该风险操作。" });
     expect(permissionGate).toHaveBeenCalledWith(expect.objectContaining({
       flowId: flow.id,
-      userTurnId: userTurn.id,
-      scope: { kind: "leader_user_turn" },
+      workRunId: workRun.id,
+      scope: { kind: "leader_work_run" },
       permissionArgs: expect.objectContaining({ riskMode: "auto_edit" }),
     }));
 
@@ -1941,15 +1999,15 @@ describe("LeaderRuntime platform event protocol", () => {
     ).resolves.toEqual({ behavior: "deny", message: "tool not allowed by expert: Bash" });
   });
 
-  it("captures platform diff artifacts before completing a quiescent UserTurn", async () => {
+  it("captures platform diff artifacts before completing a quiescent WorkRun", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-user-turn-root-"));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-work-run-root-"));
     dirs.push(root);
     store.updateProject(flow.projectId!, { localPath: root });
     fs.writeFileSync(path.join(root, "hello.txt"), "before");
-    const baseline = captureUserTurnBaseline(root);
-    const userTurn = beginUserTurn(store, {
+    const baseline = captureWorkRunBaseline(root);
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: root,
       inputSnapshotJson: JSON.stringify({ diff_baseline: baseline }),
@@ -1957,7 +2015,7 @@ describe("LeaderRuntime platform event protocol", () => {
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Change hello",
       description: "Change hello",
       expertId: "exp-backend",
@@ -1982,7 +2040,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     await runtime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "expert_result",
       expertResult: {
         taskId: task.id,
@@ -1998,20 +2056,20 @@ describe("LeaderRuntime platform event protocol", () => {
       leaderSessionId: leader.sessionId ?? leader.id,
     });
 
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("completed");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("completed");
     expect(store.listArtifacts(flow.id)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ userTurnId: userTurn.id, type: "changed_files" }),
-      expect.objectContaining({ userTurnId: userTurn.id, type: "diff_summary", content: expect.stringContaining("hello.txt") }),
+      expect.objectContaining({ workRunId: workRun.id, type: "changed_files" }),
+      expect.objectContaining({ workRunId: workRun.id, type: "diff_summary", content: expect.stringContaining("hello.txt") }),
     ]));
   });
 
-  it("rejects a normal user turn while a clarification card is pending", async () => {
+  it("rejects a normal Leader message execution while a clarification card is pending", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-pending" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-pending" })!;
     store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-pending",
       sessionId: leader.sessionId ?? leader.id,
       cardType: "clarification",
@@ -2033,7 +2091,7 @@ describe("LeaderRuntime platform event protocol", () => {
       flowId: flow.id,
       kind: "user",
       userMessage: "不要悄悄开始第二轮",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       leaderAgentSessionId: leader.id,
       leaderSessionId: leader.sessionId ?? leader.id,
     })).rejects.toMatchObject({ code: "PENDING_DECISION" });
@@ -2132,11 +2190,11 @@ describe("LeaderRuntime platform event protocol", () => {
   it("stops a running Expert without mutating Task state when the Leader fails fatally", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
-    const userTurn = beginUserTurn(store, { flowId: flow.id })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id })!;
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Keep working",
       description: "Keep working",
       expertId: "exp-coder",
@@ -2144,7 +2202,7 @@ describe("LeaderRuntime platform event protocol", () => {
     })!;
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -2156,7 +2214,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     const completedTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Already done",
       description: "Already done",
       expertId: "exp-coder",
@@ -2164,7 +2222,7 @@ describe("LeaderRuntime platform event protocol", () => {
     })!;
     const completedSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: completedTask.id,
       expertId: "exp-coder",
       displayName: "Coder",
@@ -2185,7 +2243,7 @@ describe("LeaderRuntime platform event protocol", () => {
     const expertStarted = deferred<void>();
     const releaseExpert = deferred<void>();
     const desktopBridge = new DesktopBridge();
-    const lateWritePath = path.join(userTurn.workRootPath!, "late-write.txt");
+    const lateWritePath = path.join(workRun.workRootPath!, "late-write.txt");
     let expertClosed = false;
     const expertRuntime = createExpertRuntime({
       store,
@@ -2208,7 +2266,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
     const expertRun = expertRuntime.runTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       flowExpertId: flowExpert.id,
       agentSessionId: session.id,
@@ -2224,8 +2282,8 @@ describe("LeaderRuntime platform event protocol", () => {
       eventBus: new EventBus(),
       chatJournal: new ChatJournal(),
       agentDispatcher: { dispatchAgent: async () => ({ agent_session_id: session.id, status: "streaming" }) },
-      onUserTurnFatal: ({ flowId, userTurnId }) => {
-        expertRuntime.cancelUserTurn({ flowId, userTurnId });
+      onWorkRunFatal: ({ flowId, workRunId }) => {
+        expertRuntime.cancelWorkRun({ flowId, workRunId });
       },
       runtimeAdapterFactory: createClaudeTestAdapterFactory({ leaderQuery: () => ({
         async *[Symbol.asyncIterator]() {
@@ -2239,7 +2297,7 @@ describe("LeaderRuntime platform event protocol", () => {
 
     const leaderRun = leaderRuntime.runLeaderTurn({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       kind: "user",
       userMessage: "start",
       leaderAgentSessionId: leader.id,
@@ -2248,7 +2306,7 @@ describe("LeaderRuntime platform event protocol", () => {
     await leaderStarted.promise;
     const card = store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-leader-fatal",
       sessionId: leader.sessionId ?? leader.id,
       cardType: "clarification",
@@ -2256,7 +2314,7 @@ describe("LeaderRuntime platform event protocol", () => {
     });
     const approval = store.createSpecApproval({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       specRevisionId: spec.id,
       fileName: spec.fileName,
       overview: spec.overview,
@@ -2270,7 +2328,7 @@ describe("LeaderRuntime platform event protocol", () => {
     expect(stoppedByFatal).toBe(true);
     expect(desktopBridge.getLease()).toBeNull();
     expect(fs.existsSync(lateWritePath)).toBe(false);
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("failed");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("failed");
     expect(store.getTask(task.id)?.status).toBe("in_progress");
     expect(store.getAgentSession(session.id)?.status).toBe("interrupted");
     expect(store.getDecisionCard(card.id)?.status).toBe("cancelled");

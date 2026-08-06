@@ -307,7 +307,21 @@ describe("agent runtime config storage", () => {
     for (const binding of snapshot.roles) {
       expect(binding.configId).toBe(config.id);
       expect(binding.modelId).toBe("model-1");
+      expect(binding.reasoningEffort).toBe("high");
     }
+  });
+
+  it("uses the selected SDK default effort for legacy unbound roles", async () => {
+    const { createRuntimeConfig, readAgentRuntimeConfigSnapshot } = await loadRuntimeConfigModule();
+    await createRuntimeConfig({
+      name: "Codex配置",
+      sdk: "codex",
+      authMode: "apiKey",
+      models: [{ id: "model-1", name: "gpt-5.6" }],
+    });
+
+    const snapshot = await readAgentRuntimeConfigSnapshot();
+    expect(snapshot.roles.every((binding) => binding.reasoningEffort === "medium")).toBe(true);
   });
 
   it("persists role binding modelId and rejects unknown models", async () => {
@@ -360,6 +374,29 @@ describe("agent runtime config storage", () => {
 
     const binding = await updateRoleRuntimeBinding("coder", { configId: config.id });
     expect(binding).toMatchObject({ configId: config.id, modelId: "glm-47" });
+  });
+
+  it("persists role effort and validates it against the selected SDK", async () => {
+    const { createRuntimeConfig, readAgentRuntimeConfigSnapshot, updateRoleRuntimeBinding } = await loadRuntimeConfigModule();
+    const config = await createRuntimeConfig({
+      name: "配置A",
+      sdk: "claudecode",
+      authMode: "apiKey",
+      models: [{ id: "model-1", name: "mimo-v2.5" }],
+    });
+
+    await expect(updateRoleRuntimeBinding("coder", {
+      configId: config.id,
+      reasoningEffort: "ultra",
+    })).rejects.toThrow("reasoning_effort must be supported");
+
+    const binding = await updateRoleRuntimeBinding("coder", {
+      configId: config.id,
+      reasoningEffort: "max",
+    });
+    expect(binding).toMatchObject({ reasoningEffort: "max" });
+    expect((await readAgentRuntimeConfigSnapshot()).roles.find((role) => role.role === "coder"))
+      .toMatchObject({ reasoningEffort: "max" });
   });
 
   it("rebinds roles to the fallback config and model when their config is deleted", async () => {

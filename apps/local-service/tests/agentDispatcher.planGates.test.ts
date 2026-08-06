@@ -18,8 +18,8 @@ function setup() {
   store.seedExperts();
   const project = store.createProject({ id: "project-gates", name: "Gates", localPath: dir, description: "" });
   const flow = store.createFlow({ id: "flow-gates", name: "Gates", description: "", projectId: project.id });
-  const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
-  store.startUserTurnWork({ flowId: flow.id, userTurnId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
+  const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+  store.startWorkRunWork({ flowId: flow.id, workRunId: turn.id, workSource: "direct_message", targetProjectId: project.id, inputSnapshotJson: "{}" });
   const dispatcher = createAgentDispatcher({
     store,
     eventBus: new EventBus(),
@@ -38,7 +38,7 @@ describe("dispatch-time plan gates", () => {
   it("dispatches a materialized plan task and blocks its dependent until completion", async () => {
     const { store, flow, turn, dispatcher } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "计划", objective: "实现并验证", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "计划", objective: "实现并验证", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [
         { nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] },
@@ -78,7 +78,7 @@ describe("dispatch-time plan gates", () => {
   it("rejects dispatch while the plan run is paused for feedback", async () => {
     const { store, flow, turn, dispatcher } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "暂停", objective: "暂停中不派", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "暂停", objective: "暂停中不派", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [
         { nodeId: "code", expertId: "exp-coder", title: "实现", description: "实现", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: [] },
@@ -86,10 +86,20 @@ describe("dispatch-time plan gates", () => {
       ],
     })!;
     const run = store.materializePlanRun(created.revision.id)!;
-    const taskId = store.listPlanNodeTasks(run.id)[0]!.taskId;
+    const [runningMapping, blockedMapping] = store.listPlanNodeTasks(run.id);
+    const runningTask = store.getTask(runningMapping!.taskId)!;
+    const blockedTask = store.getTask(blockedMapping!.taskId)!;
+    const started = await dispatcher.dispatchAgent({
+      flowId: flow.id,
+      taskId: runningTask.id,
+      expertId: runningTask.expertId!,
+      prompt: "先开始实现",
+      resumeAgentSessionId: "",
+    });
+    expect(started.status).toBe("queued");
     store.recordPlanFeedback({
       flowId: flow.id,
-      userTurnId: turn.id,
+      workRunId: turn.id,
       planRevisionId: created.revision.id,
       sourceMessageId: "feedback-1",
       feedback: [{ markerNumber: 1, comment: "先等等" }],
@@ -97,7 +107,11 @@ describe("dispatch-time plan gates", () => {
     expect(store.getPlanRun(run.id)?.status).toBe("paused_for_feedback");
 
     const rejected = await dispatcher.dispatchAgent({
-      flowId: flow.id, taskId, expertId: store.getTask(taskId)!.expertId!, prompt: "实现", resumeAgentSessionId: "",
+      flowId: flow.id,
+      taskId: blockedTask.id,
+      expertId: blockedTask.expertId!,
+      prompt: "实现",
+      resumeAgentSessionId: "",
     });
     expect(rejected).toEqual(expect.objectContaining({ status: "failed", error: "plan is paused for feedback" }));
   });
@@ -105,7 +119,7 @@ describe("dispatch-time plan gates", () => {
   it("rejects dispatch when resource keys conflict with a running task", async () => {
     const { store, flow, turn, dispatcher } = setup();
     const created = store.createOrchestrationPlanRevision({
-      flowId: flow.id, userTurnId: turn.id, title: "资源", objective: "共享写范围串行", workKind: "change", riskLevel: "low",
+      flowId: flow.id, workRunId: turn.id, title: "资源", objective: "共享写范围串行", workKind: "change", riskLevel: "low",
       status: "approved", lint: [], diff: {},
       nodes: [
         { nodeId: "a", expertId: "exp-coder", title: "改 src A", description: "A", dependsOn: [], acceptanceCriteria: ["完成"], riskTags: [], sideEffects: [], resourceKeys: ["src"] },

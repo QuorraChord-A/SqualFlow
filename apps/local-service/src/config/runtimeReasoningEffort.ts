@@ -1,4 +1,4 @@
-import type { RuntimeSdk } from "../config/agentRuntimeConfig.js";
+import type { RuntimeSdk } from "./agentRuntimeConfig.js";
 
 const RUNTIME_REASONING_EFFORTS: Record<RuntimeSdk, readonly string[]> = {
   claudecode: ["low", "medium", "high", "xhigh", "max"],

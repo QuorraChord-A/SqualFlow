@@ -17,7 +17,7 @@ describe("runtime message protocol v2 data migration", () => {
       legacy.createFlow({ id: "legacy-flow", name: "Legacy", projectId: project.id });
       legacy.createAgentSession({
         flowId: "legacy-flow",
-        userTurnId: null,
+        workRunId: null,
         taskId: null,
         expertId: "exp-leader",
         sessionId: "legacy-sdk-session",

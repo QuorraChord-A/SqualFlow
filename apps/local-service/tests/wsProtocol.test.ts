@@ -3,10 +3,11 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { config } from "../src/config.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { createApp } from "../src/server/app.js";
 import {
   handleWsClientMessage,
+  publishInterruptedSessions,
   recoverPendingDecisionCardLeaderInputs,
 } from "../src/server/wsGateway.js";
 import { EventBus } from "../src/ws/eventBus.js";
@@ -15,6 +16,7 @@ import { WsPusher } from "../src/ws/pusher.js";
 import type { ClaudeQueryLike } from "../src/harness/agentRunner.js";
 import { ClientWsMessageSchema, ServerWsMessageSchema } from "../src/protocol/wsMessages.js";
 import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFactory.js";
+import { leaderTranscriptChannelId } from "../src/domain/transcriptChannels.js";
 
 type WsConnection = Parameters<typeof handleWsClientMessage>[1];
 const testLeaderRuntimeBinding = {
@@ -54,20 +56,11 @@ function nextWsMessage(ws: any): Promise<unknown> {
   ensureWsBuffer(ws);
   const buffered = wsBuffers.get(ws);
   const message = buffered?.shift();
-  if (message) {
-    if ((message as { type?: string })?.type === "leader:runtime_state") return nextWsMessage(ws);
-    return Promise.resolve(message);
-  }
+  if (message) return Promise.resolve(message);
 
   return Promise.race([
     new Promise((resolve) => {
-      wsWaiters.get(ws)?.push((message) => {
-        if ((message as { type?: string })?.type === "leader:runtime_state") {
-          void nextWsMessage(ws).then(resolve);
-          return;
-        }
-        resolve(message);
-      });
+      wsWaiters.get(ws)?.push(resolve);
     }),
     new Promise((_, reject) => {
       setTimeout(() => reject(new Error("timed out waiting for websocket message")), 500);
@@ -98,7 +91,7 @@ describe("EventBus", () => {
         attempt: 2,
         max_attempts: 5,
         runtime_role: "leader",
-        user_turn_id: "turn-1",
+        work_run_id: "turn-1",
       },
     })).toMatchObject({ type: "runtime:transport" });
     expect(() => ServerWsMessageSchema.parse({
@@ -612,14 +605,16 @@ describe("Fastify app and websocket gateway", () => {
       });
 
       ws.send(JSON.stringify({ data: { type: "flow:subscribe", flow_id: "flow-1", log_id: "log-1" } }));
-      expect(await nextWsMessage(ws)).toEqual({
+      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
         type: "flow:state",
         flow_id: "flow-1",
         log_id: "log-1",
-        data: {
+        data: expect.objectContaining({
           status: "ready",
-          active_user_turn_id: null,
-          user_turns: [],
+          current_work_run_id: null,
+          active_leader_agent_session_id: null,
+          latest_leader_agent_session_id: null,
+          work_runs: [],
           tasks: [],
           spec_revisions: [],
           agent_sessions: [],
@@ -627,8 +622,8 @@ describe("Fastify app and websocket gateway", () => {
           queued_messages: [],
           artifacts: [],
           recent_events: [],
-        },
-      });
+        }),
+      }));
 
       ws.terminate();
     } finally {
@@ -661,12 +656,12 @@ describe("Fastify app and websocket gateway", () => {
           id: flow.id,
           name: "Snapshot Flow",
           name_generation_status: "generated",
-          status: "ready",
-          active_user_turn_id: null,
+          status: "idle",
+          current_work_run_id: null,
           project_id: project.id,
           leader_runtime_config_id: "default-agent-sdk",
           leader_runtime_model_id: "mimo-v25",
-          user_turns: [],
+          work_runs: [],
           tasks: [],
           spec_revisions: [],
           agent_sessions: [],
@@ -682,25 +677,25 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("includes flat UserTurn task details in persisted flow snapshots", async () => {
+  it("includes flat WorkRun task details in persisted flow snapshots", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
     const flow = store.createFlow({
-      id: "flow-state-user-turn",
+      id: "flow-state-work-run",
       workspaceId: "ws-default",
       name: "Execution Snapshot Flow",
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       inputSnapshotJson: JSON.stringify({ prompt: "build" }),
       createdBy: "user",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build feature",
       expertId: "exp-coder",
@@ -711,17 +706,17 @@ describe("Fastify app and websocket gateway", () => {
     try {
       await app.ready();
       const ws = await app.injectWS("/api/ws");
-      ws.send(JSON.stringify({ data: { type: "flow:subscribe", flow_id: flow.id, log_id: "log-state-user-turn" } }));
+      ws.send(JSON.stringify({ data: { type: "flow:subscribe", flow_id: flow.id, log_id: "log-state-work-run" } }));
 
       expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
         type: "flow:state",
         flow_id: flow.id,
         data: expect.objectContaining({
-          active_user_turn_id: userTurn.id,
-          user_turns: [expect.objectContaining({ id: userTurn.id, status: "active" })],
+          current_work_run_id: workRun.id,
+          work_runs: [expect.objectContaining({ id: workRun.id, status: "executing" })],
           tasks: [expect.objectContaining({
             id: task.id,
-            user_turn_id: userTurn.id,
+            work_run_id: workRun.id,
             title: "Build",
             status: "pending",
           })],
@@ -749,7 +744,7 @@ describe("Fastify app and websocket gateway", () => {
     const session = store.createAgentSession({
       id: "ags-coder-interrupted",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-coder",
       flowExpertId: flowExpert.id,
@@ -798,7 +793,7 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("returns session snapshot with completed history and the current streaming message", async () => {
+  it("returns the stable Leader transcript after startup seals a stale stream", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -812,28 +807,30 @@ describe("Fastify app and websocket gateway", () => {
     const leader = store.createAgentSession({
       id: "ags-leader-snapshot",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-snapshot",
       displayName: "Leader",
+      status: "streaming",
     });
     const chatJournal = new ChatJournal();
+    const leaderChannel = leaderTranscriptChannelId(flow.id);
     chatJournal.recordUserMessage(
       flow.id,
-      leader.sessionId!,
+      leaderChannel,
       "写个 helloworld",
       "msg-user-snapshot",
       "2026-06-24T09:59:59.000Z",
       leader.id,
     );
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "start",
       messageId: "msg-assistant-current",
       startedAt: "2026-06-24T10:00:00.000Z",
     }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-start", id: "text-current" }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, { type: "text-delta", id: "text-current", delta: "正在继续执行" }, leader.id);
+    chatJournal.record(flow.id, leaderChannel, { type: "text-start", id: "text-current" }, leader.id);
+    chatJournal.record(flow.id, leaderChannel, { type: "text-delta", id: "text-current", delta: "正在继续执行" }, leader.id);
 
     const app = createApp({
       logger: false,
@@ -857,17 +854,11 @@ describe("Fastify app and websocket gateway", () => {
       expect(await nextWsMessage(ws)).toEqual({
         type: "session:transcript_snapshot",
         flow_id: flow.id,
-        session_id: "sdk-leader-snapshot",
+        session_id: leaderChannel,
         agent_session_id: leader.id,
         data: {
           stream_epoch: chatJournal.getStreamEpoch(),
-          cursor: 4,
-          active_turn: {
-            message_id: "msg-assistant-current",
-            root_message_id: "msg-assistant-current",
-            segment_index: 0,
-            started_at: "2026-06-24T10:00:00.000Z",
-          },
+          cursor: expect.any(Number),
           messages: [
             {
               id: "msg-user-snapshot",
@@ -916,34 +907,36 @@ describe("Fastify app and websocket gateway", () => {
     const leader = store.createAgentSession({
       id: "ags-leader-snapshot-overlap",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-snapshot-overlap",
       displayName: "Leader",
+      status: "streaming",
     });
     const chatJournal = new ChatJournal();
+    const leaderChannel = leaderTranscriptChannelId(flow.id);
     chatJournal.recordUserMessage(
       flow.id,
-      leader.sessionId!,
+      leaderChannel,
       "写个 helloworld",
       "msg-user-overlap",
       undefined,
       leader.id,
     );
-    chatJournal.record(flow.id, leader.sessionId!, { type: "start", messageId: "msg-assistant-current" }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, { type: "start", messageId: "msg-assistant-current" }, leader.id);
+    chatJournal.record(flow.id, leaderChannel, {
       type: "tool-input-start",
       toolCallId: "tool-card-1",
       toolName: "mcp__leader__decision_card",
     }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "tool-input-available",
       toolCallId: "tool-card-1",
       toolName: "mcp__leader__decision_card",
       input: { card_type: "SpecApprovalCard", questions: [] },
     }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "tool-output-available",
       toolCallId: "tool-card-1",
       output: { content: "{\"card_id\":\"dc-overlap\"}", is_error: false },
@@ -974,7 +967,6 @@ describe("Fastify app and websocket gateway", () => {
             expect.objectContaining({ id: "msg-user-overlap", role: "user" }),
             expect.objectContaining({ id: "msg-assistant-current", role: "assistant" }),
           ],
-          active_turn: expect.objectContaining({ message_id: "msg-assistant-current" }),
         }),
       }));
 
@@ -998,7 +990,7 @@ describe("Fastify app and websocket gateway", () => {
     const leader = store.createAgentSession({
       id: "ags-leader-supplemental",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-supplemental",
@@ -1021,7 +1013,7 @@ describe("Fastify app and websocket gateway", () => {
       payload: {
         kind: "expert_result",
         flow_id: flow.id,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         task_id: "task-1",
         agent_session_id: "ags-1",
         expert_id: "exp-backend",
@@ -1079,7 +1071,7 @@ describe("Fastify app and websocket gateway", () => {
     const leader = store.createAgentSession({
       id: "ags-leader-supplemental-failed",
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-supplemental-failed",
@@ -1092,7 +1084,7 @@ describe("Fastify app and websocket gateway", () => {
       payload: {
         kind: "expert_result",
         flow_id: flow.id,
-        user_turn_id: "utn-1",
+        work_run_id: "utn-1",
         task_id: "task-1",
         agent_session_id: "ags-1",
         expert_id: "exp-backend",
@@ -1188,20 +1180,20 @@ describe("Fastify app and websocket gateway", () => {
       created_at: expect.any(String),
     }));
 
-    const history = chatJournal.getHistory(flow.id, store.getFlow(flow.id)!.leaderSessionId ?? "");
+    const history = chatJournal.getHistory(flow.id, leaderTranscriptChannelId(flow.id));
     expect(history).toEqual([
       expect.objectContaining({ id: "client-msg-42", role: "user", content }),
     ]);
     const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
-    expect(store.listTranscriptEntries(flow.id, leader.id)[0]?.message).toEqual(expect.objectContaining({
+    expect(store.listTranscriptEntries(flow.id, leaderTranscriptChannelId(flow.id))[0]?.message).toEqual(expect.objectContaining({
       id: "client-msg-42",
       role: "user",
       content,
       parts: [{ type: "text", text: content }],
     }));
-    const userTurn = store.listUserTurns(flow.id)[0]!;
+    expect(store.listWorkRuns(flow.id)).toEqual([]);
     expect(store.listEventLog(flow.id).find((event) => event.eventType === "flow.user_message")).toEqual(
-      expect.objectContaining({ userTurnId: userTurn.id }),
+      expect.objectContaining({ workRunId: null }),
     );
   });
 
@@ -1271,7 +1263,7 @@ describe("Fastify app and websocket gateway", () => {
       payload: {},
     }));
     const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
-    expect(chatJournal.getTranscriptMessages(flow.id, leader.id).filter((item) => item.id === "msg-queue-2")).toHaveLength(1);
+    expect(chatJournal.getTranscriptMessages(flow.id, leaderTranscriptChannelId(flow.id)).filter((item) => item.id === "msg-queue-2")).toHaveLength(1);
 
     await handleWsClientMessage(JSON.stringify({ data: {
       type: "flow:queue_dispatch",
@@ -1398,7 +1390,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     const failedLeader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-session-that-never-started",
@@ -1438,7 +1430,7 @@ describe("Fastify app and websocket gateway", () => {
     expect(restartedLeader.status).toBe("failed");
     expect(store.getFlow(flow.id)?.leaderSessionId).toBe(restartedLeader.sessionId);
     expect(capturedTurns).toEqual([{
-      leaderSessionId: restartedLeader.sessionId,
+      leaderSessionId: leaderTranscriptChannelId(flow.id),
       resumeSessionId: "sdk-session-that-never-started",
     }]);
   });
@@ -1457,7 +1449,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-current",
@@ -1477,25 +1469,26 @@ describe("Fastify app and websocket gateway", () => {
     });
 
     const chatJournal = new ChatJournal();
+    const leaderChannel = leaderTranscriptChannelId(flow.id);
     chatJournal.recordUserMessage(
       flow.id,
-      leader.sessionId!,
+      leaderChannel,
       "正在运行的问题",
       "msg-user-current",
       undefined,
       leader.id,
     );
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "start",
       messageId: "msg-assistant-current",
       startedAt: "2026-07-17T17:00:00.000Z",
     }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "text-start",
       messageId: "msg-assistant-current",
       id: "text-current",
     }, leader.id);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderChannel, {
       type: "text-delta",
       messageId: "msg-assistant-current",
       id: "text-current",
@@ -1642,8 +1635,7 @@ describe("Fastify app and websocket gateway", () => {
         })],
       }),
     ]);
-    const leaderSessionId = store.getFlow(flow.id)!.leaderSessionId ?? "";
-    expect(chatJournal.getHistory(flow.id, leaderSessionId)).toEqual([
+    expect(chatJournal.getHistory(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         id: "client-msg-image",
         metadata: expect.objectContaining({
@@ -1709,8 +1701,7 @@ describe("Fastify app and websocket gateway", () => {
       })],
       currentTurnInput: expect.objectContaining({ content: "" }),
     })]);
-    const leaderSessionId = store.getFlow(flow.id)!.leaderSessionId ?? "";
-    expect(chatJournal.getHistory(flow.id, leaderSessionId)).toEqual([
+    expect(chatJournal.getHistory(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         content: "",
         metadata: expect.objectContaining({
@@ -1725,7 +1716,7 @@ describe("Fastify app and websocket gateway", () => {
     expect((capturedTurns[0]?.attachments as Array<Record<string, unknown>>)[0]).not.toHaveProperty("data");
   });
 
-  it("resumes Leader on the open user turn when Leader is idle during expert work", async () => {
+  it("starts a new Leader AgentSession on the open WorkRun while an Expert is running", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -1739,7 +1730,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-active-leader",
@@ -1747,11 +1738,11 @@ describe("Fastify app and websocket gateway", () => {
       status: "completed",
     });
     store.updateFlow(flow.id, { leaderSessionId: "sdk-active-leader" });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
-    fs.mkdirSync(userTurn.workRootPath!, { recursive: true });
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
+    fs.mkdirSync(workRun.workRootPath!, { recursive: true });
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Verify",
       description: "Verify",
       expertId: "exp-verify",
@@ -1760,7 +1751,7 @@ describe("Fastify app and websocket gateway", () => {
     const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-verify" });
     store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-verify",
       flowExpertId: flowExpert.id,
@@ -1805,21 +1796,21 @@ describe("Fastify app and websocket gateway", () => {
         flowId: flow.id,
         kind: "user",
         userMessage: "请通知 Verify 先看 diff",
-        userTurnId: userTurn.id,
-        leaderAgentSessionId: leader.id,
-        leaderSessionId: "sdk-active-leader",
+        workRunId: workRun.id,
+        leaderAgentSessionId: expect.stringMatching(/^ags-/),
+        leaderSessionId: leaderTranscriptChannelId(flow.id),
         resumeSessionId: "sdk-active-leader",
         currentTurnInput: expect.objectContaining({
           trigger_kind: "user_message",
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
           message_id: "client-msg-resume-leader",
           content: "请通知 Verify 先看 diff",
         }),
       }),
     ]);
-    expect(store.listUserTurns(flow.id)).toHaveLength(1);
-    expect(store.getOpenUserTurn(flow.id)?.id).toBe(userTurn.id);
-    expect(chatJournal.getHistory(flow.id, "sdk-active-leader")).toEqual([
+    expect(store.listWorkRuns(flow.id)).toHaveLength(1);
+    expect(store.getOpenWorkRun(flow.id)?.id).toBe(workRun.id);
+    expect(chatJournal.getHistory(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         id: "client-msg-resume-leader",
         role: "user",
@@ -1828,27 +1819,27 @@ describe("Fastify app and websocket gateway", () => {
     ]);
   });
 
-  it("does not complete an open UserTurn while sending a subscribed flow state", async () => {
+  it("does not complete an open WorkRun while sending a subscribed flow state", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
     const flow = store.createFlow({
-      id: "flow-stale-user-turn",
+      id: "flow-stale-work-run",
       workspaceId: "ws-default",
-      name: "Stale User Turn",
+      name: "Stale WorkRun",
       description: "",
       projectId: null,
     });
     store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-completed-leader",
       displayName: "Leader",
       status: "completed",
     });
-    const staleTurn = store.createUserTurn({
+    const staleTurn = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-user-stale",
       startedAt: "2026-06-29T07:00:00.000Z",
@@ -1870,30 +1861,21 @@ describe("Fastify app and websocket gateway", () => {
       data: {
         type: "flow:subscribe",
         flow_id: flow.id,
-        log_id: "log-stale-user-turn",
+        log_id: "log-stale-work-run",
       },
     }), connection);
 
-    expect(store.getUserTurn(staleTurn!.id)?.status).toBe("active");
+    expect(store.getWorkRun(staleTurn!.id)?.status).toBe("ready");
     expect(sent).toEqual([
       expect.objectContaining({
         type: "flow:state",
         flow_id: flow.id,
-        log_id: "log-stale-user-turn",
+        log_id: "log-stale-work-run",
         data: expect.objectContaining({
-          user_turns: [
-            expect.objectContaining({ status: "active" }),
+          work_runs: [
+            expect.objectContaining({ status: "ready" }),
           ],
         }),
-      }),
-      expect.objectContaining({
-        type: "leader:runtime_state",
-        flow_id: flow.id,
-        log_id: "log-stale-user-turn",
-        data: {
-          status: "idle",
-          leader_agent_session_id: expect.any(String),
-        },
       }),
     ]);
   });
@@ -1912,14 +1894,14 @@ describe("Fastify app and websocket gateway", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-guide",
       displayName: "Leader",
     });
     store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-original" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-original" })!;
     const chatJournal = new ChatJournal();
     const sent: unknown[] = [];
     const guided: unknown[] = [];
@@ -1952,7 +1934,7 @@ describe("Fastify app and websocket gateway", () => {
 
     expect(guided).toEqual([expect.objectContaining({
       flowId: flow.id,
-      leaderAgentSessionId: leader.id,
+      leaderAgentSessionId: expect.stringMatching(/^ags-/),
       content: "补充当前 turn",
       messageId: "client-guide-1",
     })]);
@@ -1966,7 +1948,7 @@ describe("Fastify app and websocket gateway", () => {
         client_message_id: "client-guide-1",
       }),
     }));
-    expect(chatJournal.getHistory(flow.id, leader.sessionId ?? leader.id)).toEqual([
+    expect(chatJournal.getHistory(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         id: "client-guide-1",
         role: "user",
@@ -1974,9 +1956,9 @@ describe("Fastify app and websocket gateway", () => {
         metadata: expect.objectContaining({ localMessageKind: "running-guide" }),
       }),
     ]);
-    expect(store.listUserTurns(flow.id).map((turn) => turn.id)).toEqual([userTurn.id]);
+    expect(store.listWorkRuns(flow.id).map((turn) => turn.id)).toEqual([workRun.id]);
     expect(store.listEventLog(flow.id).find((event) => event.eventType === "flow.guide_message")).toEqual(
-      expect.objectContaining({ userTurnId: userTurn.id }),
+      expect.objectContaining({ workRunId: workRun.id }),
     );
   });
 
@@ -1992,10 +1974,10 @@ describe("Fastify app and websocket gateway", () => {
       projectId: null,
       ...testLeaderRuntimeBinding,
     });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-original" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-original" })!;
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-idle",
@@ -2004,7 +1986,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: "task-expert-active",
       expertId: "exp-coder",
       sessionId: "sdk-expert-active",
@@ -2040,8 +2022,9 @@ describe("Fastify app and websocket gateway", () => {
     expect(turns[0]).toEqual(expect.objectContaining({
       kind: "user",
       userMessage: "继续处理 Expert 的结果",
-      userTurnId: userTurn.id,
-      leaderAgentSessionId: leader.id,
+      workRunId: workRun.id,
+      leaderAgentSessionId: expect.stringMatching(/^ags-/),
+      leaderSessionId: leaderTranscriptChannelId(flow.id),
     }));
     expect(sent).toContainEqual(expect.objectContaining({
       type: "flow:message_ack",
@@ -2064,10 +2047,10 @@ describe("Fastify app and websocket gateway", () => {
       projectId: null,
       ...testLeaderRuntimeBinding,
     });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-original" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-original" })!;
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-streaming",
@@ -2114,7 +2097,7 @@ describe("Fastify app and websocket gateway", () => {
       log_id: "log-active-runtime",
       data: expect.objectContaining({ accepted: true, client_message_id: "client-active-runtime" }),
     }));
-    expect(store.listUserTurns(flow.id).map((turn) => turn.id)).toEqual([userTurn.id]);
+    expect(store.listWorkRuns(flow.id).map((turn) => turn.id)).toEqual([workRun.id]);
     expect(store.listQueuedMessages(flow.id)).toHaveLength(0);
   });
 
@@ -2129,10 +2112,10 @@ describe("Fastify app and websocket gateway", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-decision-input",
@@ -2141,7 +2124,7 @@ describe("Fastify app and websocket gateway", () => {
     store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
     store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-decision-input",
       sessionId: leader.sessionId ?? leader.id,
       cardType: "clarification",
@@ -2198,7 +2181,7 @@ describe("Fastify app and websocket gateway", () => {
     expect(payload.created_at).toBe((capturedTurns[0]!.currentTurnInput as { created_at: string }).created_at);
   });
 
-  it("creates one UserTurn for an ordinary flow message", async () => {
+  it("creates only a Leader AgentSession for an ordinary flow message", async () => {
     const store = createStore(":memory:");
     const app = createApp({
       logger: false,
@@ -2247,33 +2230,23 @@ describe("Fastify app and websocket gateway", () => {
         log_id: "log-message",
         data: expect.objectContaining({
           status: "active",
-          active_user_turn_id: expect.stringMatching(/^utn-/),
-          leader_agent_session_id: expect.stringMatching(/^ags-/),
+          current_work_run_id: null,
+          active_leader_agent_session_id: expect.stringMatching(/^ags-/),
+          leader_transcript_channel_id: leaderTranscriptChannelId(flow.id),
         }),
       }));
-      expect(store.listUserTurns(flow.id)).toHaveLength(1);
+      expect(store.listWorkRuns(flow.id)).toHaveLength(0);
       expect(store.listAgentSessions(flow.id)).toEqual([
         expect.objectContaining({
           expertId: "exp-leader",
-          userTurnId: null,
+          workRunId: null,
           taskId: null,
         }),
       ]);
 
-      const maybeUserTurn = await nextWsMessage(ws);
-      expect(maybeUserTurn).toEqual(expect.objectContaining({
-        type: "user_turn:event",
-        flow_id: flow.id,
-        log_id: "log-message",
-        data: expect.objectContaining({
-          status: "active",
-          trigger_message_id: expect.stringMatching(/^msg-user-/),
-        }),
-      }));
-
       expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
         type: "session:event",
-        data: expect.objectContaining({ status: "streaming", user_turn_id: null }),
+        data: expect.objectContaining({ status: "streaming", work_run_id: null }),
       }));
       expect((await nextWsMessage(ws) as { type: string; data: { event: { type: string } } }).data.event.type).toBe("turn-started");
       expect((await nextWsMessage(ws) as { type: string; data: { event: { type: string } } }).data.event.type).toBe("text-start");
@@ -2329,7 +2302,7 @@ describe("Fastify app and websocket gateway", () => {
         }),
       }));
       expect(store.listAgentSessions(flow.id)).toEqual([]);
-      expect(store.listUserTurns(flow.id)).toEqual([]);
+      expect(store.listWorkRuns(flow.id)).toEqual([]);
 
       ws.terminate();
     } finally {
@@ -2337,7 +2310,7 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("starts approved Spec work on its existing UserTurn", async () => {
+  it("starts approved Spec work on its existing WorkRun", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -2348,16 +2321,16 @@ describe("Fastify app and websocket gateway", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-run-spec" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-run-spec" })!;
     const specPlan = store.createSpecPlan({
       flowId: flow.id,
       mode: "write",
       name: "Hello World",
       overview: "Create a Hello World page.",
       content: "# Hello World",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
+    store.waitWorkRunForUserAction(workRun.id);
     const app = createApp({
       logger: false,
       store,
@@ -2383,14 +2356,14 @@ describe("Fastify app and websocket gateway", () => {
 
       const startedMessage = await nextWsMessage(ws);
       expect(startedMessage).toEqual(expect.objectContaining({
-        type: "user_turn:event",
+        type: "work_run:event",
         flow_id: flow.id,
         log_id: "log-spec-run",
         data: expect.objectContaining({
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
           work_source: "spec",
           spec_revision_id: specPlan.spec.id,
-          status: "active",
+          status: "ready",
         }),
       }));
       const message = await nextWsMessage(ws);
@@ -2401,15 +2374,15 @@ describe("Fastify app and websocket gateway", () => {
         data: {
           spec_approval_id: specPlan.approval.id,
           spec_revision_id: specPlan.spec.id,
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
           status: "approved",
         },
       });
       expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
         type: "flow:status",
-        data: expect.objectContaining({ status: "active", active_user_turn_id: userTurn.id }),
+        data: expect.objectContaining({ status: "active", current_work_run_id: workRun.id }),
       }));
-      const startedTurn = store.getUserTurn(userTurn.id)!;
+      const startedTurn = store.getWorkRun(workRun.id)!;
       const inputSnapshot = JSON.parse(startedTurn.inputSnapshotJson!) as Record<string, unknown>;
       expect(inputSnapshot.type).toBe("spec");
       expect(inputSnapshot.diff_baseline).toEqual(expect.objectContaining({
@@ -2468,7 +2441,7 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("resolves a UserTurn decision card and resumes Leader", async () => {
+  it("resolves a WorkRun decision card and resumes Leader", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -2479,10 +2452,10 @@ describe("Fastify app and websocket gateway", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader-decision",
@@ -2491,7 +2464,7 @@ describe("Fastify app and websocket gateway", () => {
     store.updateFlow(flow.id, { leaderSessionId: leader.sessionId });
     store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       cardId: "dc-decision",
       sessionId: "sdk-leader-decision",
       cardType: "generic",
@@ -2524,10 +2497,10 @@ describe("Fastify app and websocket gateway", () => {
         log_id: "log-decision",
         data: expect.objectContaining({
           card_id: "dc-decision",
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
           answers: { impl: "HTML" },
           status: "resolved",
-          leader_agent_session_id: leader.id,
+          leader_agent_session_id: expect.stringMatching(/^ags-/),
         }),
       });
       expect(store.listDecisionCards(flow.id)[0]?.status).toBe("resolved");
@@ -2538,7 +2511,7 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("cancels an active UserTurn and its unfinished tasks", async () => {
+  it("interrupts an executing WorkRun without changing unfinished Task state", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -2549,10 +2522,10 @@ describe("Fastify app and websocket gateway", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-coder",
@@ -2567,30 +2540,46 @@ describe("Fastify app and websocket gateway", () => {
       await nextWsMessage(ws);
       ws.send(JSON.stringify({
         data: {
-          type: "user_turn:cancel",
+          type: "work_run:interrupt",
           flow_id: flow.id,
-          user_turn_id: userTurn.id,
+          work_run_id: workRun.id,
+          expected_revision: workRun.revision,
+          client_action_id: "interrupt-1",
           log_id: "log-cancel",
         },
       }));
 
       expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
-        type: "task:event",
+        type: "work_run:event",
         flow_id: flow.id,
-        data: expect.objectContaining({ task_id: task.id, status: "cancelled" }),
-      }));
-      expect(await nextWsMessage(ws)).toEqual({
-        type: "user_turn:event",
-        flow_id: flow.id,
-        log_id: "log-cancel",
         data: expect.objectContaining({
-          user_turn_id: userTurn.id,
-          status: "cancelled",
-          flow_status: "idle",
+          work_run_id: workRun.id,
+          status: "interrupted",
+          revision: workRun.revision + 1,
         }),
-      });
-      expect(store.getUserTurn(userTurn.id)?.status).toBe("cancelled");
-      expect(store.getTask(task.id)?.status).toBe("cancelled");
+      }));
+      expect(store.getWorkRun(workRun.id)?.status).toBe("interrupted");
+      expect(store.getTask(task.id)?.status).toBe("pending");
+
+      ws.send(JSON.stringify({
+        data: {
+          type: "work_run:interrupt",
+          flow_id: flow.id,
+          work_run_id: workRun.id,
+          expected_revision: workRun.revision,
+          client_action_id: "interrupt-1",
+          log_id: "log-cancel-duplicate",
+        },
+      }));
+      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
+        type: "work_run:event",
+        flow_id: flow.id,
+        data: expect.objectContaining({
+          work_run_id: workRun.id,
+          status: "interrupted",
+          revision: workRun.revision + 1,
+        }),
+      }));
 
       ws.terminate();
     } finally {
@@ -2598,7 +2587,155 @@ describe("Fastify app and websocket gateway", () => {
     }
   });
 
-  it("cancels the open UserTurn and interrupts its running sessions", async () => {
+  it("rejects stale-revision and not-yet-started WorkRun interrupts", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const staleFlow = store.createFlow({ id: "flow-stale-interrupt", workspaceId: "ws-default", name: "Stale", description: "", projectId: null });
+    const executing = beginWorkRun(store, { flowId: staleFlow.id, createdBy: "user" })!;
+    const readyFlow = store.createFlow({ id: "flow-ready-interrupt", workspaceId: "ws-default", name: "Ready", description: "", projectId: null });
+    const ready = store.createWorkRun({ flowId: readyFlow.id, triggerMessageId: "msg-ready" })!;
+    const sent: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-interrupt-guards",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(store),
+      leaderRuntime: { runLeaderTurn: async () => undefined, cancelFlow: () => true },
+      expertRuntime: { cancelWorkRun: () => 0 },
+      send: async (message) => { sent.push(message); },
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "work_run:interrupt",
+      flow_id: staleFlow.id,
+      work_run_id: executing.id,
+      expected_revision: executing.revision - 1,
+      client_action_id: "interrupt-stale",
+      log_id: "log-stale",
+    } }), connection);
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "work_run:interrupt",
+      flow_id: readyFlow.id,
+      work_run_id: ready.id,
+      expected_revision: ready.revision,
+      client_action_id: "interrupt-ready",
+      log_id: "log-ready",
+    } }), connection);
+
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "system:error",
+      flow_id: staleFlow.id,
+      data: expect.objectContaining({ code: "WORK_RUN_REVISION_CONFLICT" }),
+    }));
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: "system:error",
+      flow_id: readyFlow.id,
+      data: expect.objectContaining({ code: "WORK_RUN_NOT_INTERRUPTIBLE" }),
+    }));
+    expect(store.getWorkRun(executing.id)?.status).toBe("executing");
+    expect(store.getWorkRun(ready.id)?.status).toBe("ready");
+    store.sqlite.close();
+  });
+
+  it("interrupts only the Leader AgentSession when the composer stop action is used", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({ id: "flow-leader-stop", workspaceId: "ws-default", name: "Leader stop", description: "", projectId: null });
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      expertId: "exp-leader",
+      sessionId: "sdk-leader-stop",
+      status: "streaming",
+    })!;
+    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
+    const expert = store.createAgentSession({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      expertId: "exp-coder",
+      flowExpertId: flowExpert.id,
+      sessionId: "sdk-expert-running",
+      status: "streaming",
+    })!;
+    const cancelledLeaderScopes: Array<string | undefined> = [];
+    const cancelledWorkRuns: unknown[] = [];
+    const connection: WsConnection = {
+      clientId: "client-leader-stop",
+      subscriptions: new Set(),
+      eventBus: new EventBus(),
+      store,
+      chatJournal: new ChatJournal(store),
+      leaderRuntime: {
+        runLeaderTurn: async () => undefined,
+        cancelFlow: (_flowId, workRunId) => {
+          cancelledLeaderScopes.push(workRunId);
+          return true;
+        },
+      },
+      expertRuntime: {
+        cancelWorkRun: (input) => {
+          cancelledWorkRuns.push(input);
+          return 1;
+        },
+      },
+      send: async () => undefined,
+    };
+
+    await handleWsClientMessage(JSON.stringify({ data: {
+      type: "agent_session:interrupt",
+      flow_id: flow.id,
+      agent_session_id: leader.id,
+      client_action_id: "leader-stop",
+    } }), connection);
+
+    expect(cancelledLeaderScopes).toEqual([undefined]);
+    expect(cancelledWorkRuns).toEqual([]);
+    expect(store.getAgentSession(leader.id)?.status).toBe("interrupted");
+    expect(store.getAgentSession(expert.id)?.status).toBe("streaming");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("executing");
+    store.sqlite.close();
+  });
+
+  it("can settle WorkRun Expert sessions without preempting the Leader tool response", async () => {
+    const store = createStore(":memory:");
+    store.migrate();
+    store.seedExperts();
+    const flow = store.createFlow({ id: "flow-mcp-interrupt", workspaceId: "ws-default", name: "MCP interrupt", description: "", projectId: null });
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
+    const leader = store.createAgentSession({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      expertId: "exp-leader",
+      sessionId: "sdk-leader-mcp",
+      status: "streaming",
+    })!;
+    const flowExpert = store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-coder" });
+    const expert = store.createAgentSession({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      expertId: "exp-coder",
+      flowExpertId: flowExpert.id,
+      sessionId: "sdk-expert-mcp",
+      status: "streaming",
+    })!;
+
+    await publishInterruptedSessions(
+      { store, eventBus: new EventBus(), chatJournal: new ChatJournal(store) },
+      flow.id,
+      undefined,
+      { workRunId: workRun.id, includeLeader: false },
+    );
+
+    expect(store.getAgentSession(leader.id)?.status).toBe("streaming");
+    expect(store.getAgentSession(expert.id)?.status).toBe("interrupted");
+    store.sqlite.close();
+  });
+
+  it("interrupts the open WorkRun and all of its running sessions", async () => {
     const store = createStore(":memory:");
     store.migrate();
     store.seedExperts();
@@ -2611,7 +2748,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-leader",
@@ -2619,10 +2756,11 @@ describe("Fastify app and websocket gateway", () => {
       status: "streaming",
     });
     store.updateFlow(flow.id, { leaderSessionId: "sdk-leader" });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, createdBy: "user" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, createdBy: "user" })!;
+    store.sqlite.prepare("UPDATE agent_sessions SET work_run_id = ? WHERE id = ?").run(workRun.id, leader.id);
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Verify",
       description: "Verify",
       expertId: "exp-verify",
@@ -2632,7 +2770,7 @@ describe("Fastify app and websocket gateway", () => {
     store.updateFlowExpertStatus(flowExpert.id, "streaming");
     const expertSession = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       taskId: task.id,
       expertId: "exp-verify",
       flowExpertId: flowExpert.id,
@@ -2642,7 +2780,7 @@ describe("Fastify app and websocket gateway", () => {
     });
     const plan = store.createOrchestrationPlanRevision({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Cancel plan",
       objective: "Verify cancellation",
       workKind: "change",
@@ -2669,13 +2807,13 @@ describe("Fastify app and websocket gateway", () => {
     const eventBus = new EventBus();
     eventBus.subscribe(flow.id, "test-client", (message) => sent.push(message));
     const chatJournal = new ChatJournal(store);
-    chatJournal.record(flow.id, leader.sessionId!, {
+    chatJournal.record(flow.id, leaderTranscriptChannelId(flow.id), {
       type: "start",
       messageId: "msg-leader-active",
       seq: 0,
       startedAt: new Date(Date.now() - 2_000).toISOString(),
     }, leader.id, leader.id);
-    chatJournal.record(flow.id, expertSession.sessionId!, {
+    chatJournal.record(flow.id, flowExpert.id, {
       type: "start",
       messageId: "msg-expert-active",
       seq: 0,
@@ -2695,7 +2833,7 @@ describe("Fastify app and websocket gateway", () => {
         },
       },
       expertRuntime: {
-        cancelUserTurn: (input) => {
+        cancelWorkRun: (input) => {
           cancelledExpertTurns.push(input);
           return 1;
         },
@@ -2705,24 +2843,26 @@ describe("Fastify app and websocket gateway", () => {
 
     await handleWsClientMessage(JSON.stringify({
       data: {
-        type: "user_turn:cancel",
+        type: "work_run:interrupt",
         flow_id: flow.id,
-        user_turn_id: userTurn.id,
+        work_run_id: workRun.id,
+        expected_revision: workRun.revision,
+        client_action_id: "interrupt-all",
         log_id: "log-cancel-turn",
       },
     }), connection);
 
     expect(cancelledLeaderFlows).toEqual([flow.id]);
     expect(cancelledExpertTurns).toEqual([
-      expect.objectContaining({ flowId: flow.id, userTurnId: userTurn.id }),
+      expect.objectContaining({ flowId: flow.id, workRunId: workRun.id }),
     ]);
-    expect(store.getUserTurn(userTurn.id)?.status).toBe("cancelled");
-    expect(store.getTask(task.id)?.status).toBe("cancelled");
+    expect(store.getWorkRun(workRun.id)?.status).toBe("interrupted");
+    expect(store.getTask(task.id)?.status).toBe("pending");
     expect(store.getAgentSession(leader.id)?.status).toBe("interrupted");
     expect(store.getAgentSession(expertSession.id)?.status).toBe("interrupted");
     expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
-    expect(store.getPlanRun(planRun.id)?.status).toBe("cancelled");
-    expect(store.listTranscriptEntries(flow.id, leader.id)[0]?.message).toEqual(expect.objectContaining({
+    expect(store.getPlanRun(planRun.id)?.status).toBe("running");
+    expect(store.listTranscriptEntries(flow.id, leaderTranscriptChannelId(flow.id))[0]?.message).toEqual(expect.objectContaining({
       metadata: { turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) },
     }));
     expect(store.listTranscriptEntries(flow.id, flowExpert.id)[0]?.message).toEqual(expect.objectContaining({
@@ -2732,22 +2872,14 @@ describe("Fastify app and websocket gateway", () => {
       if (event.eventType !== "agent_session.turn_completed") return false;
       return JSON.parse(event.payloadJson).turn_outcome === "interrupted";
     })).toHaveLength(2);
+    expect(sent).not.toContainEqual(expect.objectContaining({ type: "plan_run:event" }));
     expect(sent).toContainEqual(expect.objectContaining({
-      type: "plan_run:event",
-      flow_id: flow.id,
-      data: expect.objectContaining({
-        plan_run_id: planRun.id,
-        plan_revision_id: plan.revision.id,
-        status: "cancelled",
-      }),
-    }));
-    expect(sent).toContainEqual(expect.objectContaining({
-      type: "user_turn:event",
+      type: "work_run:event",
       flow_id: flow.id,
       log_id: "log-cancel-turn",
       data: expect.objectContaining({
-        user_turn_id: userTurn.id,
-        status: "cancelled",
+        work_run_id: workRun.id,
+        status: "interrupted",
       }),
     }));
   });
@@ -2767,23 +2899,23 @@ describe("Task 5 decision-card delivery", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "leader-sdk",
       displayName: "Leader",
     });
     store.updateFlow(flow.id, { leaderSessionId: "leader-sdk" });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-cancel-card" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-cancel-card" })!;
     store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       sessionId: "leader-sdk",
       cardId: "dc-1",
       cardType: "clarification",
       questions: [{ question: "选哪个？", header: "选择", multiSelect: false, options: [] }],
     });
-    store.pauseUserTurnForUserAction(userTurn.id);
+    store.waitWorkRunForUserAction(workRun.id);
     const sent: unknown[] = [];
     const capturedTurns: unknown[] = [];
     const connection: WsConnection = {
@@ -2817,7 +2949,8 @@ describe("Task 5 decision-card delivery", () => {
     expect(capturedTurns[0]).toEqual(expect.objectContaining({
       kind: "decision_cancelled",
       decisionCardId: "dc-1",
-      leaderAgentSessionId: leader.id,
+      leaderAgentSessionId: expect.stringMatching(/^ags-/),
+      leaderSessionId: leaderTranscriptChannelId(flow.id),
     }));
 
     await handleWsClientMessage(request, connection);
@@ -2838,23 +2971,23 @@ describe("Task 5 decision-card delivery", () => {
     });
     const leader = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "leader-sdk",
       displayName: "Leader",
     });
     store.updateFlow(flow.id, { leaderSessionId: "leader-sdk" });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-recover-card" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-recover-card" })!;
     store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       sessionId: "leader-sdk",
       cardId: "dc-recover",
       cardType: "clarification",
       questions: [],
     });
-    store.pauseUserTurnForUserAction(userTurn.id);
+    store.waitWorkRunForUserAction(workRun.id);
     const resolution = store.resolveDecisionCard({
       cardId: "dc-recover",
       flowId: flow.id,
@@ -2878,8 +3011,9 @@ describe("Task 5 decision-card delivery", () => {
       kind: "decision",
       decisionCardId: "dc-recover",
       decisionMessageId: "msg-decision-recover",
-      leaderAgentSessionId: leader.id,
-      leaderSessionId: "leader-sdk",
+      leaderAgentSessionId: expect.stringMatching(/^ags-/),
+      leaderSessionId: leaderTranscriptChannelId(flow.id),
+      resumeSessionId: "leader-sdk",
     }));
     expect(store.listPendingDecisionCardLeaderInputs(flow.id)).toHaveLength(0);
   });
@@ -2928,11 +3062,11 @@ describe("Task 3 Flow Expert protocol", () => {
       name: "Permission decisions",
       description: "",
     });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-permission-decisions" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-permission-decisions" })!;
     for (const cardId of ["dc-deny", "dc-cancel", "dc-ambiguous", "dc-mixed", "dc-wrong-header", "dc-array"]) {
       store.createDecisionCard({
         flowId: flow.id,
-        userTurnId: userTurn.id,
+        workRunId: workRun.id,
         cardId,
         sessionId: `tool-${cardId}`,
         cardType: "permission_confirmation",
@@ -2954,7 +3088,7 @@ describe("Task 3 Flow Expert protocol", () => {
       chatJournal: new ChatJournal(),
       leaderRuntime: { runLeaderTurn: async () => undefined },
       expertRuntime: {
-        cancelUserTurn: () => 0,
+        cancelWorkRun: () => 0,
         resolvePermissionCard: async (input) => {
           resolutions.push({ cardId: input.cardId, outcome: input.outcome });
           return true;

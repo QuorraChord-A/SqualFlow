@@ -54,7 +54,7 @@ vi.mock("../hooks/useDashboardData", () => ({
     orchestrationPlans: [],
     riskMode: "auto_edit",
     planApproval: "on",
-    userTurns: flowId ? [{ id: "turn-1", status: "waiting_user" }] : [],
+    workRuns: flowId ? [{ id: "turn-1", status: "waiting_user" }] : [],
   }),
 }));
 

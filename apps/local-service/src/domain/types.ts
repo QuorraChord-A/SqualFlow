@@ -21,7 +21,7 @@ export interface Flow {
 export interface Task {
   id: string;
   flow_id: string;
-  user_turn_id: string;
+  work_run_id: string;
   title: string;
   description: string;
   expert_id: string | null;

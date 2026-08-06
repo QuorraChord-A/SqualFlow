@@ -21,7 +21,7 @@ function createFlowStore(flowId: string) {
 }
 
 describe("MessageQueueCoordinator", () => {
-  it("drains the backend queue after a terminal UserTurn event without a frontend client", async () => {
+  it("drains the backend queue after a terminal WorkRun event without a frontend client", async () => {
     const flowId = "flow-queue-coordinator";
     const store = createFlowStore(flowId);
     const eventBus = new EventBus();
@@ -41,7 +41,7 @@ describe("MessageQueueCoordinator", () => {
     });
 
     await eventBus.publish(flowId, {
-      type: "user_turn:event",
+      type: "work_run:event",
       flow_id: flowId,
       data: { id: "turn-1", status: "completed" },
     });

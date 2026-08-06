@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_LEADER_SYSTEM_PROMPT } from "../src/db/defaultLeaderSystemPrompt.js";
 import { experts } from "../src/db/schema.js";
 import { createStore } from "../src/db/store.js";
-import { beginUserTurn } from "./helpers/userTurnTestHelpers.js";
+import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { buildFlowSnapshot } from "../src/domain/flowSnapshot.js";
 
 const dirs: string[] = [];
@@ -45,14 +45,14 @@ function markRuntimeMessageProtocolV2(store: ReturnType<typeof createStore>) {
 
 function createFlowWithRuntimeRows(store: ReturnType<typeof createStore>, flowId: string) {
   const flow = store.createFlow({ id: flowId, workspaceId: "ws-default", name: flowId, description: "", projectId: null });
-  const userTurn = beginUserTurn(store, {
+  const workRun = beginWorkRun(store, {
     flowId: flow.id,
     inputSnapshotJson: "{}",
     createdBy: "user",
   })!;
   const task = store.createTask({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     title: "Research",
     description: "Research task",
     expertId: "exp-research",
@@ -61,7 +61,7 @@ function createFlowWithRuntimeRows(store: ReturnType<typeof createStore>, flowId
   store.getOrCreateFlowExpert({ flowId: flow.id, expertId: "exp-research" });
   store.createAgentSession({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     taskId: task.id,
     expertId: "exp-research",
     sessionId: "sdk-session",
@@ -69,7 +69,7 @@ function createFlowWithRuntimeRows(store: ReturnType<typeof createStore>, flowId
   });
   store.createDecisionCard({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     cardId: `dc-${flow.id}`,
     sessionId: "sdk-session",
     cardType: "generic",
@@ -85,7 +85,7 @@ function createFlowWithRuntimeRows(store: ReturnType<typeof createStore>, flowId
   });
   store.createArtifact({
     flowId: flow.id,
-    userTurnId: userTurn.id,
+    workRunId: workRun.id,
     taskId: task.id,
     type: "spec",
     title: "Spec",
@@ -101,14 +101,14 @@ afterEach(() => {
 });
 
 describe("store", () => {
-  it("does not create a UserTurn when a flow is created", () => {
+  it("does not create a WorkRun when a flow is created", () => {
     const store = tempStore();
     store.migrate();
 
     const flow = store.createFlow({ id: "flow-idle", workspaceId: "ws-default", name: "Idle", description: "", projectId: null });
 
     expect(flow.status).toBe("ready");
-    expect(store.listUserTurns(flow.id)).toEqual([]);
+    expect(store.listWorkRuns(flow.id)).toEqual([]);
   });
 
   it("persists flow-scoped leader runtime selection ids", () => {
@@ -142,27 +142,97 @@ describe("store", () => {
     }));
   });
 
-  it("tracks product user turn active duration across wait and resume", () => {
+  it("tracks WorkRun execution duration across wait and resume", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-turn", workspaceId: "ws-default", name: "Turn", description: "", projectId: null });
 
-    const turn = store.createUserTurn({
+    const turn = store.createWorkRun({
       flowId: flow.id,
       triggerMessageId: "msg-user-1",
       startedAt: "2026-06-26T10:00:00.000Z",
     })!;
-    const waiting = store.pauseUserTurnForUserAction(turn.id, "2026-06-26T10:00:03.000Z")!;
+    store.sqlite.prepare(`
+      UPDATE work_runs
+      SET status = 'executing', execution_started_at = ?, active_started_at = ?
+      WHERE id = ?
+    `).run("2026-06-26T10:00:00.000Z", "2026-06-26T10:00:00.000Z", turn.id);
+    const waiting = store.waitWorkRunForUserAction(turn.id, "2026-06-26T10:00:03.000Z")!;
     expect(waiting.status).toBe("waiting_user");
     expect(waiting.activeDurationMs).toBe(3000);
 
-    const resumed = store.resumeUserTurn(turn.id, "2026-06-26T10:00:10.000Z")!;
-    expect(resumed.status).toBe("active");
+    const resumed = store.resumeWorkRun(turn.id, "2026-06-26T10:00:10.000Z")!;
+    expect(resumed.status).toBe("executing");
     expect(resumed.activeDurationMs).toBe(3000);
 
-    const completed = store.completeUserTurn(turn.id, "2026-06-26T10:00:12.000Z")!;
+    const completed = store.completeWorkRun(turn.id, "2026-06-26T10:00:12.000Z")!;
     expect(completed.status).toBe("completed");
     expect(completed.activeDurationMs).toBe(5000);
+  });
+
+  it("interrupts WorkRuns with revision guards and rejects stale Task writes", () => {
+    const store = tempStore();
+    store.migrate();
+    store.seedExperts();
+    const project = store.createProject({ id: "project-interrupt", name: "Interrupt", localPath: "/tmp/project-interrupt" });
+    const flow = store.createFlow({ id: "flow-interrupt", workspaceId: "ws-default", name: "Interrupt", description: "", projectId: project.id });
+    const ready = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-ready" })!;
+    store.startWorkRunWork({
+      flowId: flow.id,
+      workRunId: ready.id,
+      workSource: "direct_message",
+      targetProjectId: project.id,
+      inputSnapshotJson: "{}",
+    });
+
+    expect(store.interruptWorkRun({
+      flowId: flow.id,
+      workRunId: ready.id,
+      expectedRevision: ready.revision,
+    }).outcome).toBe("not_interruptible");
+
+    const task = store.createTask({
+      flowId: flow.id,
+      workRunId: ready.id,
+      title: "Build",
+      description: "Build",
+      expertId: "exp-coder",
+    })!;
+
+    store.sqlite.prepare(`
+      UPDATE work_runs
+      SET status = 'executing', execution_started_at = ?, active_started_at = ?
+      WHERE id = ?
+    `).run("2026-06-26T10:00:00.000Z", "2026-06-26T10:00:00.000Z", ready.id);
+    const executing = store.getWorkRun(ready.id)!;
+
+    expect(store.interruptWorkRun({
+      flowId: flow.id,
+      workRunId: executing.id,
+      expectedRevision: executing.revision - 1,
+    }).outcome).toBe("revision_conflict");
+    expect(store.getWorkRun(executing.id)?.status).toBe("executing");
+
+    const interrupted = store.interruptWorkRun({
+      flowId: flow.id,
+      workRunId: executing.id,
+      expectedRevision: executing.revision,
+    });
+    expect(interrupted).toEqual(expect.objectContaining({
+      outcome: "interrupted",
+      workRun: expect.objectContaining({ status: "interrupted", revision: executing.revision + 1 }),
+    }));
+    expect(store.interruptWorkRun({
+      flowId: flow.id,
+      workRunId: executing.id,
+      expectedRevision: executing.revision,
+    }).outcome).toBe("already_interrupted");
+    expect(store.updateTask(task.id, { progress: "late write", expectedRevision: task.revision })).toBeUndefined();
+
+    const resumed = store.resumeWorkRun(executing.id)!;
+    expect(resumed.status).toBe("executing");
+    expect(resumed.revision).toBe(executing.revision + 2);
+    expect(store.getTask(task.id)?.status).toBe("pending");
   });
 
   it("migrates legacy project rows that do not have updated_at", () => {
@@ -193,7 +263,7 @@ describe("store", () => {
     ]);
   });
 
-  it("migrates legacy flow rows with an unpinned default", () => {
+  it("clears legacy Flow rows during the incompatible execution-model upgrade", () => {
     const store = tempStore();
     store.sqlite.exec(`
       CREATE TABLE flows (
@@ -220,7 +290,7 @@ describe("store", () => {
     store.migrate();
 
     expect(columnNames(store, "flows")).not.toEqual(expect.arrayContaining(["workspace_id"]));
-    expect(store.getFlow("flow-legacy")).toEqual(expect.objectContaining({ isPinned: 0 }));
+    expect(store.getFlow("flow-legacy")).toBeUndefined();
   });
 
   it("clears pre-canonical Flows instead of retaining a mixed history architecture", () => {
@@ -236,7 +306,7 @@ describe("store", () => {
       .toEqual({ value: "2" });
   });
 
-  it("requires decision cards to belong to an active UserTurn", () => {
+  it("requires decision cards to belong to an active WorkRun", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-card", workspaceId: "ws-default", name: "Card", description: "", projectId: null });
@@ -247,20 +317,20 @@ describe("store", () => {
       cardType: "SpecApprovalCard",
       questions: [{ header: "审批", question: "通过吗？", multiSelect: false, options: [{ label: "是", description: "通过" }, { label: "否", description: "拒绝" }] }],
     })).toBeUndefined();
-    const userTurn = beginUserTurn(store, { flowId: flow.id })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id })!;
     const card = store.createDecisionCard({
       flowId: flow.id,
-      userTurnId: userTurn.id,
-      cardId: "dc-user-turn",
+      workRunId: workRun.id,
+      cardId: "dc-work-run",
       sessionId: "session",
       cardType: "SpecApprovalCard",
       questions: [{ header: "审批", question: "通过吗？", multiSelect: false, options: [{ label: "是", description: "通过" }, { label: "否", description: "拒绝" }] }],
     })!;
-    expect(card.userTurnId).toBe(userTurn.id);
+    expect(card.workRunId).toBe(workRun.id);
     expect(card.cardType).toBe("SpecApprovalCard");
   });
 
-  it("migrates legacy runtime tables to include UserTurn ownership columns", () => {
+  it("replaces legacy runtime tables with the WorkRun execution schema", () => {
     const store = tempStore();
     store.sqlite.exec(`
       CREATE TABLE agent_sessions (
@@ -299,38 +369,39 @@ describe("store", () => {
     store.migrate();
 
     expect(columnNames(store, "agent_sessions")).toEqual(expect.arrayContaining([
-      "user_turn_id",
+      "work_run_id",
       "task_id",
+      "runtime_reasoning_effort",
       "display_name",
       "resume_from_agent_session_id",
       "status",
       "updated_at",
     ]));
     expect(columnNames(store, "decision_cards")).toEqual(expect.arrayContaining([
-      "user_turn_id",
+      "work_run_id",
       "session_id",
       "card_type",
       "resolved_at",
     ]));
     expect(columnNames(store, "artifacts")).toEqual(expect.arrayContaining([
-      "user_turn_id",
+      "work_run_id",
       "task_id",
       "source_agent_session_id",
       "updated_at",
     ]));
     expect(columnNames(store, "event_log")).toEqual(expect.arrayContaining([
-      "user_turn_id",
+      "work_run_id",
       "task_id",
       "agent_session_id",
     ]));
   });
 
-  it("uses UserTurn task tables without legacy runtime tables", () => {
+  it("uses WorkRun task tables without legacy runtime tables", () => {
     const store = tempStore();
     store.migrate();
 
     expect(tableNames(store)).toEqual(expect.arrayContaining([
-      "user_turns",
+      "work_runs",
       "tasks",
       "event_log",
       "spec_revisions",
@@ -344,7 +415,7 @@ describe("store", () => {
     ]));
 
     expect(tableNames(store)).not.toContain("executions");
-    expect(columnNames(store, "user_turns")).toEqual(expect.arrayContaining([
+    expect(columnNames(store, "work_runs")).toEqual(expect.arrayContaining([
       "id",
       "flow_id",
       "spec_revision_id",
@@ -361,7 +432,7 @@ describe("store", () => {
     expect(columnNames(store, "tasks")).toEqual(expect.arrayContaining([
       "id",
       "flow_id",
-      "user_turn_id",
+      "work_run_id",
       "title",
       "description",
       "expert_id",
@@ -390,13 +461,13 @@ describe("store", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: "/tmp/flow-task-status-migration",
     })!;
     const readyTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Ready",
       description: "Ready",
       expertId: "exp-frontend",
@@ -404,7 +475,7 @@ describe("store", () => {
     })!;
     const runningTask = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Running",
       description: "Running",
       expertId: "exp-backend",
@@ -451,7 +522,7 @@ describe("store", () => {
     expect(store.markSpecRevisionExecuted(first.id)).toBeUndefined();
   });
 
-  it("starts approved Spec work on its existing UserTurn", () => {
+  it("starts approved Spec work on its existing WorkRun", () => {
     const store = tempStore();
     store.migrate();
     const project = store.createProject({ workspaceId: "ws-default", name: "Project", localPath: "/tmp/project" });
@@ -463,16 +534,16 @@ describe("store", () => {
       sourceAgentSessionId: "ags-leader",
     })!;
 
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-spec" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-spec" })!;
     const approval = store.createSpecApproval({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       specRevisionId: spec.id,
       fileName: spec.fileName,
       overview: spec.overview,
     })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
-    const started = store.runApprovedSpecForUserTurn({
+    store.waitWorkRunForUserAction(workRun.id);
+    const started = store.runApprovedSpecForWorkRun({
       flowId: flow.id,
       specApprovalId: approval.id,
       specRevisionId: spec.id,
@@ -480,41 +551,49 @@ describe("store", () => {
       inputSnapshotJson: JSON.stringify({ prompt: "build login" }),
     })!;
 
-    expect(started.id).toBe(userTurn.id);
-    expect(started.status).toBe("active");
+    expect(started.id).toBe(workRun.id);
+    expect(started.status).toBe("ready");
     expect(started.specRevisionId).toBe(spec.id);
     expect(started.targetProjectId).toBe(project.id);
     expect(started.workRootPath).toBe("/tmp/project");
-    expect(store.getFlow(flow.id)?.status).toBe("active");
+    expect(store.getFlow(flow.id)?.status).toBe("ready");
     expect(store.getSpecRevision(spec.id)?.status).toBe("executed");
 
-    expect(store.completeUserTurn(started.id)?.status).toBe("completed");
+    const task = store.createTask({
+      flowId: flow.id,
+      workRunId: started.id,
+      title: "Build spec",
+      description: "Build spec",
+    })!;
+    store.startTask(task.id, "ags-spec");
+    store.completeTask(task.id);
+    expect(store.completeWorkRun(started.id)?.status).toBe("completed");
     expect(store.getFlow(flow.id)?.status).toBe("idle");
-    expect(store.listUserTurns(flow.id).map((row) => row.id)).toEqual([started.id]);
+    expect(store.listWorkRuns(flow.id).map((row) => row.id)).toEqual([started.id]);
   });
 
-  it("allows only one open UserTurn per flow", () => {
+  it("allows only one open WorkRun per flow", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-one-active", workspaceId: "ws-default", name: "One", description: "", projectId: null });
 
-    const first = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-first" });
-    const second = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-second" });
+    const first = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-first" });
+    const second = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-second" });
 
-    expect(first?.status).toBe("active");
+    expect(first?.status).toBe("ready");
     expect(second).toBeUndefined();
-    expect(store.listUserTurns(flow.id)).toHaveLength(1);
+    expect(store.listWorkRuns(flow.id)).toHaveLength(1);
   });
 
   it("creates task dependencies and unlocks downstream tasks when dependencies complete", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-dag", workspaceId: "ws-default", name: "DAG", description: "", projectId: null });
-    const userTurn = beginUserTurn(store, { flowId: flow.id, sandboxPath: "/tmp/flow-dag" })!;
+    const workRun = beginWorkRun(store, { flowId: flow.id, sandboxPath: "/tmp/flow-dag" })!;
 
     const implement = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Implement login",
       description: "Create login UI",
       expertId: "exp-frontend",
@@ -524,7 +603,7 @@ describe("store", () => {
     })!;
     const verify = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Verify login",
       description: "Check login behavior",
       expertId: "exp-verify",
@@ -536,13 +615,13 @@ describe("store", () => {
     expect(implement.status).toBe("pending");
     expect(verify.status).toBe("pending");
     expect(store.listTaskDependencies(verify.id)).toEqual([implement.id]);
-    expect(store.listRunnableTasks(userTurn.id).map((task) => task.id)).toEqual([implement.id]);
+    expect(store.listRunnableTasks(workRun.id).map((task) => task.id)).toEqual([implement.id]);
 
     expect(store.startTask(implement.id, "ags-implement")?.status).toBe("in_progress");
     store.completeTask(implement.id, JSON.stringify({ summary: "done" }));
 
     expect(store.getTask(verify.id)?.status).toBe("pending");
-    expect(store.listRunnableTasks(userTurn.id).map((task) => task.id)).toEqual([verify.id]);
+    expect(store.listRunnableTasks(workRun.id).map((task) => task.id)).toEqual([verify.id]);
   });
 
   it("updates task fields through the platform task API", () => {
@@ -555,13 +634,13 @@ describe("store", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: "/tmp/flow-update-task",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Old",
       description: "Old desc",
       expertId: "exp-frontend",
@@ -603,13 +682,13 @@ describe("store", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: "/tmp/flow-transition",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "T",
       description: "T",
       dependsOnTaskIds: [],
@@ -648,20 +727,20 @@ describe("store", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: "/tmp/flow-block-target",
     })!;
     const pending = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Pending",
       description: "Pending",
       dependsOnTaskIds: [],
     })!;
     const started = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Started",
       description: "Started",
       dependsOnTaskIds: [],
@@ -682,13 +761,13 @@ describe("store", () => {
       description: "",
       projectId: null,
     });
-    const userTurn = beginUserTurn(store, {
+    const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: "/tmp/flow-assigned-task",
     })!;
     const task = store.createTask({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Build",
       description: "Build",
       expertId: "exp-frontend",
@@ -796,6 +875,9 @@ describe("store", () => {
       "mcp__squadflow-leader__dispatch_agent",
       "mcp__squadflow-leader__cancel_agent",
       "mcp__squadflow-leader__send_message",
+      "mcp__squadflow-leader__interrupt_work_run",
+      "mcp__squadflow-leader__resume_work_run",
+      "mcp__squadflow-leader__cancel_work_run",
       "mcp__squadflow-browser__browser_navigate",
       "mcp__squadflow-browser__browser_reload",
       "mcp__squadflow-browser__browser_snapshot",
@@ -877,6 +959,7 @@ describe("store", () => {
       "runtime_sdk",
       "runtime_config_id",
       "runtime_model_id",
+      "runtime_reasoning_effort",
     ]));
   });
 
@@ -886,7 +969,7 @@ describe("store", () => {
 
     expect(columnNames(store, "flows")).toEqual(expect.arrayContaining(["legacy_spec_flow"]));
     expect(columnNames(store, "flows")).not.toContain("agent_mode");
-    expect(columnNames(store, "user_turns")).toEqual(expect.arrayContaining(["work_source", "work_root_path"]));
+    expect(columnNames(store, "work_runs")).toEqual(expect.arrayContaining(["work_source", "work_root_path"]));
     expect(columnNames(store, "spec_revisions")).toEqual(expect.arrayContaining(["overview", "file_name"]));
     expect(tableNames(store)).toEqual(expect.arrayContaining(["spec_approvals"]));
     expect(columnNames(store, "tasks")).toEqual(expect.arrayContaining(["metadata_json"]));
@@ -896,7 +979,7 @@ describe("store", () => {
     expect(taskExpert?.notnull).toBe(0);
   });
 
-  it("migrates legacy approval policies into independent Flow modes and removes legacy tables", () => {
+  it("clears legacy approval-policy Flows and removes obsolete tables", () => {
     const store = tempStore();
     store.sqlite.exec(`
       CREATE TABLE flows (
@@ -913,13 +996,13 @@ describe("store", () => {
         updated_at TEXT NOT NULL, PRIMARY KEY(scope_type, scope_id)
       );
       CREATE TABLE scoped_authorizations (
-        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL,
         plan_revision_id TEXT NOT NULL, operation_type TEXT NOT NULL,
         scope_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'active',
         created_at TEXT NOT NULL, expires_at TEXT
       );
       CREATE TABLE plan_approvals (
-        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL,
+        id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL,
         plan_revision_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending',
         policy TEXT NOT NULL DEFAULT 'smart', reason_json TEXT NOT NULL DEFAULT '[]',
         resolution_action_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT
@@ -937,9 +1020,9 @@ describe("store", () => {
 
     store.migrate();
 
-    expect(store.getFlow("flow-manual")).toEqual(expect.objectContaining({ riskMode: "auto_edit", planApproval: "on" }));
-    expect(store.getFlow("flow-smart")).toEqual(expect.objectContaining({ riskMode: "auto_edit", planApproval: "on" }));
-    expect(store.getFlow("flow-auto")).toEqual(expect.objectContaining({ riskMode: "full_access", planApproval: "off" }));
+    expect(store.getFlow("flow-manual")).toBeUndefined();
+    expect(store.getFlow("flow-smart")).toBeUndefined();
+    expect(store.getFlow("flow-auto")).toBeUndefined();
     expect(tableNames(store)).not.toEqual(expect.arrayContaining(["orchestration_settings", "scoped_authorizations"]));
     expect(columnNames(store, "plan_approvals")).not.toEqual(expect.arrayContaining(["policy", "reason_json"]));
   });
@@ -974,11 +1057,11 @@ describe("store", () => {
     expect(store.getPlanApprovalMode(otherFlow.id)).toBe("on");
   });
 
-  it("persists a message-level Spec request on the UserTurn until Spec starts", () => {
+  it("persists a message-level Spec request on the WorkRun until Spec starts", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-spec-request", name: "Spec request", description: "", projectId: null });
-    const turn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-spec-request", specRequested: true });
+    const turn = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-spec-request", specRequested: true });
 
     expect(JSON.parse(turn!.inputSnapshotJson)).toEqual({
       type: "direct_message",
@@ -991,10 +1074,10 @@ describe("store", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-authz", workspaceId: "ws-default", name: "Authz", description: "", projectId: null });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-authz" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-authz" })!;
     const created = store.createOrchestrationPlanRevision({
       flowId: flow.id,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
       title: "Scoped write",
       objective: "Write only src",
       workKind: "change",
@@ -1024,7 +1107,7 @@ describe("store", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-spec", workspaceId: "ws-default", name: "Spec", description: "", projectId: null });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-spec" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-spec" })!;
     const spec = store.createSpecRevision({
       flowId: flow.id,
       name: "Hello World",
@@ -1037,7 +1120,7 @@ describe("store", () => {
       specRevisionId: spec.id,
       fileName: spec.fileName,
       overview: spec.overview,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     })!;
 
     expect(approval).toEqual(expect.objectContaining({
@@ -1054,14 +1137,14 @@ describe("store", () => {
     const store = tempStore();
     store.migrate();
     const flow = store.createFlow({ id: "flow-plan", workspaceId: "ws-default", name: "Plan", description: "", projectId: null });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-plan" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-plan" })!;
     const first = store.createSpecPlan({
       flowId: flow.id,
       mode: "write",
       name: "Hello World",
       overview: "First version.",
       content: "# First",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     })!;
     store.resolveSpecApproval(first.approval.id, "approved");
     store.markSpecRevisionExecuted(first.spec.id);
@@ -1071,7 +1154,7 @@ describe("store", () => {
       mode: "rewrite",
       overview: "Second version.",
       content: "# Second",
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     })!;
 
     expect(store.getSpecRevision(first.spec.id)?.status).toBe("executed");
@@ -1088,7 +1171,7 @@ describe("store", () => {
     store.migrate();
     const flow = store.createFlow({ id: "flow-snapshot", workspaceId: "ws-default", name: "Snapshot", description: "", projectId: null });
     store.sqlite.prepare("UPDATE flows SET legacy_spec_flow = 1 WHERE id = ?").run(flow.id);
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-snapshot" })!;
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-snapshot" })!;
     const spec = store.createSpecRevision({
       flowId: flow.id,
       name: "Hello World",
@@ -1100,7 +1183,7 @@ describe("store", () => {
       specRevisionId: spec.id,
       fileName: spec.fileName,
       overview: spec.overview,
-      userTurnId: userTurn.id,
+      workRunId: workRun.id,
     })!;
 
     const snapshot = buildFlowSnapshot(store, flow.id);
@@ -1129,7 +1212,7 @@ describe("store", () => {
     expect(store.deleteFlow(flow.id)).toBe(true);
 
     expect(store.getFlow(flow.id)).toBeUndefined();
-    expect(store.listUserTurns(flow.id)).toEqual([]);
+    expect(store.listWorkRuns(flow.id)).toEqual([]);
     expect(store.listTasks(flow.id)).toEqual([]);
     expect(store.listAgentSessions(flow.id)).toEqual([]);
     expect(store.listFlowExperts(flow.id)).toEqual([]);
@@ -1149,7 +1232,7 @@ describe("store", () => {
 
     expect(store.listFlows()).toEqual([]);
     for (const flow of [first, second]) {
-      expect(store.listUserTurns(flow.id)).toEqual([]);
+      expect(store.listWorkRuns(flow.id)).toEqual([]);
       expect(store.listTasks(flow.id)).toEqual([]);
       expect(store.listAgentSessions(flow.id)).toEqual([]);
       expect(store.listFlowExperts(flow.id)).toEqual([]);
@@ -1166,7 +1249,7 @@ describe("store", () => {
     const flow = store.createFlow({ id: "flow-context-cache", workspaceId: "ws-default", name: "Context Cache", description: "", projectId: null });
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-context-cache",
@@ -1229,7 +1312,7 @@ describe("store", () => {
     const flow = store.createFlow({ id: "flow-context-cache-unknown", workspaceId: "ws-default", name: "Context Cache Unknown", description: "", projectId: null });
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-context-cache-unknown",
@@ -1318,7 +1401,7 @@ describe("store", () => {
     const flow = store.createFlow({ id: "flow-context-cache-zero", workspaceId: "ws-default", name: "Context Cache Zero", description: "", projectId: null });
     const session = store.createAgentSession({
       flowId: flow.id,
-      userTurnId: null,
+      workRunId: null,
       taskId: null,
       expertId: "exp-leader",
       sessionId: "sdk-context-cache-zero",

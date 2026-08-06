@@ -33,6 +33,15 @@ export function parseMcpToolName(toolName: string): { server: string; tool: stri
   return match ? { server: match[1], tool: match[2] } : null;
 }
 
+export function isMcpToolNamed(
+  toolName: string,
+  expectedTool: string,
+  metadataTool?: string,
+): boolean {
+  if (metadataTool) return metadataTool === expectedTool;
+  return parseMcpToolName(toolName)?.tool === expectedTool;
+}
+
 export function parseToolPayload(value: unknown, depth = 0): unknown {
   if (depth >= 3 || typeof value !== "string") return value;
   try {
@@ -48,7 +57,7 @@ function unwrapContent(output: unknown): unknown {
     const mcp = record.mcp;
     if (mcp && typeof mcp === "object" && !Array.isArray(mcp)) {
       const mcpRecord = mcp as Record<string, unknown>;
-      if (mcpRecord.structuredContent !== undefined) return mcpRecord.structuredContent;
+      if (mcpRecord.structuredContent != null) return mcpRecord.structuredContent;
       if (Array.isArray(mcpRecord.content)) {
         const text = mcpRecord.content
           .filter((item) => item && typeof item === "object" && (item as Record<string, unknown>).type === "text")
@@ -429,7 +438,7 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
 
   switch (kind) {
     case "get_context":
-      push("当前轮", parsedObj?.active_user_turn_id);
+      push("当前工作", parsedObj?.current_work_run_id);
       push("动作", parsedObj?.pending_action);
       break;
     case "ask_user":

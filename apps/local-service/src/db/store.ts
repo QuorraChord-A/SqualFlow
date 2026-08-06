@@ -27,7 +27,7 @@ import {
   specRevisions,
   tasks,
   taskDependencies,
-  userTurns,
+  workRuns,
 } from "./schema.js";
 import { seedExpertsIntoStore } from "./seedExperts.js";
 import type { ContextUsageCategory } from "../domain/contextUsage.js";
@@ -100,6 +100,26 @@ export type SubmissionAcceptance =
   | { outcome: "conflict"; submission: CanonicalSubmission };
 
 type CanonicalSubmissionRow = Omit<CanonicalSubmission, "payload"> & { payloadJson: string };
+
+export type WorkRunStatus =
+  | "ready"
+  | "executing"
+  | "waiting_user"
+  | "interrupted"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type AgentSessionStatus = "queued" | "streaming" | "completed" | "failed" | "interrupted";
+
+const OPEN_WORK_RUN_STATUSES = new Set<WorkRunStatus>([
+  "ready",
+  "executing",
+  "waiting_user",
+  "interrupted",
+]);
+
+const ACTIVE_AGENT_SESSION_STATUSES = new Set<AgentSessionStatus>(["queued", "streaming"]);
 
 function canonicalSubmissionFromRow(row: CanonicalSubmissionRow): CanonicalSubmission {
   const { payloadJson, ...submission } = row;
@@ -255,7 +275,7 @@ function rebuildPlanApprovalsWithoutLegacyPolicy(sqlite: ReturnType<typeof openD
     CREATE TABLE plan_approvals_tmp (
       id TEXT PRIMARY KEY,
       flow_id TEXT NOT NULL,
-      user_turn_id TEXT NOT NULL,
+      work_run_id TEXT NOT NULL,
       plan_revision_id TEXT NOT NULL UNIQUE,
       status TEXT NOT NULL DEFAULT 'pending',
       resolution_action_id TEXT,
@@ -263,11 +283,11 @@ function rebuildPlanApprovalsWithoutLegacyPolicy(sqlite: ReturnType<typeof openD
       resolved_at TEXT
     );
     INSERT INTO plan_approvals_tmp (
-      id, flow_id, user_turn_id, plan_revision_id, status,
+      id, flow_id, work_run_id, plan_revision_id, status,
       resolution_action_id, created_at, resolved_at
     )
     SELECT
-      id, flow_id, user_turn_id, plan_revision_id, status,
+      id, flow_id, work_run_id, plan_revision_id, status,
       resolution_action_id, created_at, resolved_at
     FROM plan_approvals;
     DROP TABLE plan_approvals;
@@ -337,6 +357,14 @@ function rebuildFlowsWithoutWorkspace(sqlite: ReturnType<typeof openDatabase>["s
 
 export function createStore(databasePath: string) {
   const { sqlite, db } = openDatabase(databasePath);
+  const syncFlowExecutionStatus = (flowId: string, timestamp = now()) => {
+    const hasActiveSession = db.select().from(agentSessions).where(eq(agentSessions.flowId, flowId)).all()
+      .some((session) => ACTIVE_AGENT_SESSION_STATUSES.has(session.status as AgentSessionStatus));
+    db.update(flows)
+      .set({ status: hasActiveSession ? "active" : "idle", updatedAt: timestamp })
+      .where(eq(flows.id, flowId))
+      .run();
+  };
   const clearAllFlowData = () => {
     sqlite.exec(`
       DELETE FROM chat_queue_items;
@@ -351,8 +379,8 @@ export function createStore(databasePath: string) {
       DELETE FROM decision_cards;
       DELETE FROM decision_card_leader_inputs;
       DELETE FROM flow_read_states;
-      DELETE FROM user_turn_reviews;
-      DELETE FROM user_turns;
+      DELETE FROM work_run_reviews;
+      DELETE FROM work_runs;
       DELETE FROM artifacts;
       DELETE FROM spec_revisions;
       DELETE FROM spec_approvals;
@@ -378,6 +406,66 @@ export function createStore(databasePath: string) {
         sessions: Array<{ runtimeSdk: string | null; sessionId: string }>,
       ) => void;
     } = {}) {
+      sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS app_metadata (
+          key TEXT PRIMARY KEY,
+          value TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+      `);
+      const executionModelKey = "execution_model_version";
+      const executionModelVersion = sqlite
+        .prepare("SELECT value FROM app_metadata WHERE key = ?")
+        .get(executionModelKey) as { value?: string } | undefined;
+      if (executionModelVersion?.value !== "3") {
+        const nativeSessions = hasTable(sqlite, "agent_sessions")
+          && hasColumn(sqlite, "agent_sessions", "session_id")
+          ? sqlite.prepare(`
+              SELECT ${hasColumn(sqlite, "agent_sessions", "runtime_sdk") ? "runtime_sdk" : "NULL"} AS runtimeSdk,
+                     session_id AS sessionId
+              FROM agent_sessions
+              WHERE session_id IS NOT NULL AND session_id <> ''
+            `).all() as Array<{ runtimeSdk: string | null; sessionId: string }>
+          : [];
+        options.beforeRuntimeMessageProtocolReset?.(nativeSessions);
+        sqlite.transaction(() => {
+          sqlite.exec(`
+            DROP TABLE IF EXISTS chat_queue_items;
+            DROP TABLE IF EXISTS chat_submissions;
+            DROP TABLE IF EXISTS chat_messages;
+            DROP TABLE IF EXISTS chat_transcript_channels;
+            DROP TABLE IF EXISTS task_dependencies;
+            DROP TABLE IF EXISTS tasks;
+            DROP TABLE IF EXISTS agent_sessions;
+            DROP TABLE IF EXISTS agent_context_usage_snapshots;
+            DROP TABLE IF EXISTS flow_experts;
+            DROP TABLE IF EXISTS decision_cards;
+            DROP TABLE IF EXISTS decision_card_leader_inputs;
+            DROP TABLE IF EXISTS flow_read_states;
+            DROP TABLE IF EXISTS work_run_reviews;
+            DROP TABLE IF EXISTS user_turn_reviews;
+            DROP TABLE IF EXISTS work_runs;
+            DROP TABLE IF EXISTS user_turns;
+            DROP TABLE IF EXISTS artifacts;
+            DROP TABLE IF EXISTS spec_revisions;
+            DROP TABLE IF EXISTS spec_approvals;
+            DROP TABLE IF EXISTS event_log;
+            DROP TABLE IF EXISTS plan_node_tasks;
+            DROP TABLE IF EXISTS plan_dependencies;
+            DROP TABLE IF EXISTS plan_nodes;
+            DROP TABLE IF EXISTS plan_feedback;
+            DROP TABLE IF EXISTS plan_approvals;
+            DROP TABLE IF EXISTS plan_runs;
+            DROP TABLE IF EXISTS plan_revisions;
+            DROP TABLE IF EXISTS orchestration_plans;
+            DROP TABLE IF EXISTS flows;
+          `);
+          sqlite.prepare(`
+            INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+          `).run(executionModelKey, "3", now());
+        })();
+      }
       if (hasTable(sqlite, "chat_messages") && !hasColumn(sqlite, "chat_messages", "flow_id")) {
         sqlite.exec("DROP TABLE chat_messages");
       }
@@ -395,7 +483,7 @@ export function createStore(databasePath: string) {
         CREATE TABLE IF NOT EXISTS tasks (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
-          user_turn_id TEXT NOT NULL,
+          work_run_id TEXT NOT NULL,
           title TEXT NOT NULL,
           description TEXT NOT NULL,
           expert_id TEXT,
@@ -434,7 +522,7 @@ export function createStore(databasePath: string) {
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
           spec_revision_id TEXT NOT NULL,
-          user_turn_id TEXT,
+          work_run_id TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
           file_name TEXT NOT NULL,
           overview TEXT NOT NULL DEFAULT '',
@@ -447,19 +535,19 @@ export function createStore(databasePath: string) {
           created_at TEXT NOT NULL,
           PRIMARY KEY (task_id, depends_on_task_id)
         );
-        CREATE TABLE IF NOT EXISTS orchestration_plans (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL UNIQUE, spec_revision_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS orchestration_plans (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL UNIQUE, spec_revision_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS plan_revisions (id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, revision_number INTEGER NOT NULL, parent_revision_id TEXT, source_feedback_message_id TEXT, status TEXT NOT NULL DEFAULT 'generating', title TEXT NOT NULL, objective TEXT NOT NULL DEFAULT '', work_kind TEXT NOT NULL DEFAULT 'change', risk_level TEXT NOT NULL DEFAULT 'medium', lint_json TEXT NOT NULL DEFAULT '[]', diff_json TEXT NOT NULL DEFAULT '{}', source_agent_session_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, approved_at TEXT, superseded_at TEXT, UNIQUE(plan_id, revision_number));
         CREATE TABLE IF NOT EXISTS plan_nodes (id TEXT PRIMARY KEY, plan_revision_id TEXT NOT NULL, stable_key TEXT NOT NULL, expert_id TEXT NOT NULL, title TEXT NOT NULL, description TEXT NOT NULL, acceptance_criteria_json TEXT NOT NULL DEFAULT '[]', risk_tags_json TEXT NOT NULL DEFAULT '[]', side_effects_json TEXT NOT NULL DEFAULT '[]', resource_keys_json TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, UNIQUE(plan_revision_id, stable_key));
         CREATE TABLE IF NOT EXISTS plan_dependencies (plan_revision_id TEXT NOT NULL, node_id TEXT NOT NULL, depends_on_node_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(plan_revision_id, node_id, depends_on_node_id));
-        CREATE TABLE IF NOT EXISTS plan_approvals (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', resolution_action_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
-        CREATE TABLE IF NOT EXISTS plan_feedback (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL, plan_node_id TEXT, source_message_id TEXT NOT NULL, marker_number INTEGER NOT NULL, comment TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', resolution_note TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
-        CREATE TABLE IF NOT EXISTS plan_runs (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS plan_approvals (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', resolution_action_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
+        CREATE TABLE IF NOT EXISTS plan_feedback (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL, plan_node_id TEXT, source_message_id TEXT NOT NULL, marker_number INTEGER NOT NULL, comment TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', resolution_note TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
+        CREATE TABLE IF NOT EXISTS plan_runs (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT NOT NULL, plan_revision_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL, started_at TEXT, completed_at TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS plan_node_tasks (plan_run_id TEXT NOT NULL, plan_node_id TEXT NOT NULL, task_id TEXT NOT NULL, disposition TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL, PRIMARY KEY(plan_run_id, plan_node_id));
         CREATE TABLE IF NOT EXISTS orchestration_rules (id TEXT PRIMARY KEY, scope_type TEXT NOT NULL, scope_id TEXT NOT NULL DEFAULT '', name TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'warn', enabled INTEGER NOT NULL DEFAULT 1, rule_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS event_log (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
-          user_turn_id TEXT,
+          work_run_id TEXT,
           task_id TEXT,
           agent_session_id TEXT,
           event_type TEXT NOT NULL,
@@ -479,12 +567,13 @@ export function createStore(databasePath: string) {
           runtime_sdk TEXT,
           runtime_config_id TEXT,
           runtime_model_id TEXT,
+          runtime_reasoning_effort TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
         CREATE UNIQUE INDEX IF NOT EXISTS flow_experts_flow_id_expert_id_unique
           ON flow_experts(flow_id, expert_id);
-        CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT, task_id TEXT, expert_id TEXT NOT NULL, flow_expert_id TEXT, session_id TEXT, runtime_sdk TEXT, runtime_config_id TEXT, runtime_model_id TEXT, display_name TEXT NOT NULL DEFAULT '', resume_from_agent_session_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'idle', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS agent_sessions (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT, task_id TEXT, expert_id TEXT NOT NULL, flow_expert_id TEXT, session_id TEXT, runtime_sdk TEXT, runtime_config_id TEXT, runtime_model_id TEXT, runtime_reasoning_effort TEXT, display_name TEXT NOT NULL DEFAULT '', resume_from_agent_session_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'queued', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS agent_context_usage_snapshots (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
@@ -512,7 +601,7 @@ export function createStore(databasePath: string) {
           ON agent_context_usage_snapshots(agent_session_id);
         CREATE INDEX IF NOT EXISTS agent_context_usage_snapshots_flow_idx
           ON agent_context_usage_snapshots(flow_id, role, updated_at);
-        CREATE TABLE IF NOT EXISTS decision_cards (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT, session_id TEXT NOT NULL DEFAULT '', card_type TEXT NOT NULL DEFAULT 'generic', questions TEXT NOT NULL, answers TEXT, status TEXT NOT NULL DEFAULT 'pending', resolution_kind TEXT NOT NULL DEFAULT '', resolution_action_id TEXT, resolved_message_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
+        CREATE TABLE IF NOT EXISTS decision_cards (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT, session_id TEXT NOT NULL DEFAULT '', card_type TEXT NOT NULL DEFAULT 'generic', questions TEXT NOT NULL, answers TEXT, status TEXT NOT NULL DEFAULT 'pending', resolution_kind TEXT NOT NULL DEFAULT '', resolution_action_id TEXT, resolved_message_id TEXT, created_at TEXT NOT NULL, resolved_at TEXT);
         CREATE TABLE IF NOT EXISTS decision_card_leader_inputs (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
@@ -531,18 +620,20 @@ export function createStore(databasePath: string) {
         CREATE UNIQUE INDEX IF NOT EXISTS decision_card_leader_inputs_action_unique
           ON decision_card_leader_inputs(flow_id, card_id, client_action_id);
         CREATE TABLE IF NOT EXISTS flow_read_states (flow_id TEXT NOT NULL, viewer_id TEXT NOT NULL DEFAULT 'local-default', last_read_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (flow_id, viewer_id));
-        CREATE TABLE IF NOT EXISTS user_turn_reviews (
+        CREATE TABLE IF NOT EXISTS work_run_reviews (
           flow_id TEXT PRIMARY KEY,
-          user_turn_id TEXT NOT NULL,
+          work_run_id TEXT NOT NULL,
           review_json TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS user_turns (
+        CREATE TABLE IF NOT EXISTS work_runs (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
           trigger_message_id TEXT NOT NULL,
-          status TEXT NOT NULL DEFAULT 'active',
+          status TEXT NOT NULL DEFAULT 'ready',
+          revision INTEGER NOT NULL DEFAULT 1,
           started_at TEXT NOT NULL,
+          execution_started_at TEXT,
           active_started_at TEXT,
           active_duration_ms INTEGER NOT NULL DEFAULT 0,
           waiting_started_at TEXT,
@@ -555,7 +646,7 @@ export function createStore(databasePath: string) {
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, user_turn_id TEXT, task_id TEXT, type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, source_agent_session_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, flow_id TEXT NOT NULL, work_run_id TEXT, task_id TEXT, type TEXT NOT NULL, title TEXT NOT NULL, content TEXT NOT NULL, source_agent_session_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chat_transcript_channels (
           flow_id TEXT NOT NULL,
           channel_id TEXT NOT NULL,
@@ -619,29 +710,30 @@ export function createStore(databasePath: string) {
       addColumnIfMissing(sqlite, "tasks", "active_form", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "tasks", "progress", "TEXT");
       addColumnIfMissing(sqlite, "tasks", "flow_expert_id", "TEXT");
-      addColumnIfMissing(sqlite, "agent_sessions", "user_turn_id", "TEXT");
+      addColumnIfMissing(sqlite, "agent_sessions", "work_run_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "flow_expert_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "task_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "runtime_sdk", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "runtime_config_id", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "runtime_model_id", "TEXT");
+      addColumnIfMissing(sqlite, "agent_sessions", "runtime_reasoning_effort", "TEXT");
       addColumnIfMissing(sqlite, "agent_sessions", "display_name", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "agent_sessions", "resume_from_agent_session_id", "TEXT NOT NULL DEFAULT ''");
-      addColumnIfMissing(sqlite, "agent_sessions", "status", "TEXT NOT NULL DEFAULT 'idle'");
+      addColumnIfMissing(sqlite, "agent_sessions", "status", "TEXT NOT NULL DEFAULT 'queued'");
       addColumnIfMissing(sqlite, "agent_sessions", "updated_at", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "decision_cards", "session_id", "TEXT NOT NULL DEFAULT ''");
-      addColumnIfMissing(sqlite, "decision_cards", "user_turn_id", "TEXT");
+      addColumnIfMissing(sqlite, "decision_cards", "work_run_id", "TEXT");
       addColumnIfMissing(sqlite, "decision_cards", "card_type", "TEXT NOT NULL DEFAULT 'generic'");
       addColumnIfMissing(sqlite, "decision_cards", "resolution_kind", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "decision_cards", "resolution_action_id", "TEXT");
       addColumnIfMissing(sqlite, "decision_cards", "resolved_message_id", "TEXT");
       addColumnIfMissing(sqlite, "decision_cards", "resolved_at", "TEXT");
       addColumnIfMissing(sqlite, "artifacts", "task_id", "TEXT");
-      addColumnIfMissing(sqlite, "artifacts", "user_turn_id", "TEXT");
+      addColumnIfMissing(sqlite, "artifacts", "work_run_id", "TEXT");
       addColumnIfMissing(sqlite, "artifacts", "source_agent_session_id", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "artifacts", "updated_at", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "event_log", "task_id", "TEXT");
-      addColumnIfMissing(sqlite, "event_log", "user_turn_id", "TEXT");
+      addColumnIfMissing(sqlite, "event_log", "work_run_id", "TEXT");
       addColumnIfMissing(sqlite, "event_log", "agent_session_id", "TEXT");
       addColumnIfMissing(sqlite, "flows", "legacy_spec_flow", "INTEGER NOT NULL DEFAULT 0");
       addColumnIfMissing(sqlite, "flows", "risk_mode", "TEXT NOT NULL DEFAULT 'auto_edit'");
@@ -653,17 +745,20 @@ export function createStore(databasePath: string) {
       addColumnIfMissing(sqlite, "flow_experts", "runtime_sdk", "TEXT");
       addColumnIfMissing(sqlite, "flow_experts", "runtime_config_id", "TEXT");
       addColumnIfMissing(sqlite, "flow_experts", "runtime_model_id", "TEXT");
+      addColumnIfMissing(sqlite, "flow_experts", "runtime_reasoning_effort", "TEXT");
       addColumnIfMissing(sqlite, "experts", "person_name_candidates", "TEXT NOT NULL DEFAULT '[]'");
-      addColumnIfMissing(sqlite, "spec_approvals", "user_turn_id", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "active_started_at", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "active_duration_ms", "INTEGER NOT NULL DEFAULT 0");
-      addColumnIfMissing(sqlite, "user_turns", "waiting_started_at", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "completed_at", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "work_source", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "spec_revision_id", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "target_project_id", "TEXT");
-      addColumnIfMissing(sqlite, "user_turns", "work_root_path", "TEXT NOT NULL DEFAULT ''");
-      addColumnIfMissing(sqlite, "user_turns", "input_snapshot_json", "TEXT NOT NULL DEFAULT '{}'");
+      addColumnIfMissing(sqlite, "spec_approvals", "work_run_id", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "active_started_at", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "revision", "INTEGER NOT NULL DEFAULT 1");
+      addColumnIfMissing(sqlite, "work_runs", "execution_started_at", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "active_duration_ms", "INTEGER NOT NULL DEFAULT 0");
+      addColumnIfMissing(sqlite, "work_runs", "waiting_started_at", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "completed_at", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "work_source", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "spec_revision_id", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "target_project_id", "TEXT");
+      addColumnIfMissing(sqlite, "work_runs", "work_root_path", "TEXT NOT NULL DEFAULT ''");
+      addColumnIfMissing(sqlite, "work_runs", "input_snapshot_json", "TEXT NOT NULL DEFAULT '{}'");
       addColumnIfMissing(sqlite, "spec_revisions", "overview", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "spec_revisions", "file_name", "TEXT NOT NULL DEFAULT ''");
       addColumnIfMissing(sqlite, "tasks", "metadata_json", "TEXT NOT NULL DEFAULT '{}'");
@@ -701,8 +796,8 @@ export function createStore(databasePath: string) {
       sqlite.prepare("UPDATE tasks SET status = 'in_progress' WHERE status IN ('queued_for_expert', 'recovery_pending')").run();
       sqlite.exec(`
         DROP TABLE IF EXISTS workspaces;
-        CREATE UNIQUE INDEX IF NOT EXISTS user_turns_one_open_per_flow ON user_turns(flow_id)
-          WHERE status IN ('active', 'waiting_user');
+        CREATE UNIQUE INDEX IF NOT EXISTS work_runs_one_open_per_flow ON work_runs(flow_id)
+          WHERE status IN ('ready', 'executing', 'waiting_user', 'interrupted');
       `);
       const protocolMigrationKey = "runtime_message_protocol_version";
       const protocolVersion = sqlite
@@ -1006,7 +1101,7 @@ export function createStore(databasePath: string) {
         UPDATE chat_messages SET lifecycle = 'sealed', updated_at = ? WHERE lifecycle = 'active'
       `).run(now()).changes;
     },
-    expireStaleLeaderRuntimeState() {
+    interruptStaleLeaderSessions() {
       const timestamp = now();
       return sqlite.transaction(() => {
         const staleSessions = sqlite.prepare(`
@@ -1024,31 +1119,10 @@ export function createStore(databasePath: string) {
         `);
         for (const session of staleSessions) updateSession.run(timestamp, session.id);
 
-        let finalizedUserTurns = 0;
         for (const flowId of new Set(staleSessions.map((session) => session.flowId))) {
-          const turn = this.getOpenUserTurn(flowId);
-          if (!turn || turn.status !== "active") continue;
-
-          const hasRecoverableTask = this.listUserTurnTasks(turn.id).some((task) =>
-            task.status === "in_progress"
-          );
-          const hasPendingUserAction = this.listDecisionCards(flowId).some((card) =>
-            card.userTurnId === turn.id && card.status === "pending"
-          ) || this.listSpecApprovals(flowId).some((approval) =>
-            approval.userTurnId === turn.id && approval.status === "pending"
-          ) || this.listPlanApprovals(flowId).some((approval) =>
-            approval.userTurnId === turn.id && ["pending", "feedback_pending"].includes(approval.status)
-          );
-          const hasRecoverablePlanRun = this.listPlanRuns(flowId).some((run) =>
-            run.userTurnId === turn.id && ["running", "blocked", "paused_for_feedback"].includes(run.status)
-          );
-          if (hasRecoverableTask || hasPendingUserAction || hasRecoverablePlanRun) continue;
-
-          const finalized = this.failUserTurn(turn.id, "failed", timestamp);
-          if (finalized?.status === "failed") finalizedUserTurns += 1;
+          syncFlowExecutionStatus(flowId, timestamp);
         }
-
-        return { interruptedLeaderSessions: staleSessions.length, finalizedUserTurns };
+        return { interruptedLeaderSessions: staleSessions.length, finalizedWorkRuns: 0 };
       })();
     },
     getTranscriptCursor(flowId: string, channelId: string) {
@@ -1369,19 +1443,21 @@ export function createStore(databasePath: string) {
       if (!readState) return true;
       return flow.lastOutputCompletedAt > readState.lastReadAt;
     },
-    createUserTurn(input: { flowId: string; triggerMessageId: string; startedAt?: string; specRequested?: boolean }) {
+    createWorkRun(input: { flowId: string; triggerMessageId: string; startedAt?: string; specRequested?: boolean }) {
       const flow = db.select().from(flows).where(eq(flows.id, input.flowId)).get();
       if (!flow) return undefined;
-      if (db.select().from(userTurns).where(eq(userTurns.flowId, input.flowId)).all()
-        .some((turn) => turn.status === "active" || turn.status === "waiting_user")) return undefined;
+      if (db.select().from(workRuns).where(eq(workRuns.flowId, input.flowId)).all()
+        .some((turn) => OPEN_WORK_RUN_STATUSES.has(turn.status as WorkRunStatus))) return undefined;
       const timestamp = input.startedAt ?? now();
       const row = {
-        id: id("utn"),
+        id: id("wrun"),
         flowId: input.flowId,
         triggerMessageId: input.triggerMessageId,
-        status: "active",
+        status: "ready",
+        revision: 1,
         startedAt: timestamp,
-        activeStartedAt: timestamp,
+        executionStartedAt: null,
+        activeStartedAt: null,
         activeDurationMs: 0,
         waitingStartedAt: null,
         completedAt: null,
@@ -1395,35 +1471,32 @@ export function createStore(databasePath: string) {
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      sqlite.transaction(() => {
-        db.insert(userTurns).values(row).run();
-        db.update(flows).set({ status: "active", updatedAt: timestamp }).where(eq(flows.id, input.flowId)).run();
-      })();
-      return db.select().from(userTurns).where(eq(userTurns.id, row.id)).get()!;
+      db.insert(workRuns).values(row).run();
+      return db.select().from(workRuns).where(eq(workRuns.id, row.id)).get()!;
     },
-    listUserTurns(flowId: string) {
-      return db.select().from(userTurns).where(eq(userTurns.flowId, flowId)).all()
+    listWorkRuns(flowId: string) {
+      return db.select().from(workRuns).where(eq(workRuns.flowId, flowId)).all()
         .sort((left, right) => left.startedAt.localeCompare(right.startedAt));
     },
-    getUserTurn(userTurnId: string) {
-      return db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
+    getWorkRun(workRunId: string) {
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
     },
-    getOpenUserTurn(flowId: string) {
-      return db.select().from(userTurns).where(eq(userTurns.flowId, flowId)).all()
-        .filter((turn) => turn.status === "active" || turn.status === "waiting_user")
+    getOpenWorkRun(flowId: string) {
+      return db.select().from(workRuns).where(eq(workRuns.flowId, flowId)).all()
+        .filter((turn) => OPEN_WORK_RUN_STATUSES.has(turn.status as WorkRunStatus))
         .sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
     },
-    startUserTurnWork(input: {
+    startWorkRunWork(input: {
       flowId: string;
-      userTurnId: string;
+      workRunId: string;
       workSource: "spec" | "direct_message";
       specRevisionId?: string | null;
       targetProjectId: string;
       inputSnapshotJson: string;
     }) {
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
       const project = db.select().from(projects).where(eq(projects.id, input.targetProjectId)).get();
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active" || !project?.localPath) return undefined;
+      if (!turn || turn.flowId !== input.flowId || !OPEN_WORK_RUN_STATUSES.has(turn.status as WorkRunStatus) || turn.status === "interrupted" || !project?.localPath) return undefined;
       const desired = {
         workSource: input.workSource,
         specRevisionId: input.specRevisionId ?? null,
@@ -1440,112 +1513,170 @@ export function createStore(databasePath: string) {
           ? turn
           : undefined;
       }
-      db.update(userTurns).set({ ...desired, updatedAt: now() }).where(eq(userTurns.id, turn.id)).run();
-      return db.select().from(userTurns).where(eq(userTurns.id, turn.id)).get()!;
+      db.update(workRuns).set({ ...desired, updatedAt: now() }).where(eq(workRuns.id, turn.id)).run();
+      return db.select().from(workRuns).where(eq(workRuns.id, turn.id)).get()!;
     },
-    pauseUserTurnForUserAction(userTurnId: string, timestamp = now()) {
-      const existing = db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
-      if (!existing || existing.status !== "active") return existing;
-      const activeDurationMs = existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp);
-      db.update(userTurns)
+    updateWorkRunInputSnapshot(workRunId: string, inputSnapshotJson: string) {
+      const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+      if (!existing || existing.status !== "ready") return undefined;
+      db.update(workRuns)
+        .set({ inputSnapshotJson, updatedAt: now() })
+        .where(and(eq(workRuns.id, workRunId), eq(workRuns.revision, existing.revision)))
+        .run();
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+    },
+    waitWorkRunForUserAction(workRunId: string, timestamp = now()) {
+      const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+      if (!existing || !["ready", "executing"].includes(existing.status)) return existing;
+      const activeDurationMs = existing.status === "executing"
+        ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp)
+        : existing.activeDurationMs;
+      db.update(workRuns)
         .set({
           status: "waiting_user",
+          revision: existing.revision + 1,
           activeStartedAt: null,
           activeDurationMs,
           waitingStartedAt: timestamp,
           updatedAt: timestamp,
         })
-        .where(eq(userTurns.id, userTurnId))
+        .where(eq(workRuns.id, workRunId))
         .run();
-      return db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get()!;
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get()!;
     },
-    resumeUserTurn(userTurnId: string, timestamp = now()) {
-      const existing = db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
-      if (!existing || existing.status !== "waiting_user") return existing;
-      sqlite.transaction(() => {
-        db.update(userTurns)
-          .set({
-            status: "active",
-            activeStartedAt: timestamp,
-            waitingStartedAt: null,
-            updatedAt: timestamp,
-          })
-          .where(eq(userTurns.id, userTurnId))
-          .run();
-        db.update(flows).set({ status: "active", updatedAt: timestamp }).where(eq(flows.id, existing.flowId)).run();
-      })();
-      return db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get()!;
+    resumeWorkRun(workRunId: string, timestamp = now()) {
+      const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+      if (!existing || !["waiting_user", "interrupted"].includes(existing.status)) return existing;
+      const nextStatus = existing.executionStartedAt ? "executing" : "ready";
+      db.update(workRuns)
+        .set({
+          status: nextStatus,
+          revision: existing.revision + 1,
+          activeStartedAt: nextStatus === "executing" ? timestamp : null,
+          waitingStartedAt: null,
+          updatedAt: timestamp,
+        })
+        .where(eq(workRuns.id, workRunId))
+        .run();
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get()!;
     },
-    completeUserTurn(userTurnId: string, timestamp = now()) {
-      const existing = db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
-      if (!existing || existing.status === "completed" || existing.status === "failed" || existing.status === "cancelled") {
-        return existing;
-      }
-      const activeDurationMs = existing.status === "active"
-        ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp)
-        : existing.activeDurationMs;
+    interruptWorkRun(input: { flowId: string; workRunId: string; expectedRevision: number }, timestamp = now()) {
+      const result: { outcome: "interrupted" | "already_interrupted" | "not_found" | "revision_conflict" | "not_interruptible" } = { outcome: "not_found" };
       sqlite.transaction(() => {
-        db.update(userTurns)
+        const existing = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+        if (!existing || existing.flowId !== input.flowId) return;
+        if (existing.status === "interrupted") {
+          result.outcome = "already_interrupted";
+          return;
+        }
+        if (existing.revision !== input.expectedRevision) {
+          result.outcome = "revision_conflict";
+          return;
+        }
+        if (!(existing.status === "executing"
+          || (existing.status === "waiting_user" && existing.executionStartedAt))) {
+          result.outcome = "not_interruptible";
+          return;
+        }
+        const activeDurationMs = existing.status === "executing"
+          ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp)
+          : existing.activeDurationMs;
+        db.update(workRuns)
           .set({
-            status: "completed",
+            status: "interrupted",
+            revision: existing.revision + 1,
             activeStartedAt: null,
             activeDurationMs,
             waitingStartedAt: null,
-            completedAt: timestamp,
             updatedAt: timestamp,
           })
-          .where(eq(userTurns.id, userTurnId))
+          .where(and(eq(workRuns.id, existing.id), eq(workRuns.revision, input.expectedRevision)))
           .run();
-        db.update(flows).set({ status: "idle", updatedAt: timestamp }).where(eq(flows.id, existing.flowId)).run();
+        db.update(decisionCards)
+          .set({ status: "cancelled", resolutionKind: "interrupted", resolvedAt: timestamp })
+          .where(and(eq(decisionCards.workRunId, existing.id), eq(decisionCards.status, "pending")))
+          .run();
+        db.update(specApprovals)
+          .set({ status: "cancelled", resolvedAt: timestamp })
+          .where(and(eq(specApprovals.workRunId, existing.id), eq(specApprovals.status, "pending")))
+          .run();
+        db.update(planApprovals)
+          .set({ status: "cancelled", resolvedAt: timestamp })
+          .where(and(eq(planApprovals.workRunId, existing.id), sql`${planApprovals.status} IN ('pending', 'feedback_pending')`))
+          .run();
+        result.outcome = "interrupted";
       })();
-      return db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get()!;
+      return {
+        outcome: result.outcome,
+        workRun: db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get(),
+      };
     },
-    failUserTurn(userTurnId: string, status: "failed" | "cancelled" = "failed", timestamp = now()) {
-      const existing = db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
+    completeWorkRun(workRunId: string, timestamp = now()) {
+      const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+      if (!existing || !["executing", "waiting_user"].includes(existing.status)) {
+        return existing;
+      }
+      const activeDurationMs = existing.status === "executing"
+        ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp)
+        : existing.activeDurationMs;
+      db.update(workRuns)
+        .set({
+          status: "completed",
+          revision: existing.revision + 1,
+          activeStartedAt: null,
+          activeDurationMs,
+          waitingStartedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .where(eq(workRuns.id, workRunId))
+        .run();
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get()!;
+    },
+    failWorkRun(workRunId: string, status: "failed" | "cancelled" = "failed", timestamp = now()) {
+      const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
       if (!existing || existing.status === "completed" || existing.status === "failed" || existing.status === "cancelled") {
         return existing;
       }
-      const activeDurationMs = existing.status === "active"
+      const activeDurationMs = existing.status === "executing"
         ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, timestamp)
         : existing.activeDurationMs;
-      sqlite.transaction(() => {
-        db.update(userTurns)
-          .set({
-            status,
-            activeStartedAt: null,
-            activeDurationMs,
-            waitingStartedAt: null,
-            completedAt: timestamp,
-            updatedAt: timestamp,
-          })
-          .where(eq(userTurns.id, userTurnId))
-          .run();
-        db.update(flows).set({ status: "idle", updatedAt: timestamp }).where(eq(flows.id, existing.flowId)).run();
-      })();
-      return db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get()!;
+      db.update(workRuns)
+        .set({
+          status,
+          revision: existing.revision + 1,
+          activeStartedAt: null,
+          activeDurationMs,
+          waitingStartedAt: null,
+          completedAt: timestamp,
+          updatedAt: timestamp,
+        })
+        .where(eq(workRuns.id, workRunId))
+        .run();
+      return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get()!;
     },
-    cancelUserTurnPendingActions(userTurnId: string, timestamp = now()) {
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get();
+    cancelWorkRunPendingActions(workRunId: string, timestamp = now()) {
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
       if (!turn) return undefined;
       db.update(decisionCards)
         .set({ status: "cancelled", resolutionKind: "cancelled", resolvedAt: timestamp })
-        .where(and(eq(decisionCards.userTurnId, userTurnId), eq(decisionCards.status, "pending")))
+        .where(and(eq(decisionCards.workRunId, workRunId), eq(decisionCards.status, "pending")))
         .run();
       db.update(specApprovals)
         .set({ status: "cancelled", resolvedAt: timestamp })
-        .where(and(eq(specApprovals.userTurnId, userTurnId), eq(specApprovals.status, "pending")))
+        .where(and(eq(specApprovals.workRunId, workRunId), eq(specApprovals.status, "pending")))
         .run();
       db.update(planApprovals)
         .set({ status: "cancelled", resolvedAt: timestamp })
-        .where(and(eq(planApprovals.userTurnId, userTurnId), eq(planApprovals.status, "pending")))
+        .where(and(eq(planApprovals.workRunId, workRunId), eq(planApprovals.status, "pending")))
         .run();
       db.update(planApprovals)
         .set({ status: "cancelled", resolvedAt: timestamp })
-        .where(and(eq(planApprovals.userTurnId, userTurnId), eq(planApprovals.status, "feedback_pending")))
+        .where(and(eq(planApprovals.workRunId, workRunId), eq(planApprovals.status, "feedback_pending")))
         .run();
       db.update(planRuns)
         .set({ status: "cancelled", completedAt: timestamp, updatedAt: timestamp })
-        .where(eq(planRuns.userTurnId, userTurnId))
+        .where(eq(planRuns.workRunId, workRunId))
         .run();
       return turn;
     },
@@ -1616,16 +1747,16 @@ export function createStore(databasePath: string) {
         .run();
       return db.select().from(specRevisions).where(eq(specRevisions.id, specRevisionId)).get()!;
     },
-    createSpecApproval(input: { flowId: string; specRevisionId: string; fileName: string; overview: string; userTurnId: string }) {
+    createSpecApproval(input: { flowId: string; specRevisionId: string; fileName: string; overview: string; workRunId: string }) {
       const spec = db.select().from(specRevisions).where(eq(specRevisions.id, input.specRevisionId)).get();
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
-      if (!spec || !turn || turn.flowId !== input.flowId || turn.status !== "active" || spec.flowId !== input.flowId || spec.status !== "draft") return undefined;
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!spec || !turn || turn.flowId !== input.flowId || !["ready", "executing"].includes(turn.status) || spec.flowId !== input.flowId || spec.status !== "draft") return undefined;
       const timestamp = now();
       const row = {
         id: id("sca"),
         flowId: input.flowId,
         specRevisionId: input.specRevisionId,
-        userTurnId: input.userTurnId,
+        workRunId: input.workRunId,
         status: "pending" as const,
         fileName: input.fileName,
         overview: input.overview,
@@ -1657,11 +1788,11 @@ export function createStore(databasePath: string) {
       overview: string;
       content: string;
       sourceAgentSessionId?: string;
-      userTurnId: string;
+      workRunId: string;
     }) {
       const flow = db.select().from(flows).where(eq(flows.id, input.flowId)).get();
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
-      if (!flow || !turn || turn.flowId !== input.flowId || turn.status !== "active") return undefined;
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!flow || !turn || turn.flowId !== input.flowId || !["ready", "executing"].includes(turn.status)) return undefined;
       const existing = db.select().from(specRevisions).where(eq(specRevisions.flowId, input.flowId)).all();
       const latest = existing.reduce<typeof existing[number] | null>(
         (current, row) => !current || row.revisionNumber > current.revisionNumber ? row : current,
@@ -1709,7 +1840,7 @@ export function createStore(databasePath: string) {
           id: approvalId,
           flowId: input.flowId,
           specRevisionId: specId,
-          userTurnId: input.userTurnId,
+          workRunId: input.workRunId,
           status: "pending",
           fileName,
           overview: input.overview,
@@ -1723,7 +1854,7 @@ export function createStore(databasePath: string) {
         approval: db.select().from(specApprovals).where(eq(specApprovals.id, approvalId)).get()!,
       };
     },
-    runApprovedSpecForUserTurn(input: {
+    runApprovedSpecForWorkRun(input: {
       flowId: string;
       specApprovalId: string;
       specRevisionId: string;
@@ -1733,8 +1864,8 @@ export function createStore(databasePath: string) {
       const flow = db.select().from(flows).where(eq(flows.id, input.flowId)).get();
       const approval = db.select().from(specApprovals).where(eq(specApprovals.id, input.specApprovalId)).get();
       const spec = db.select().from(specRevisions).where(eq(specRevisions.id, input.specRevisionId)).get();
-      const turn = approval?.userTurnId
-        ? db.select().from(userTurns).where(eq(userTurns.id, approval.userTurnId)).get()
+      const turn = approval?.workRunId
+        ? db.select().from(workRuns).where(eq(workRuns.id, approval.workRunId)).get()
         : undefined;
       const targetProjectId = input.targetProjectId ?? flow?.projectId ?? null;
       const project = targetProjectId
@@ -1749,9 +1880,10 @@ export function createStore(databasePath: string) {
       sqlite.transaction(() => {
         db.update(specApprovals).set({ status: "approved", resolvedAt: timestamp }).where(eq(specApprovals.id, input.specApprovalId)).run();
         db.update(specRevisions).set({ status: "executed", executedAt: timestamp }).where(eq(specRevisions.id, input.specRevisionId)).run();
-        db.update(userTurns).set({
-          status: "active",
-          activeStartedAt: timestamp,
+        db.update(workRuns).set({
+          status: "ready",
+          revision: turn.revision + 1,
+          activeStartedAt: null,
           waitingStartedAt: null,
           workSource: "spec",
           specRevisionId: input.specRevisionId,
@@ -1759,10 +1891,9 @@ export function createStore(databasePath: string) {
           workRootPath: project.localPath,
           inputSnapshotJson: input.inputSnapshotJson,
           updatedAt: timestamp,
-        }).where(eq(userTurns.id, turn.id)).run();
-        db.update(flows).set({ status: "active", updatedAt: timestamp }).where(eq(flows.id, input.flowId)).run();
+        }).where(eq(workRuns.id, turn.id)).run();
       })();
-      return db.select().from(userTurns).where(eq(userTurns.id, turn.id)).get()!;
+      return db.select().from(workRuns).where(eq(workRuns.id, turn.id)).get()!;
     },
     deleteFlow(flowId: string) {
       const existing = db.select().from(flows).where(eq(flows.id, flowId)).get();
@@ -1783,8 +1914,8 @@ export function createStore(databasePath: string) {
         db.delete(decisionCards).where(eq(decisionCards.flowId, flowId)).run();
         db.delete(decisionCardLeaderInputs).where(eq(decisionCardLeaderInputs.flowId, flowId)).run();
         db.delete(flowReadStates).where(eq(flowReadStates.flowId, flowId)).run();
-        sqlite.prepare("DELETE FROM user_turn_reviews WHERE flow_id = ?").run(flowId);
-        db.delete(userTurns).where(eq(userTurns.flowId, flowId)).run();
+        sqlite.prepare("DELETE FROM work_run_reviews WHERE flow_id = ?").run(flowId);
+        db.delete(workRuns).where(eq(workRuns.flowId, flowId)).run();
         db.delete(artifacts).where(eq(artifacts.flowId, flowId)).run();
         db.delete(specRevisions).where(eq(specRevisions.flowId, flowId)).run();
         db.delete(specApprovals).where(eq(specApprovals.flowId, flowId)).run();
@@ -1805,7 +1936,7 @@ export function createStore(databasePath: string) {
     clearFlows() {
       sqlite.transaction(clearAllFlowData)();
     },
-    createDirectUserTurnTask(input: {
+    createDirectWorkRunTask(input: {
       flowId: string;
       subject: string;
       description: string;
@@ -1813,10 +1944,10 @@ export function createStore(databasePath: string) {
       currentTurnInput: CurrentTurnInput;
     }) {
       const flow = db.select().from(flows).where(eq(flows.id, input.flowId)).get();
-      const userTurnId = input.currentTurnInput.user_turn_id;
-      const turn = userTurnId ? db.select().from(userTurns).where(eq(userTurns.id, userTurnId)).get() : undefined;
+      const workRunId = input.currentTurnInput.work_run_id;
+      const turn = workRunId ? db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get() : undefined;
       const project = flow?.projectId ? db.select().from(projects).where(eq(projects.id, flow.projectId)).get() : undefined;
-      if (!flow || !turn || turn.flowId !== flow.id || turn.status !== "active" || !project?.localPath) return undefined;
+      if (!flow || !turn || turn.flowId !== flow.id || !["ready", "executing"].includes(turn.status) || !project?.localPath) return undefined;
       if (turn.workSource && (
         turn.workSource !== "direct_message"
         || turn.targetProjectId !== project.id
@@ -1836,18 +1967,18 @@ export function createStore(databasePath: string) {
       };
 
       sqlite.transaction(() => {
-        if (!turn.workSource) db.update(userTurns).set({
+        if (!turn.workSource) db.update(workRuns).set({
           workSource: "direct_message",
           specRevisionId: null,
           targetProjectId: project.id,
           workRootPath: project.localPath,
           inputSnapshotJson: JSON.stringify(inputSnapshot),
           updatedAt: timestamp,
-        }).where(eq(userTurns.id, turn.id)).run();
+        }).where(eq(workRuns.id, turn.id)).run();
         db.insert(tasks).values({
           id: taskId,
           flowId: input.flowId,
-          userTurnId: turn.id,
+          workRunId: turn.id,
           title: input.subject,
           description: input.description,
           expertId: null,
@@ -1871,14 +2002,14 @@ export function createStore(databasePath: string) {
       })();
 
       return {
-        userTurn: db.select().from(userTurns).where(eq(userTurns.id, turn.id)).get()!,
+        workRun: db.select().from(workRuns).where(eq(workRuns.id, turn.id)).get()!,
         task: db.select().from(tasks).where(eq(tasks.id, taskId)).get()!,
       };
     },
 
     createOrchestrationPlanRevision(input: {
       flowId: string;
-      userTurnId: string;
+      workRunId: string;
       specRevisionId?: string | null;
       title: string;
       objective: string;
@@ -1902,10 +2033,10 @@ export function createStore(databasePath: string) {
       }>;
       diff: Record<string, unknown>;
     }) {
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") return undefined;
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!turn || turn.flowId !== input.flowId || !["ready", "executing"].includes(turn.status)) return undefined;
       const timestamp = now();
-      let plan = db.select().from(orchestrationPlans).where(eq(orchestrationPlans.userTurnId, input.userTurnId)).get();
+      let plan = db.select().from(orchestrationPlans).where(eq(orchestrationPlans.workRunId, input.workRunId)).get();
       const planId = plan?.id ?? id("oplan");
       const existingRevisions = plan
         ? db.select().from(planRevisions).where(eq(planRevisions.planId, plan.id)).all()
@@ -1919,7 +2050,7 @@ export function createStore(databasePath: string) {
           db.insert(orchestrationPlans).values({
             id: planId,
             flowId: input.flowId,
-            userTurnId: input.userTurnId,
+            workRunId: input.workRunId,
             specRevisionId: input.specRevisionId ?? turn.specRevisionId,
             createdAt: timestamp,
             updatedAt: timestamp,
@@ -1987,7 +2118,7 @@ export function createStore(databasePath: string) {
         db.insert(planApprovals).values({
           id: approvalId,
           flowId: input.flowId,
-          userTurnId: input.userTurnId,
+          workRunId: input.workRunId,
           planRevisionId: revisionId,
           status: input.status === "approved" ? "auto_approved" : "pending",
           resolutionActionId: null,
@@ -1996,13 +2127,13 @@ export function createStore(databasePath: string) {
         }).run();
         if (input.status === "pending_approval") {
           const activeDurationMs = turn.activeDurationMs + elapsedMs(turn.activeStartedAt, timestamp);
-          db.update(userTurns).set({
+          db.update(workRuns).set({
             status: "waiting_user",
             activeStartedAt: null,
             activeDurationMs,
             waitingStartedAt: timestamp,
             updatedAt: timestamp,
-          }).where(eq(userTurns.id, turn.id)).run();
+          }).where(eq(workRuns.id, turn.id)).run();
         }
       })();
       return {
@@ -2048,16 +2179,17 @@ export function createStore(databasePath: string) {
         db.update(planApprovals).set({ status: "feedback_pending" }).where(eq(planApprovals.id, approval.id)).run();
         for (const item of input.feedback) {
           db.insert(planFeedback).values({
-            id: id("pfb"), flowId: approval.flowId, userTurnId: approval.userTurnId,
+            id: id("pfb"), flowId: approval.flowId, workRunId: approval.workRunId,
             planRevisionId: approval.planRevisionId, planNodeId: item.planNodeId ?? null,
             sourceMessageId: input.sourceMessageId, markerNumber: item.markerNumber,
             comment: item.comment, status: "pending", resolutionNote: null,
             createdAt: timestamp, resolvedAt: null,
           }).run();
         }
-        const turn = db.select().from(userTurns).where(eq(userTurns.id, approval.userTurnId)).get();
+        const turn = db.select().from(workRuns).where(eq(workRuns.id, approval.workRunId)).get();
         if (turn?.status === "waiting_user") {
-          db.update(userTurns).set({ status: "active", activeStartedAt: timestamp, waitingStartedAt: null, updatedAt: timestamp }).where(eq(userTurns.id, turn.id)).run();
+          const status = turn.executionStartedAt ? "executing" : "ready";
+          db.update(workRuns).set({ status, revision: turn.revision + 1, activeStartedAt: status === "executing" ? timestamp : null, waitingStartedAt: null, updatedAt: timestamp }).where(eq(workRuns.id, turn.id)).run();
         }
       })();
       return db.select().from(planApprovals).where(eq(planApprovals.id, approval.id)).get()!;
@@ -2065,20 +2197,20 @@ export function createStore(databasePath: string) {
     listPlanFeedback(revisionId: string) {
       return db.select().from(planFeedback).where(eq(planFeedback.planRevisionId, revisionId)).all();
     },
-    recordPlanFeedback(input: { flowId: string; userTurnId: string; planRevisionId: string; sourceMessageId: string; feedback: Array<{ planNodeId?: string | null; markerNumber: number; comment: string }> }) {
+    recordPlanFeedback(input: { flowId: string; workRunId: string; planRevisionId: string; sourceMessageId: string; feedback: Array<{ planNodeId?: string | null; markerNumber: number; comment: string }> }) {
       const revision = db.select().from(planRevisions).where(eq(planRevisions.id, input.planRevisionId)).get();
       const plan = revision ? db.select().from(orchestrationPlans).where(eq(orchestrationPlans.id, revision.planId)).get() : undefined;
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
       const run = db.select().from(planRuns).where(eq(planRuns.planRevisionId, input.planRevisionId)).get();
       if (
         !plan
         || plan.flowId !== input.flowId
-        || plan.userTurnId !== input.userTurnId
+        || plan.workRunId !== input.workRunId
         || !turn
         || turn.flowId !== input.flowId
-        || turn.status !== "active"
+        || turn.status !== "executing"
         || !run
-        || run.userTurnId !== input.userTurnId
+        || run.workRunId !== input.workRunId
         || !["running", "blocked", "paused_for_feedback"].includes(run.status)
       ) return undefined;
       const existing = db.select().from(planFeedback).where(eq(planFeedback.planRevisionId, input.planRevisionId)).all().filter((row) => row.sourceMessageId === input.sourceMessageId);
@@ -2086,7 +2218,7 @@ export function createStore(databasePath: string) {
       const timestamp = now();
       sqlite.transaction(() => {
         for (const item of input.feedback) db.insert(planFeedback).values({
-          id: id("pfb"), flowId: input.flowId, userTurnId: input.userTurnId,
+          id: id("pfb"), flowId: input.flowId, workRunId: input.workRunId,
           planRevisionId: input.planRevisionId, planNodeId: item.planNodeId ?? null,
           sourceMessageId: input.sourceMessageId, markerNumber: item.markerNumber,
           comment: item.comment, status: "pending", resolutionNote: null,
@@ -2096,7 +2228,7 @@ export function createStore(databasePath: string) {
           .set({ status: "paused_for_feedback", completedAt: null, updatedAt: timestamp })
           .where(and(
             eq(planRuns.planRevisionId, input.planRevisionId),
-            eq(planRuns.userTurnId, input.userTurnId),
+            eq(planRuns.workRunId, input.workRunId),
             // A paused run is already frozen; terminal and superseded runs must remain historical.
             sql`${planRuns.status} IN ('running', 'blocked')`,
           ))
@@ -2113,10 +2245,12 @@ export function createStore(databasePath: string) {
         for (const feedback of db.select().from(planFeedback).where(eq(planFeedback.planRevisionId, approval.planRevisionId)).all().filter((row) => row.status === "pending")) {
           db.update(planFeedback).set({ status: "resolved", resolutionNote: note, resolvedAt: timestamp }).where(eq(planFeedback.id, feedback.id)).run();
         }
-        const turn = db.select().from(userTurns).where(eq(userTurns.id, approval.userTurnId)).get();
-        if (turn?.status === "active") {
-          const activeDurationMs = turn.activeDurationMs + elapsedMs(turn.activeStartedAt, timestamp);
-          db.update(userTurns).set({ status: "waiting_user", activeStartedAt: null, activeDurationMs, waitingStartedAt: timestamp, updatedAt: timestamp }).where(eq(userTurns.id, turn.id)).run();
+        const turn = db.select().from(workRuns).where(eq(workRuns.id, approval.workRunId)).get();
+        if (turn && ["ready", "executing"].includes(turn.status)) {
+          const activeDurationMs = turn.status === "executing"
+            ? turn.activeDurationMs + elapsedMs(turn.activeStartedAt, timestamp)
+            : turn.activeDurationMs;
+          db.update(workRuns).set({ status: "waiting_user", revision: turn.revision + 1, activeStartedAt: null, activeDurationMs, waitingStartedAt: timestamp, updatedAt: timestamp }).where(eq(workRuns.id, turn.id)).run();
         }
       })();
       return db.select().from(planApprovals).where(eq(planApprovals.id, approvalId)).get()!;
@@ -2151,8 +2285,11 @@ export function createStore(databasePath: string) {
       sqlite.transaction(() => {
         db.update(planApprovals).set({ status: "approved", resolutionActionId: input.clientActionId, resolvedAt: timestamp }).where(eq(planApprovals.id, approval.id)).run();
         db.update(planRevisions).set({ status: "approved", approvedAt: timestamp }).where(eq(planRevisions.id, approval.planRevisionId)).run();
-        const turn = db.select().from(userTurns).where(eq(userTurns.id, approval.userTurnId)).get();
-        if (turn?.status === "waiting_user") db.update(userTurns).set({ status: "active", activeStartedAt: timestamp, waitingStartedAt: null, updatedAt: timestamp }).where(eq(userTurns.id, turn.id)).run();
+        const turn = db.select().from(workRuns).where(eq(workRuns.id, approval.workRunId)).get();
+        if (turn?.status === "waiting_user") {
+          const status = turn.executionStartedAt ? "executing" : "ready";
+          db.update(workRuns).set({ status, revision: turn.revision + 1, activeStartedAt: status === "executing" ? timestamp : null, waitingStartedAt: null, updatedAt: timestamp }).where(eq(workRuns.id, turn.id)).run();
+        }
       })();
       return db.select().from(planApprovals).where(eq(planApprovals.id, approval.id)).get()!;
     },
@@ -2239,12 +2376,12 @@ export function createStore(databasePath: string) {
             .where(eq(planRuns.id, previousRun.id))
             .run();
         }
-        db.insert(planRuns).values({ id: runId, flowId: plan.flowId, userTurnId: plan.userTurnId, planRevisionId: revisionId, status: "running", createdAt: timestamp, startedAt: timestamp, completedAt: null, updatedAt: timestamp }).run();
+        db.insert(planRuns).values({ id: runId, flowId: plan.flowId, workRunId: plan.workRunId, planRevisionId: revisionId, status: "running", createdAt: timestamp, startedAt: timestamp, completedAt: null, updatedAt: timestamp }).run();
         for (const node of nodes) {
           const taskId = taskIdForNode(node.id);
           if (!reusedTaskIds.has(node.id)) {
             db.insert(tasks).values({
-              id: taskId, flowId: plan.flowId, userTurnId: plan.userTurnId,
+              id: taskId, flowId: plan.flowId, workRunId: plan.workRunId,
               title: node.title, description: node.description, expertId: node.expertId,
               flowExpertId: null, status: "pending", revision: 1, activeForm: node.title,
               progress: null,
@@ -2339,7 +2476,7 @@ export function createStore(databasePath: string) {
     },
     createTask(input: {
       flowId: string;
-      userTurnId: string;
+      workRunId: string;
       title: string;
       description: string;
       expertId?: string | null;
@@ -2348,15 +2485,15 @@ export function createStore(databasePath: string) {
       acceptanceCriteria?: string[];
       createdByAgentSessionId?: string;
     }) {
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active" || !turn.workRootPath) return undefined;
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!turn || turn.flowId !== input.flowId || !["ready", "executing"].includes(turn.status) || !turn.workRootPath) return undefined;
       const dependencyRows = (input.dependsOnTaskIds ?? []).map((taskId) => db.select().from(tasks).where(eq(tasks.id, taskId)).get());
-      if (dependencyRows.some((task) => !task || task.userTurnId !== input.userTurnId)) return undefined;
+      if (dependencyRows.some((task) => !task || task.workRunId !== input.workRunId)) return undefined;
       const timestamp = now();
       const row = {
         id: id("task"),
         flowId: input.flowId,
-        userTurnId: input.userTurnId,
+        workRunId: input.workRunId,
         title: input.title,
         description: input.description,
         expertId: input.expertId ?? null,
@@ -2392,8 +2529,8 @@ export function createStore(databasePath: string) {
     listTasks(flowId: string) {
       return db.select().from(tasks).where(eq(tasks.flowId, flowId)).all();
     },
-    listUserTurnTasks(userTurnId: string) {
-      return db.select().from(tasks).where(eq(tasks.userTurnId, userTurnId)).all();
+    listWorkRunTasks(workRunId: string) {
+      return db.select().from(tasks).where(eq(tasks.workRunId, workRunId)).all();
     },
     getTask(taskId: string) {
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get();
@@ -2415,8 +2552,8 @@ export function createStore(databasePath: string) {
         if (!task || task.flowId !== input.flowId) return;
         const flowExpert = db.select().from(flowExperts).where(eq(flowExperts.id, input.flowExpertId)).get();
         if (!flowExpert || flowExpert.flowId !== input.flowId || flowExpert.expertId !== input.expertId) return;
-        const turn = db.select().from(userTurns).where(eq(userTurns.id, task.userTurnId)).get();
-        if (!turn || turn.status !== "active") return;
+        const turn = db.select().from(workRuns).where(eq(workRuns.id, task.workRunId)).get();
+        if (!turn || !["ready", "executing"].includes(turn.status)) return;
         if (task.expertId && task.expertId !== input.expertId) return;
 
         const dependencies = db.select()
@@ -2453,7 +2590,7 @@ export function createStore(databasePath: string) {
         db.insert(agentSessions).values({
           id: sessionId,
           flowId: input.flowId,
-          userTurnId: task.userTurnId,
+          workRunId: task.workRunId,
           taskId: task.id,
           expertId: input.expertId,
           flowExpertId: input.flowExpertId,
@@ -2483,6 +2620,19 @@ export function createStore(databasePath: string) {
           .set({ status: flowExpert.status === "streaming" ? "streaming" : "queued", updatedAt: timestamp })
           .where(eq(flowExperts.id, input.flowExpertId))
           .run();
+        if (turn.status === "ready") {
+          db.update(workRuns)
+            .set({
+              status: "executing",
+              revision: turn.revision + 1,
+              executionStartedAt: timestamp,
+              activeStartedAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(and(eq(workRuns.id, turn.id), eq(workRuns.revision, turn.revision)))
+            .run();
+        }
+        syncFlowExecutionStatus(input.flowId, timestamp);
         started = true;
       })();
 
@@ -2506,9 +2656,9 @@ export function createStore(databasePath: string) {
       if (!expert) return { ok: false as const, error: { code: "EXPERT_NOT_FOUND", message: "expert not found" } };
       const task = db.select().from(tasks).where(eq(tasks.id, input.taskId)).get();
       if (!task || task.flowId !== input.flowId) return { ok: false as const, error: { code: "INVALID_TASK", message: "task not found" } };
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, task.userTurnId)).get();
-      if (!turn || turn.status !== "active") {
-        return { ok: false as const, error: { code: "USER_TURN_NOT_ACTIVE", message: "task user turn is not active" } };
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, task.workRunId)).get();
+      if (!turn || !["ready", "executing"].includes(turn.status)) {
+        return { ok: false as const, error: { code: turn?.status === "interrupted" ? "WORK_RUN_INTERRUPTED" : "WORK_RUN_NOT_EXECUTABLE", message: "work run is not executable" } };
       }
       if (task.expertId !== null && task.expertId !== input.expertId) {
         return { ok: false as const, error: { code: "EXPERT_MISMATCH", message: "expert does not match task expert" } };
@@ -2537,7 +2687,7 @@ export function createStore(databasePath: string) {
         db.insert(agentSessions).values({
           id: agentSessionId,
           flowId: input.flowId,
-          userTurnId: task.userTurnId,
+          workRunId: task.workRunId,
           taskId: task.id,
           expertId: input.expertId,
           sessionId: null,
@@ -2558,6 +2708,13 @@ export function createStore(databasePath: string) {
           })
           .where(eq(tasks.id, input.taskId))
           .run();
+        if (turn.status === "ready") {
+          db.update(workRuns)
+            .set({ status: "executing", revision: turn.revision + 1, executionStartedAt: timestamp, activeStartedAt: timestamp, updatedAt: timestamp })
+            .where(and(eq(workRuns.id, turn.id), eq(workRuns.revision, turn.revision)))
+            .run();
+        }
+        syncFlowExecutionStatus(input.flowId, timestamp);
         started = db.select().from(tasks).where(eq(tasks.id, input.taskId)).get() ?? undefined;
       })();
 
@@ -2584,8 +2741,8 @@ export function createStore(databasePath: string) {
       return db.select().from(taskDependencies).where(eq(taskDependencies.taskId, taskId)).all()
         .map((row) => row.dependsOnTaskId);
     },
-    listRunnableTasks(userTurnId: string) {
-      return db.select().from(tasks).where(eq(tasks.userTurnId, userTurnId)).all()
+    listRunnableTasks(workRunId: string) {
+      return db.select().from(tasks).where(eq(tasks.workRunId, workRunId)).all()
         .filter((task) => {
           if (task.status !== "pending" || task.agentSessionId) return false;
           const dependencyIds = db.select()
@@ -2600,8 +2757,11 @@ export function createStore(databasePath: string) {
     },
     startTask(taskId: string, agentSessionId: string) {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
+      const workRun = existing ? db.select().from(workRuns).where(eq(workRuns.id, existing.workRunId)).get() : undefined;
       if (
         !existing
+        || !workRun
+        || !["ready", "executing"].includes(workRun.status)
         || existing.status !== "pending"
         || (existing.agentSessionId && existing.agentSessionId !== agentSessionId)
       ) return undefined;
@@ -2615,15 +2775,31 @@ export function createStore(databasePath: string) {
       );
       if (!dependenciesComplete) return undefined;
       const timestamp = now();
-      db.update(tasks)
-        .set({ status: "in_progress", agentSessionId, revision: existing.revision + 1, startedAt: timestamp, updatedAt: timestamp })
-        .where(eq(tasks.id, taskId))
-        .run();
+      sqlite.transaction(() => {
+        db.update(tasks)
+          .set({ status: "in_progress", agentSessionId, revision: existing.revision + 1, startedAt: timestamp, updatedAt: timestamp })
+          .where(eq(tasks.id, taskId))
+          .run();
+        if (workRun.status === "ready") {
+          db.update(workRuns)
+            .set({
+              status: "executing",
+              revision: workRun.revision + 1,
+              executionStartedAt: timestamp,
+              activeStartedAt: timestamp,
+              updatedAt: timestamp,
+            })
+            .where(and(eq(workRuns.id, workRun.id), eq(workRuns.revision, workRun.revision)))
+            .run();
+        }
+        syncFlowExecutionStatus(existing.flowId, timestamp);
+      })();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
     },
     completeTask(taskId: string, resultJson = "{}") {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-      if (!existing || existing.status !== "in_progress") return undefined;
+      const workRun = existing ? db.select().from(workRuns).where(eq(workRuns.id, existing.workRunId)).get() : undefined;
+      if (!existing || existing.status !== "in_progress" || workRun?.status !== "executing") return undefined;
       const timestamp = now();
       db.update(tasks)
         .set({ status: "completed", revision: existing.revision + 1, resultJson, finishedAt: timestamp, updatedAt: timestamp })
@@ -2648,6 +2824,8 @@ export function createStore(databasePath: string) {
     }) {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
       if (!existing) return undefined;
+      const workRun = db.select().from(workRuns).where(eq(workRuns.id, existing.workRunId)).get();
+      if (!workRun || ["interrupted", "completed", "failed", "cancelled"].includes(workRun.status)) return undefined;
       if (input.expectedRevision !== undefined && input.expectedRevision !== existing.revision) return undefined;
 
       const isReassignment = input.expertId !== undefined && input.expertId !== existing.expertId;
@@ -2695,7 +2873,7 @@ export function createStore(databasePath: string) {
       const addBlockedBy = input.addBlockedBy ?? [];
       for (const dependsOnTaskId of [...addBlocks, ...addBlockedBy]) {
         const other = db.select().from(tasks).where(eq(tasks.id, dependsOnTaskId)).get();
-        if (!other || other.userTurnId !== existing.userTurnId || dependsOnTaskId === taskId) {
+        if (!other || other.workRunId !== existing.workRunId || dependsOnTaskId === taskId) {
           return undefined;
         }
       }
@@ -2791,7 +2969,8 @@ export function createStore(databasePath: string) {
     },
     failTask(taskId: string, errorMessage: string, resultJson?: string) {
       const existing = db.select().from(tasks).where(eq(tasks.id, taskId)).get();
-      if (!existing || ["completed", "failed", "cancelled"].includes(existing.status)) return undefined;
+      const workRun = existing ? db.select().from(workRuns).where(eq(workRuns.id, existing.workRunId)).get() : undefined;
+      if (!existing || workRun?.status !== "executing" || ["completed", "failed", "cancelled"].includes(existing.status)) return undefined;
       const timestamp = now();
       db.update(tasks)
         .set({
@@ -2818,7 +2997,7 @@ export function createStore(databasePath: string) {
     },
     appendEventLog(input: {
       flowId: string;
-      userTurnId?: string | null;
+      workRunId?: string | null;
       taskId?: string | null;
       agentSessionId?: string | null;
       eventType: string;
@@ -2828,17 +3007,17 @@ export function createStore(databasePath: string) {
       if (!flow) return undefined;
       const task = input.taskId ? db.select().from(tasks).where(eq(tasks.id, input.taskId)).get() : undefined;
       const session = input.agentSessionId ? db.select().from(agentSessions).where(eq(agentSessions.id, input.agentSessionId)).get() : undefined;
-      const derivedUserTurnId = task?.userTurnId ?? session?.userTurnId ?? input.userTurnId ?? null;
+      const derivedWorkRunId = task?.workRunId ?? session?.workRunId ?? input.workRunId ?? null;
       if ((task && task.flowId !== input.flowId)
         || (session && session.flowId !== input.flowId)
-        || (input.userTurnId && derivedUserTurnId !== input.userTurnId)) return undefined;
+        || (input.workRunId && derivedWorkRunId !== input.workRunId)) return undefined;
       const rowId = id("evt");
       sqlite.transaction(() => {
         const existing = db.select().from(eventLog).where(eq(eventLog.flowId, input.flowId)).all();
         db.insert(eventLog).values({
           id: rowId,
           flowId: input.flowId,
-          userTurnId: derivedUserTurnId,
+          workRunId: derivedWorkRunId,
           taskId: input.taskId ?? null,
           agentSessionId: input.agentSessionId ?? null,
           eventType: input.eventType,
@@ -2877,6 +3056,7 @@ export function createStore(databasePath: string) {
         runtimeSdk: null,
         runtimeConfigId: null,
         runtimeModelId: null,
+        runtimeReasoningEffort: null,
         createdAt: timestamp,
         updatedAt: timestamp,
       };
@@ -2952,7 +3132,7 @@ export function createStore(databasePath: string) {
         .run();
       return db.select().from(flowExperts).where(eq(flowExperts.id, flowExpertId)).get()!;
     },
-    lockFlowExpertRuntime(flowExpertId: string, input: { runtimeSdk: string; runtimeConfigId: string; runtimeModelId?: string | null }) {
+    lockFlowExpertRuntime(flowExpertId: string, input: { runtimeSdk: string; runtimeConfigId: string; runtimeModelId?: string | null; runtimeReasoningEffort?: string | null }) {
       const existing = db.select().from(flowExperts).where(eq(flowExperts.id, flowExpertId)).get();
       if (!existing) return undefined;
       if (existing.runtimeSdk && existing.runtimeConfigId) return existing;
@@ -2961,6 +3141,7 @@ export function createStore(databasePath: string) {
           runtimeSdk: existing.runtimeSdk ?? input.runtimeSdk,
           runtimeConfigId: existing.runtimeConfigId ?? input.runtimeConfigId,
           runtimeModelId: existing.runtimeModelId ?? input.runtimeModelId ?? null,
+          runtimeReasoningEffort: existing.runtimeReasoningEffort ?? input.runtimeReasoningEffort ?? null,
           updatedAt: now(),
         })
         .where(eq(flowExperts.id, flowExpertId))
@@ -3035,82 +3216,39 @@ export function createStore(databasePath: string) {
         agentSession: db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get()!,
       };
     },
-    recoverFlowExpertRuntimeWork() {
-      const recoveryItems: Array<{
-        flowId: string;
-        userTurnId: string;
-        taskId: string;
-        flowExpertId: string;
-        agentSessionId: string;
-        prompt: string;
-        resumeSessionId?: string;
-        createdAt: string;
-      }> = [];
-
-      for (const task of db.select().from(tasks).all()) {
-        if (!task.flowExpertId || !task.agentSessionId) continue;
-        const flowExpert = db.select().from(flowExperts).where(eq(flowExperts.id, task.flowExpertId)).get();
-        const session = db.select().from(agentSessions).where(eq(agentSessions.id, task.agentSessionId)).get();
-        const userTurn = db.select().from(userTurns).where(eq(userTurns.id, task.userTurnId)).get();
-        if (
-          !flowExpert
-          || !session
-          || userTurn?.status !== "active"
-          || flowExpert.flowId !== task.flowId
-          || session.flowId !== task.flowId
-          || session.userTurnId !== task.userTurnId
-          || session.taskId !== task.id
-          || session.flowExpertId !== flowExpert.id
-          || session.expertId !== task.expertId
-        ) continue;
-
-        const pushRecoveryItem = (continuation: boolean) => {
-          recoveryItems.push({
-            flowId: task.flowId,
-            userTurnId: task.userTurnId,
-            taskId: task.id,
-            flowExpertId: task.flowExpertId!,
-            agentSessionId: task.agentSessionId!,
-            prompt: continuation
-              ? `继续任务 ${task.id}。先检查当前工作区和已有结果；不要重复已完成工作；完成后返回该任务的结构化结果。`
-              : task.description || task.title,
-            resumeSessionId: flowExpert.sdkSessionId || undefined,
-            createdAt: task.createdAt,
-          });
-        };
-
-        if (task.status === "in_progress" && session.status === "queued") {
-          pushRecoveryItem(false);
-          continue;
-        }
-
-        if (task.status === "in_progress" && session.status === "streaming") {
-          const timestamp = now();
+    interruptStaleExpertSessions() {
+      const timestamp = now();
+      const staleSessions = db.select().from(agentSessions).all()
+        .filter((session) => session.expertId !== "exp-leader" && ACTIVE_AGENT_SESSION_STATUSES.has(session.status as AgentSessionStatus));
+      sqlite.transaction(() => {
+        for (const session of staleSessions) {
           db.update(agentSessions)
             .set({ status: "interrupted", updatedAt: timestamp })
             .where(eq(agentSessions.id, session.id))
             .run();
-          pushRecoveryItem(true);
-          continue;
+          if (session.flowExpertId) {
+            db.update(flowExperts)
+              .set({ status: "idle", updatedAt: timestamp })
+              .where(eq(flowExperts.id, session.flowExpertId))
+              .run();
+          }
         }
-
-        if (task.status === "in_progress" && session.status === "interrupted") {
-          pushRecoveryItem(true);
+        for (const flowId of new Set(staleSessions.map((session) => session.flowId))) {
+          syncFlowExecutionStatus(flowId, timestamp);
         }
-      }
-
-      return recoveryItems.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      })();
+      return { interruptedSessionCount: staleSessions.length };
     },
-    createAgentSession(input: { id?: string; flowId: string; userTurnId?: string | null; taskId?: string | null; expertId: string; flowExpertId?: string | null; sessionId?: string | null; runtimeSdk?: string | null; runtimeConfigId?: string | null; runtimeModelId?: string | null; displayName?: string; resumeFromAgentSessionId?: string; status?: "idle" | "queued" | "streaming" | "completed" | "failed" | "interrupted" }) {
+    createAgentSession(input: { id?: string; flowId: string; workRunId?: string | null; taskId?: string | null; expertId: string; flowExpertId?: string | null; sessionId?: string | null; runtimeSdk?: string | null; runtimeConfigId?: string | null; runtimeModelId?: string | null; runtimeReasoningEffort?: string | null; displayName?: string; resumeFromAgentSessionId?: string; status?: AgentSessionStatus }) {
       const timestamp = now();
       const task = input.taskId ? db.select().from(tasks).where(eq(tasks.id, input.taskId)).get() : undefined;
-      const userTurnId = task?.userTurnId ?? input.userTurnId ?? null;
+      const workRunId = task?.workRunId ?? input.workRunId ?? null;
       if ((input.taskId && (!task || task.flowId !== input.flowId))
-        || (input.userTurnId && input.userTurnId !== userTurnId)) return undefined;
+        || (input.workRunId && input.workRunId !== workRunId)) return undefined;
       const row = {
         id: input.id ?? id("ags"),
         flowId: input.flowId,
-        userTurnId,
+        workRunId,
         taskId: input.taskId ?? null,
         expertId: input.expertId,
         flowExpertId: input.flowExpertId ?? null,
@@ -3118,13 +3256,17 @@ export function createStore(databasePath: string) {
         runtimeSdk: input.runtimeSdk ?? null,
         runtimeConfigId: input.runtimeConfigId ?? null,
         runtimeModelId: input.runtimeModelId ?? null,
+        runtimeReasoningEffort: input.runtimeReasoningEffort ?? null,
         displayName: input.displayName ?? input.expertId,
         resumeFromAgentSessionId: input.resumeFromAgentSessionId ?? "",
-        status: input.status ?? "idle",
+        status: input.status ?? "queued",
         createdAt: timestamp,
         updatedAt: timestamp,
       };
-      db.insert(agentSessions).values(row).run();
+      sqlite.transaction(() => {
+        db.insert(agentSessions).values(row).run();
+        syncFlowExecutionStatus(input.flowId, timestamp);
+      })();
       return db.select().from(agentSessions).where(eq(agentSessions.id, row.id)).get()!;
     },
     listAgentSessions(flowId: string) {
@@ -3142,7 +3284,7 @@ export function createStore(databasePath: string) {
         .run();
       return db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get()!;
     },
-    updateAgentSessionRuntime(agentSessionId: string, input: { runtimeSdk: string; runtimeConfigId?: string | null; runtimeModelId?: string | null }) {
+    updateAgentSessionRuntime(agentSessionId: string, input: { runtimeSdk: string; runtimeConfigId?: string | null; runtimeModelId?: string | null; runtimeReasoningEffort?: string | null }) {
       const existing = db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get();
       if (!existing) return undefined;
       db.update(agentSessions)
@@ -3150,19 +3292,24 @@ export function createStore(databasePath: string) {
           runtimeSdk: input.runtimeSdk,
           runtimeConfigId: input.runtimeConfigId ?? null,
           runtimeModelId: input.runtimeModelId ?? null,
+          runtimeReasoningEffort: input.runtimeReasoningEffort ?? null,
           updatedAt: now(),
         })
         .where(eq(agentSessions.id, agentSessionId))
         .run();
       return db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get()!;
     },
-    updateAgentSessionStatus(agentSessionId: string, status: "idle" | "queued" | "streaming" | "completed" | "failed" | "interrupted") {
+    updateAgentSessionStatus(agentSessionId: string, status: AgentSessionStatus) {
       const existing = db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get();
       if (!existing) return undefined;
-      db.update(agentSessions)
-        .set({ status, updatedAt: now() })
-        .where(eq(agentSessions.id, agentSessionId))
-        .run();
+      const timestamp = now();
+      sqlite.transaction(() => {
+        db.update(agentSessions)
+          .set({ status, updatedAt: timestamp })
+          .where(eq(agentSessions.id, agentSessionId))
+          .run();
+        syncFlowExecutionStatus(existing.flowId, timestamp);
+      })();
       return db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get()!;
     },
     upsertAgentContextUsageSnapshot(input: {
@@ -3257,10 +3404,10 @@ export function createStore(databasePath: string) {
         .all(flowId) as Array<Record<string, unknown>>;
       return rows.map(agentContextUsageSnapshotFromDb);
     },
-    createDecisionCard(input: { flowId: string; userTurnId: string; cardId: string; sessionId: string; cardType: string; questions: unknown[] }) {
-      const turn = db.select().from(userTurns).where(eq(userTurns.id, input.userTurnId)).get();
-      if (!turn || turn.flowId !== input.flowId || turn.status !== "active") return undefined;
-      const row = { id: input.cardId, flowId: input.flowId, userTurnId: input.userTurnId, sessionId: input.sessionId, cardType: input.cardType, questions: JSON.stringify(input.questions), answers: null, status: "pending", resolutionKind: "", resolutionActionId: null, resolvedMessageId: null, createdAt: now(), resolvedAt: null };
+    createDecisionCard(input: { flowId: string; workRunId: string; cardId: string; sessionId: string; cardType: string; questions: unknown[] }) {
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!turn || turn.flowId !== input.flowId || !["ready", "executing"].includes(turn.status)) return undefined;
+      const row = { id: input.cardId, flowId: input.flowId, workRunId: input.workRunId, sessionId: input.sessionId, cardType: input.cardType, questions: JSON.stringify(input.questions), answers: null, status: "pending", resolutionKind: "", resolutionActionId: null, resolvedMessageId: null, createdAt: now(), resolvedAt: null };
       db.insert(decisionCards).values(row).run();
       return db.select().from(decisionCards).where(eq(decisionCards.id, row.id)).get()!;
     },
@@ -3315,8 +3462,8 @@ export function createStore(databasePath: string) {
       messageId: string;
       answers?: DecisionAnswers;
       userDeniedCommand?: {
-        scopeKind: "expert_task" | "expert_conversation" | "leader_user_turn";
-        userTurnId: string;
+        scopeKind: "expert_task" | "expert_conversation" | "leader_work_run";
+        workRunId: string;
         taskId?: string;
         agentSessionId?: string;
         cwd: string;
@@ -3356,21 +3503,21 @@ export function createStore(databasePath: string) {
           const session = denied.agentSessionId
             ? db.select().from(agentSessions).where(eq(agentSessions.id, denied.agentSessionId)).get()
             : undefined;
-          const validScope = existing.userTurnId === denied.userTurnId
-            && (denied.scopeKind === "leader_user_turn"
+          const validScope = existing.workRunId === denied.workRunId
+            && (denied.scopeKind === "leader_work_run"
               ? !denied.taskId && !denied.agentSessionId
               : denied.scopeKind === "expert_task"
                 ? Boolean(
                   task
                   && task.flowId === input.flowId
-                  && task.userTurnId === denied.userTurnId
+                  && task.workRunId === denied.workRunId
                   && (!denied.agentSessionId || (session?.flowId === input.flowId && session.taskId === task.id)),
                 )
                 : Boolean(
                   !denied.taskId
                   && session
                   && session.flowId === input.flowId
-                  && session.userTurnId === denied.userTurnId
+                  && session.workRunId === denied.workRunId
                   && session.taskId === null,
                 ));
           if (!validScope) throw new Error("permission denial scope does not match decision card");
@@ -3378,7 +3525,7 @@ export function createStore(databasePath: string) {
           db.insert(eventLog).values({
             id: id("evt"),
             flowId: input.flowId,
-            userTurnId: denied.userTurnId,
+            workRunId: denied.workRunId,
             taskId: denied.taskId ?? null,
             agentSessionId: denied.agentSessionId ?? null,
             eventType: "permission_command.user_denied",
@@ -3400,8 +3547,8 @@ export function createStore(databasePath: string) {
     },
     hasUserDeniedPermissionCommand(input: {
       flowId: string;
-      userTurnId: string;
-      scopeKind: "expert_task" | "expert_conversation" | "leader_user_turn";
+      workRunId: string;
+      scopeKind: "expert_task" | "expert_conversation" | "leader_work_run";
       taskId?: string;
       cwd: string;
       commandSha256: string;
@@ -3410,7 +3557,7 @@ export function createStore(databasePath: string) {
         eq(eventLog.flowId, input.flowId),
         eq(eventLog.eventType, "permission_command.user_denied"),
       )).all().some((event) => {
-        if (event.userTurnId !== input.userTurnId) return false;
+        if (event.workRunId !== input.workRunId) return false;
         if (input.scopeKind === "expert_task" && event.taskId !== input.taskId) return false;
         if (input.scopeKind !== "expert_task" && event.taskId !== null) return false;
         const payload = parseJsonObject(event.payloadJson);
@@ -3615,42 +3762,42 @@ export function createStore(databasePath: string) {
     listArtifacts(flowId: string) {
       return db.select().from(artifacts).where(eq(artifacts.flowId, flowId)).all();
     },
-    replaceLatestUserTurnReview(input: { flowId: string; userTurnId: string; reviewJson: string }) {
+    replaceLatestWorkRunReview(input: { flowId: string; workRunId: string; reviewJson: string }) {
       const updatedAt = now();
       sqlite.prepare(`
-        INSERT INTO user_turn_reviews (flow_id, user_turn_id, review_json, updated_at)
+        INSERT INTO work_run_reviews (flow_id, work_run_id, review_json, updated_at)
         VALUES (?, ?, ?, ?)
         ON CONFLICT(flow_id) DO UPDATE SET
-          user_turn_id = excluded.user_turn_id,
+          work_run_id = excluded.work_run_id,
           review_json = excluded.review_json,
           updated_at = excluded.updated_at
-      `).run(input.flowId, input.userTurnId, input.reviewJson, updatedAt);
+      `).run(input.flowId, input.workRunId, input.reviewJson, updatedAt);
     },
-    getLatestUserTurnReview(flowId: string) {
+    getLatestWorkRunReview(flowId: string) {
       return sqlite.prepare(`
-        SELECT flow_id AS flowId, user_turn_id AS userTurnId, review_json AS reviewJson, updated_at AS updatedAt
-        FROM user_turn_reviews
+        SELECT flow_id AS flowId, work_run_id AS workRunId, review_json AS reviewJson, updated_at AS updatedAt
+        FROM work_run_reviews
         WHERE flow_id = ?
       `).get(flowId) as {
         flowId: string;
-        userTurnId: string;
+        workRunId: string;
         reviewJson: string;
         updatedAt: string;
       } | undefined;
     },
-    deleteLatestUserTurnReview(flowId: string) {
-      sqlite.prepare("DELETE FROM user_turn_reviews WHERE flow_id = ?").run(flowId);
+    deleteLatestWorkRunReview(flowId: string) {
+      sqlite.prepare("DELETE FROM work_run_reviews WHERE flow_id = ?").run(flowId);
     },
-    createArtifact(input: { flowId: string; userTurnId?: string | null; taskId?: string | null; type: string; title: string; content: string; sourceAgentSessionId?: string }) {
+    createArtifact(input: { flowId: string; workRunId?: string | null; taskId?: string | null; type: string; title: string; content: string; sourceAgentSessionId?: string }) {
       const timestamp = now();
       const task = input.taskId ? db.select().from(tasks).where(eq(tasks.id, input.taskId)).get() : undefined;
-      const userTurnId = task?.userTurnId ?? input.userTurnId ?? null;
+      const workRunId = task?.workRunId ?? input.workRunId ?? null;
       if ((input.taskId && (!task || task.flowId !== input.flowId))
-        || (input.userTurnId && input.userTurnId !== userTurnId)) return undefined;
+        || (input.workRunId && input.workRunId !== workRunId)) return undefined;
       const row = {
         id: id("art"),
         flowId: input.flowId,
-        userTurnId,
+        workRunId,
         taskId: input.taskId ?? null,
         type: input.type,
         title: input.title,

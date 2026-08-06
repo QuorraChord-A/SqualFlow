@@ -30,6 +30,7 @@ export type RoleRuntimeBindingDto = {
   enabled: boolean;
   configId: string;
   modelId: string;
+  reasoningEffort: string;
 };
 
 export type ExpertDto = {

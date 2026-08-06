@@ -27,7 +27,7 @@ function agentSession(id: string, expertId: string): AgentSession {
     expert_id: expertId,
     session_id: null,
     display_name: expertId,
-    user_turn_id: "utn-1",
+    work_run_id: "utn-1",
     status: "idle",
     created_at: "2026-01-01T00:00:00.000Z",
     updated_at: "2026-01-01T00:00:00.000Z",

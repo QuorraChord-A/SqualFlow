@@ -10,7 +10,7 @@ describe("reportRuntimeDiagnostic", () => {
     const context = {
       runtimeRole: "expert" as const,
       flowId: "flow-1",
-      userTurnId: "turn-1",
+      workRunId: "turn-1",
       taskId: "task-1",
       flowExpertId: "fexp-1",
       agentSessionId: "agent-1",
@@ -39,7 +39,7 @@ describe("reportRuntimeDiagnostic", () => {
         attempt: 2,
         max_attempts: 5,
         runtime_role: "expert",
-        user_turn_id: "turn-1",
+        work_run_id: "turn-1",
         task_id: "task-1",
       },
     });

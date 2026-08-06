@@ -13,8 +13,21 @@ afterEach(async () => {
 });
 
 describe("Execution protocol removal", () => {
-  it("accepts user_turn:cancel and rejects the removed execution:cancel client message", () => {
-    expect(ClientWsMessageSchema.safeParse({ type: "user_turn:cancel", flow_id: "flow-1", user_turn_id: "utn-1" }).success).toBe(true);
+  it("accepts only the new interrupt actions and rejects removed cancellation messages", () => {
+    expect(ClientWsMessageSchema.safeParse({
+      type: "work_run:interrupt",
+      flow_id: "flow-1",
+      work_run_id: "wrn-1",
+      expected_revision: 1,
+      client_action_id: "action-1",
+    }).success).toBe(true);
+    expect(ClientWsMessageSchema.safeParse({
+      type: "agent_session:interrupt",
+      flow_id: "flow-1",
+      agent_session_id: "ags-1",
+      client_action_id: "action-2",
+    }).success).toBe(true);
+    expect(ClientWsMessageSchema.safeParse({ type: "work_run:cancel", flow_id: "flow-1", work_run_id: "wrn-1" }).success).toBe(false);
     expect(ClientWsMessageSchema.safeParse({ type: "execution:cancel", flow_id: "flow-1", execution_id: "exec-1" }).success).toBe(false);
   });
 
@@ -23,7 +36,7 @@ describe("Execution protocol removal", () => {
     expect(ServerWsMessageSchema.safeParse({ type: "execution:event", flow_id: "flow-1", data: {} }).success).toBe(false);
   });
 
-  it("builds a flat UserTurn snapshot with no Execution fields", () => {
+  it("builds a flat WorkRun snapshot with no Execution fields", () => {
     const store = createStore(":memory:");
     stores.push(store);
     store.migrate();
@@ -31,7 +44,7 @@ describe("Execution protocol removal", () => {
 
     const snapshot = buildFlowSnapshot(store, flow.id) as Record<string, unknown>;
 
-    expect(snapshot).toHaveProperty("active_user_turn_id", null);
+    expect(snapshot).toHaveProperty("current_work_run_id", null);
     expect(snapshot).toHaveProperty("tasks", []);
     expect(snapshot).not.toHaveProperty("active_execution_id");
     expect(snapshot).not.toHaveProperty("executions");
@@ -42,11 +55,11 @@ describe("Execution protocol removal", () => {
     stores.push(store);
     store.migrate();
     const flow = store.createFlow({ name: "Flow", description: "", projectId: null });
-    const userTurn = store.createUserTurn({ flowId: flow.id, triggerMessageId: "msg-1" })!;
-    store.pauseUserTurnForUserAction(userTurn.id);
+    const workRun = store.createWorkRun({ flowId: flow.id, triggerMessageId: "msg-1" })!;
+    store.waitWorkRunForUserAction(workRun.id);
 
     expect(buildFlowSnapshot(store, flow.id)).toEqual(expect.objectContaining({
-      status: "active",
+      status: "idle",
       has_active_execution: false,
     }));
   });

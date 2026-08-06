@@ -181,7 +181,7 @@ function replayRealtimeChunks() {
     { toolCallId: "tc-edit-2", toolName: "Edit", input: { file_path: "/workspace/ZCodeProject/LoginPage.tsx", old_string: "old", new_string: "new" }, output: { ok: true } },
     { toolCallId: "tc-bash-1", toolName: "Bash", input: { command: "python3 /workspace/ZCodeProject/greet.py" }, output: { stdout: "Hello, ZCode!", stderr: "", exit_code: 0 } },
     { toolCallId: "tc-websearch-1", toolName: "WebSearch", input: { query: "AI technology trends 2026" }, output: { results: [{ title: "Trend 1" }] } },
-    { toolCallId: "tc-getcontext-1", toolName: "mcp__squadflow-leader__get_context", input: {}, output: { active_user_turn_id: null, pending_action: null } },
+    { toolCallId: "tc-getcontext-1", toolName: "mcp__squadflow-leader__get_context", input: {}, output: { active_work_run_id: null, pending_action: null } },
     { toolCallId: "tc-askuser-1", toolName: "mcp__squadflow-leader__ask_user", input: { questions: [{ question: "你更喜欢哪种界面主题？" }] }, output: { decision_card_id: "card-theme", answer: "浅色模式" } },
     { toolCallId: "tc-createplan-1", toolName: "mcp__squadflow-leader__create_plan", input: { name: "Web_Calculator.md", overview: "开发一个支持加减乘除四则运算的 Web 界面计算器" }, output: { spec_approval_id: "spec-calc", spec_revision: { file_name: "Web_Calculator.md" } } },
     { toolCallId: "tc-createtask-1", toolName: "mcp__squadflow-leader__create_task", input: { subject: "实现 Web 计算器" }, output: { task: { task_id: "task-101", subject: "实现 Web 计算器", status: "pending" } } },

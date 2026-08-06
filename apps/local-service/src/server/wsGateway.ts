@@ -20,13 +20,14 @@ import {
 import type { Store } from "../db/store.js";
 import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
 import { planRevisionView } from "../domain/orchestrationView.js";
-import { publishUserTurnEvent } from "../domain/userTurn.js";
+import { publishWorkRunEvent } from "../domain/workRun.js";
+import { leaderTranscriptChannelId } from "../domain/transcriptChannels.js";
 import { LeaderInputRejectedError, type LeaderRuntime } from "../runtime/leaderRuntime.js";
 import { LeaderSessionRecoveryError } from "../runtime/adapters/runtimeErrors.js";
 import { DECISION_CANCELLED_BODY } from "../runtime/leaderPrompt.js";
 import type { ExpertRuntime } from "../runtime/expertRuntime.js";
 import type { OrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
-import { captureUserTurnBaseline } from "../runtime/userTurnDiff.js";
+import { captureWorkRunBaseline } from "../runtime/workRunDiff.js";
 import type { ChatJournal, ChatUIMessage } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
 import { finishInterruptedTurn } from "../ws/pusher.js";
@@ -42,7 +43,7 @@ export type WsConnection = {
   store: Store;
   chatJournal: ChatJournal;
   leaderRuntime: LeaderRuntime;
-  expertRuntime?: Pick<ExpertRuntime, "cancelUserTurn" | "resolvePermissionCard">;
+  expertRuntime?: Pick<ExpertRuntime, "cancelWorkRun" | "resolvePermissionCard">;
   orchestrationScheduler: OrchestrationScheduler;
   send: SendServerMessage;
   logger?: OperationalLogger;
@@ -55,7 +56,7 @@ export type WsGatewayDeps = {
   chatJournal: ChatJournal;
   store: Store;
   leaderRuntime: LeaderRuntime;
-  expertRuntime?: Pick<ExpertRuntime, "cancelUserTurn" | "resolvePermissionCard">;
+  expertRuntime?: Pick<ExpertRuntime, "cancelWorkRun" | "resolvePermissionCard">;
   orchestrationScheduler: OrchestrationScheduler;
   logger?: OperationalLogger;
   runId?: string;
@@ -145,7 +146,7 @@ async function publishPlanRunEvent(
     data: {
       plan_run_id: run.id,
       plan_revision_id: run.planRevisionId,
-      user_turn_id: run.userTurnId,
+      work_run_id: run.workRunId,
       status: run.status,
     },
   });
@@ -155,9 +156,12 @@ function flowStateData(flowId: string, store: Store) {
   const snapshot = buildFlowSnapshot(store, flowId);
   const state = "error" in snapshot
     ? {
-        status: "ready",
-        active_user_turn_id: null,
-        user_turns: [],
+      status: "ready",
+        current_work_run_id: null,
+        work_runs: [],
+        active_leader_agent_session_id: null,
+        latest_leader_agent_session_id: null,
+        leader_transcript_channel: { channel_id: leaderTranscriptChannelId(flowId), provider_session_id: null },
         tasks: [],
         spec_revisions: [],
         agent_sessions: [],
@@ -181,26 +185,13 @@ function flowStateMessage(flowId: string, store: Store, logId?: string): ServerW
   });
 }
 
-function leaderRuntimeState(flowId: string, store: Store, leaderRuntime: LeaderRuntime): "idle" | "starting" | "streaming" {
-  if (leaderRuntime.getState) return leaderRuntime.getState(flowId);
+function leaderExecutionState(flowId: string, store: Store): "idle" | "starting" | "streaming" {
   return store.listAgentSessions(flowId)
-    .some((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "streaming")
-    ? "streaming"
-    : "idle";
-}
-
-function leaderRuntimeStateMessage(flowId: string, store: Store, leaderRuntime: LeaderRuntime, logId?: string): ServerWsMessage {
-  const leaderAgentSessionId = store.listAgentSessions(flowId)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null)?.id ?? null;
-  return ServerWsMessageSchema.parse({
-    type: "leader:runtime_state",
-    flow_id: flowId,
-    ...(logId ? { log_id: logId } : {}),
-    data: {
-      status: leaderRuntimeState(flowId, store, leaderRuntime),
-      leader_agent_session_id: leaderAgentSessionId,
-    },
-  });
+    .find((session) => session.expertId === "exp-leader" && session.taskId === null && (session.status === "queued" || session.status === "streaming"))
+    ?.status === "streaming" ? "streaming" : store.listAgentSessions(flowId)
+      .some((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "queued")
+      ? "starting"
+      : "idle";
 }
 
 function queueClientPayload(itemPayload: Record<string, unknown>): Record<string, unknown> {
@@ -284,7 +275,7 @@ function parseDecisionCards(flowId: string, store: Store) {
     return {
       card_id: card.id,
       card_type: card.cardType,
-      user_turn_id: card.userTurnId,
+      work_run_id: card.workRunId,
       questions,
       answers,
       status: card.status,
@@ -398,14 +389,13 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
         if (message.agent_session_id && session.id === message.agent_session_id) return true;
         if (message.session_id && session.sessionId === message.session_id) return true;
         return false;
-      }) ?? sessions.find((session) => session.expertId === "exp-leader" && session.taskId === null);
+      }) ?? sessions.filter((session) => session.expertId === "exp-leader" && session.taskId === null).at(-1);
 
-  const sessionId = message.session_id
-    || flowExpert?.sdkSessionId
-    || agentSession?.sessionId
-    || agentSession?.id
-    || "";
-  const channelId = flowExpert?.id ?? agentSession?.id ?? message.agent_session_id ?? sessionId;
+  const isLeaderChannel = !flowExpert && agentSession?.expertId === "exp-leader" && agentSession.taskId === null;
+  const channelId = isLeaderChannel
+    ? leaderTranscriptChannelId(message.flow_id)
+    : flowExpert?.id ?? agentSession?.id ?? message.agent_session_id ?? message.session_id ?? "";
+  const sessionId = channelId;
   const entries = channelId
     ? connection.chatJournal.getTranscriptEntries(message.flow_id, channelId)
     : [];
@@ -448,7 +438,7 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
     ...(agentSession ? { agent_session_id: agentSession.id } : {}),
     data: {
       stream_epoch: connection.chatJournal.getStreamEpoch(),
-      cursor: connection.chatJournal.getCursor(message.flow_id, flowExpert?.id ?? agentSession?.id ?? sessionId),
+      cursor: connection.chatJournal.getCursor(message.flow_id, channelId),
       messages: history,
       ...(historyBoundaries.length > 0 ? { history_boundaries: historyBoundaries } : {}),
       ...(activeTurn ? {
@@ -465,38 +455,30 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
   });
 }
 
-function ensureLeaderSession(
+function createLeaderAgentSession(
   flowId: string,
-  connection: WsConnection,
+  store: Store,
+  workRunId?: string | null,
 ) {
-  const existing = connection.store
-    .listAgentSessions(flowId)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-  if (existing) return existing;
-
-  const created = connection.store.createAgentSession({
+  const flow = store.getFlow(flowId);
+  if (!flow) throw new Error(`Flow not found: ${flowId}`);
+  const created = store.createAgentSession({
     flowId,
-    userTurnId: null,
+    workRunId: workRunId ?? null,
     taskId: null,
     expertId: "exp-leader",
-    sessionId: null,
+    sessionId: flow.leaderSessionId,
     displayName: "Leader",
+    status: "queued",
   });
   if (!created) throw new Error(`Unable to create Leader session for Flow ${flowId}`);
-  // Use the local AgentSession ID as a transcript channel until the provider
-  // returns a real SDK session ID. It is never sent as a provider session ID.
-  connection.store.updateFlow(flowId, { leaderSessionId: created.id });
   return created;
 }
 
 function leaderProviderResumeSessionId(
   flow: NonNullable<ReturnType<Store["getFlow"]>>,
-  leader: RuntimeAgentSession,
+  _leader: RuntimeAgentSession,
 ): string | undefined {
-  // A newly-created local AgentSession uses its own ID as the transcript
-  // channel until the provider returns an SDK session ID. Never send that
-  // local ID to a provider's resume endpoint.
-  if (!leader.sessionId || flow.leaderSessionId === leader.id) return undefined;
   return flow.leaderSessionId ?? undefined;
 }
 
@@ -595,7 +577,8 @@ async function handleFlowMessage(
   const payloadHash = submissionPayloadHash(submissionPayload);
   const existingLeader = connection.store
     .listAgentSessions(message.flow_id)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
+    .filter((session) => session.expertId === "exp-leader" && session.taskId === null)
+    .at(-1);
   const existingSubmission = connection.store.getSubmission(message.flow_id, messageId);
   if (existingSubmission && (
     existingSubmission.submissionType !== "normal"
@@ -657,7 +640,7 @@ async function handleFlowMessage(
   // A client message is the single Leader input entry point. If the real
   // Leader runtime is active, deliver it as an in-turn guide; Expert/Task
   // activity alone must never force the message into the user-visible queue.
-  if (leaderRuntimeState(message.flow_id, connection.store, connection.leaderRuntime) === "streaming") {
+  if (leaderExecutionState(message.flow_id, connection.store) !== "idle") {
     return handleFlowGuide(
       { ...message, type: "flow:guide" },
       connection,
@@ -672,21 +655,15 @@ async function handleFlowMessage(
     );
   }
 
-  const openUserTurn = connection.store.getOpenUserTurn(message.flow_id);
-  const leaderRunning = connection.store
-    .listAgentSessions(message.flow_id)
-    .some((session) => session.expertId === "exp-leader" && session.taskId === null && session.status === "streaming");
-  if (openUserTurn && leaderRunning) {
-    await connection.send(errorMessage(
-      "ACTIVE_USER_TURN",
-      "Leader is still working on the current turn. Queue the message locally or guide the running turn.",
-      message.flow_id,
-      message.log_id,
-    ));
-    return false;
-  }
-
-  const leader = ensureLeaderSession(message.flow_id, connection);
+  const openWorkRun = connection.store.getOpenWorkRun(message.flow_id);
+  const preparedWorkRun = openWorkRun ?? (message.spec_requested === true
+    ? connection.store.createWorkRun({
+        flowId: message.flow_id,
+        triggerMessageId: messageId,
+        specRequested: true,
+      })
+    : undefined);
+  const leader = createLeaderAgentSession(message.flow_id, connection.store, preparedWorkRun?.id);
   const acceptance = existingSubmission
     ? { outcome: "duplicate" as const, submission: existingSubmission }
     : connection.store.acceptSubmission({
@@ -761,7 +738,7 @@ async function handleFlowMessage(
       await connection.eventBus.publish(message.flow_id, { type: "plan_approval:event", flow_id: message.flow_id, data: updated });
     } else {
       const recorded = connection.store.recordPlanFeedback({
-        flowId: message.flow_id, userTurnId: feedbackPlan.userTurnId, planRevisionId: feedbackRevisionId, sourceMessageId: messageId,
+        flowId: message.flow_id, workRunId: feedbackPlan.workRunId, planRevisionId: feedbackRevisionId, sourceMessageId: messageId,
         feedback: effectiveFeedback.map((feedback) => ({ planNodeId: feedback.plan_node_id, markerNumber: feedback.marker_number, comment: feedback.comment })),
       });
       if (!recorded) {
@@ -773,43 +750,34 @@ async function handleFlowMessage(
       if (pausedRun?.status === "paused_for_feedback") await publishPlanRunEvent(connection, pausedRun);
     }
   }
-  let userTurn: ReturnType<Store["createUserTurn"]> | undefined;
+  let workRun: ReturnType<Store["createWorkRun"]> | undefined;
   let transcriptMessage: ReturnType<ChatJournal["recordUserMessage"]>;
   try {
     connection.store.sqlite.transaction(() => {
-      userTurn = openUserTurn
-        ? openUserTurn.status === "waiting_user"
-          ? connection.store.resumeUserTurn(openUserTurn.id)
-          : openUserTurn
-        : connection.store.createUserTurn({
-            flowId: message.flow_id,
-            triggerMessageId: messageId,
-            startedAt: createdAt,
-            specRequested: message.spec_requested === true,
-          });
+      workRun = preparedWorkRun;
       onMaterialized?.(messageId);
       connection.store.markSubmissionMaterialized(message.flow_id, messageId, messageId);
       transcriptMessage = connection.chatJournal.recordUserMessage(
         message.flow_id,
-        leader.sessionId ?? leader.id,
+        leaderTranscriptChannelId(message.flow_id),
         message.content,
         messageId,
         createdAt,
-        leader.id,
+        leaderTranscriptChannelId(message.flow_id),
         { ...imageAttachmentMetadata(message.attachments), ...planFeedbackMetadata(effectiveFeedback) },
+        leader.id,
       );
     })();
   } catch (error) {
-    connection.chatJournal.clear(message.flow_id, leader.sessionId ?? leader.id);
+    connection.chatJournal.clear(message.flow_id, leaderTranscriptChannelId(message.flow_id));
     connection.store.releaseSubmission(message.flow_id, messageId);
     throw error;
   }
   await connection.eventBus.publish(message.flow_id, {
     type: "session:transcript_event",
     flow_id: message.flow_id,
-    session_id: leader.sessionId ?? leader.id,
+    session_id: leaderTranscriptChannelId(message.flow_id),
     agent_session_id: leader.id,
-    flow_expert_id: leader.id,
     ...(message.log_id ? { log_id: message.log_id } : {}),
     data: {
       stream_epoch: connection.chatJournal.getStreamEpoch(),
@@ -831,12 +799,12 @@ async function handleFlowMessage(
   }));
   connection.store.appendEventLog({
     flowId: message.flow_id,
-    userTurnId: userTurn?.id,
+    workRunId: workRun?.id,
     agentSessionId: leader.id,
     eventType: "flow.user_message",
     payload: {
       message_id: messageId,
-      user_turn_id: userTurn?.id ?? null,
+      work_run_id: workRun?.id ?? null,
       created_at: createdAt,
       client_message_id: message.client_message_id ?? null,
     },
@@ -848,13 +816,13 @@ async function handleFlowMessage(
     ...(message.log_id ? { log_id: message.log_id } : {}),
     data: {
       status: connection.store.getFlow(message.flow_id)?.status ?? flow.status,
-      active_user_turn_id: connection.store.getOpenUserTurn(message.flow_id)?.id ?? null,
-      leader_session_id: leader.sessionId,
-      leader_agent_session_id: leader.id,
+      current_work_run_id: connection.store.getOpenWorkRun(message.flow_id)?.id ?? null,
+      active_leader_agent_session_id: leader.id,
+      leader_transcript_channel_id: leaderTranscriptChannelId(message.flow_id),
     },
   }));
-  if (userTurn) {
-    await publishUserTurnEvent(connection.eventBus, userTurn, message.log_id);
+  if (workRun) {
+    await publishWorkRunEvent(connection.eventBus, workRun, message.log_id);
   }
 
   void connection.leaderRuntime.runLeaderTurn({
@@ -864,16 +832,16 @@ async function handleFlowMessage(
     attachments: message.attachments,
     planFeedback: effectiveFeedback,
     logId: message.log_id,
-    userTurnId: userTurn?.id,
+    workRunId: workRun?.id,
     leaderAgentSessionId: leader.id,
-    leaderSessionId: leader.sessionId ?? leader.id,
+    leaderSessionId: leaderTranscriptChannelId(message.flow_id),
     // Once the provider has returned a real session ID, every subsequent turn
     // must resume it. A local AgentSession without a provider ID has no session
     // to resume yet, so only that first call is allowed to start one.
     resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     currentTurnInput: {
       trigger_kind: "user_message",
-      user_turn_id: userTurn?.id,
+      work_run_id: workRun?.id,
       message_id: messageId,
       content: message.content,
       spec_requested: message.spec_requested === true,
@@ -903,22 +871,20 @@ async function handlePlanApprove(message: ClientWsMessage & { type: "flow:plan_a
   await connection.eventBus.publish(message.flow_id, { type: "plan_approval:event", flow_id: message.flow_id, data: resolved });
   const revision = connection.store.getPlanRevision(resolved.planRevisionId);
   if (revision) await connection.eventBus.publish(message.flow_id, { type: "plan:event", flow_id: message.flow_id, data: planRevisionView(connection.store, revision.id) ?? { revision } });
-  const turn = connection.store.getUserTurn(resolved.userTurnId);
-  if (turn) await publishUserTurnEvent(connection.eventBus, turn, message.log_id);
+  const turn = connection.store.getWorkRun(resolved.workRunId);
+  if (turn) await publishWorkRunEvent(connection.eventBus, turn, message.log_id);
   const run = await connection.orchestrationScheduler.startRevision(resolved.planRevisionId);
   // L2: 派发权归 Leader — 物化后唤醒 Leader 按依赖逐节点派发，服务端不再自动派发。
-  const leader = connection.store
-    .listAgentSessions(message.flow_id)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
   const flow = connection.store.getFlow(message.flow_id);
-  if (!run || !leader || !flow) return;
+  if (!run || !flow) return;
+  const leader = createLeaderAgentSession(message.flow_id, connection.store, resolved.workRunId);
   void connection.leaderRuntime.runLeaderTurn({
     flowId: message.flow_id,
     kind: "plan_approved",
-    userTurnId: resolved.userTurnId,
+    workRunId: resolved.workRunId,
     planApprovedTasks: planApprovedTaskList(connection.store, run.id),
     leaderAgentSessionId: leader.id,
-    leaderSessionId: leader.sessionId ?? leader.id,
+    leaderSessionId: leaderTranscriptChannelId(message.flow_id),
     resumeSessionId: leaderProviderResumeSessionId(flow, leader),
   }).catch((error: unknown) => publishLeaderError(message, connection, error));
 }
@@ -970,7 +936,7 @@ async function handleFlowGuide(
     return false;
   }
 
-  if (options.fallbackToNormal && leaderRuntimeState(message.flow_id, connection.store, connection.leaderRuntime) !== "streaming") {
+  if (options.fallbackToNormal && leaderExecutionState(message.flow_id, connection.store) === "idle") {
     return handleFlowMessage({ ...message, type: "flow:message" }, connection, onMaterialized);
   }
 
@@ -1037,12 +1003,12 @@ async function handleFlowGuide(
       if (guideFeedback.some((feedback) => feedback.plan_revision_id !== feedbackRevisionId)) throw new Error("计划反馈必须指向同一个计划版本");
       const revision = connection.store.getPlanRevision(feedbackRevisionId);
       const plan = revision ? connection.store.getOrchestrationPlan(revision.planId) : undefined;
-      const turn = connection.store.getOpenUserTurn(message.flow_id);
-      if (!plan || !turn || plan.flowId !== message.flow_id || plan.userTurnId !== turn.id) throw new Error("只能评论当前运行中的计划版本");
+      const turn = connection.store.getOpenWorkRun(message.flow_id);
+      if (!plan || !turn || plan.flowId !== message.flow_id || plan.workRunId !== turn.id) throw new Error("只能评论当前运行中的计划版本");
       const nodeIds = new Set(connection.store.listPlanNodes(feedbackRevisionId).map((node) => node.id));
       if (guideFeedback.some((feedback) => feedback.plan_node_id && !nodeIds.has(feedback.plan_node_id))) throw new Error("计划反馈包含无效任务节点");
       feedbackInput = {
-        flowId: message.flow_id, userTurnId: turn.id, planRevisionId: feedbackRevisionId, sourceMessageId: messageId,
+        flowId: message.flow_id, workRunId: turn.id, planRevisionId: feedbackRevisionId, sourceMessageId: messageId,
         feedback: guideFeedback.map((feedback) => ({ planNodeId: feedback.plan_node_id, markerNumber: feedback.marker_number, comment: feedback.comment })),
       };
     }
@@ -1065,17 +1031,18 @@ async function handleFlowGuide(
           connection.store.markSubmissionMaterialized(message.flow_id, messageId, messageId);
           transcriptMessage = connection.chatJournal.recordUserMessage(
             message.flow_id,
-            leader.sessionId ?? leader.id,
+            leaderTranscriptChannelId(message.flow_id),
             message.content,
             messageId,
             createdAt,
-            leader.id,
+            leaderTranscriptChannelId(message.flow_id),
             {
               localMessageKind: "running-guide",
               guideStatusLabel: "已引导对话",
               ...imageAttachmentMetadata(message.attachments),
               ...planFeedbackMetadata(guideFeedback),
             },
+            leader.id,
           );
         })();
       },
@@ -1088,7 +1055,7 @@ async function handleFlowGuide(
     await connection.eventBus.publish(message.flow_id, {
       type: "session:transcript_event",
       flow_id: message.flow_id,
-      session_id: leader.sessionId ?? leader.id,
+      session_id: leaderTranscriptChannelId(message.flow_id),
       agent_session_id: leader.id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
@@ -1100,7 +1067,7 @@ async function handleFlowGuide(
     });
     connection.store.appendEventLog({
       flowId: message.flow_id,
-      userTurnId: connection.store.getOpenUserTurn(message.flow_id)?.id,
+      workRunId: connection.store.getOpenWorkRun(message.flow_id)?.id,
       agentSessionId: leader.id,
       eventType,
       payload: {
@@ -1285,7 +1252,7 @@ async function handleQueueDispatch(
 }
 
 export async function drainNextQueuedMessage(flowId: string, connection: WsConnection): Promise<boolean> {
-  if (connection.store.getOpenUserTurn(flowId)) return false;
+  if (connection.store.getOpenWorkRun(flowId)) return false;
   const next = connection.store.listQueuedMessages(flowId)[0];
   if (!next || next.status !== "accepted") return false;
   await handleQueueDispatch({
@@ -1346,9 +1313,9 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     await connection.send(errorMessage("INVALID_SPEC_APPROVAL", "Pending SpecApproval not found", message.flow_id, message.log_id));
     return;
   }
-  const userTurn = approval.userTurnId ? connection.store.getUserTurn(approval.userTurnId) : undefined;
-  if (!userTurn || userTurn.flowId !== message.flow_id || userTurn.status !== "waiting_user") {
-    await connection.send(errorMessage("USER_TURN_NOT_ACTIVE", "SpecApproval is not attached to a waiting UserTurn", message.flow_id, message.log_id));
+  const workRun = approval.workRunId ? connection.store.getWorkRun(approval.workRunId) : undefined;
+  if (!workRun || workRun.flowId !== message.flow_id || workRun.status !== "waiting_user") {
+    await connection.send(errorMessage("WORK_RUN_NOT_EXECUTABLE", "SpecApproval is not attached to a waiting WorkRun", message.flow_id, message.log_id));
     return;
   }
   const spec = connection.store.getSpecRevision(approval.specRevisionId);
@@ -1362,8 +1329,8 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     await connection.send(errorMessage("PROJECT_ROOT_NOT_FOUND", "Flow project root is not configured", message.flow_id, message.log_id));
     return;
   }
-  const diffBaseline = captureUserTurnBaseline(project.localPath);
-  const startedTurn = connection.store.runApprovedSpecForUserTurn({
+  const diffBaseline = captureWorkRunBaseline(project.localPath);
+  const startedTurn = connection.store.runApprovedSpecForWorkRun({
     flowId: message.flow_id,
     specApprovalId: approval.id,
     specRevisionId: spec.id,
@@ -1379,10 +1346,10 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     }),
   });
   if (!startedTurn) {
-    await connection.send(errorMessage("USER_TURN_NOT_ACTIVE", "Spec could not start for the current UserTurn", message.flow_id, message.log_id));
+    await connection.send(errorMessage("WORK_RUN_NOT_EXECUTABLE", "Spec could not start for the current WorkRun", message.flow_id, message.log_id));
     return;
   }
-  await publishUserTurnEvent(connection.eventBus, startedTurn, message.log_id);
+  await publishWorkRunEvent(connection.eventBus, startedTurn, message.log_id);
 
   await connection.eventBus.publish(message.flow_id, ServerWsMessageSchema.parse({
     type: "flow:spec_card_resolved",
@@ -1391,24 +1358,28 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     data: {
       spec_approval_id: approval.id,
       spec_revision_id: spec.id,
-      ...(approval.userTurnId ? { user_turn_id: approval.userTurnId } : {}),
+      ...(approval.workRunId ? { work_run_id: approval.workRunId } : {}),
       status: "approved",
     },
   }));
+  const leader = createLeaderAgentSession(message.flow_id, connection.store, startedTurn.id);
   await connection.eventBus.publish(message.flow_id, ServerWsMessageSchema.parse({
     type: "flow:status",
     flow_id: message.flow_id,
     ...(message.log_id ? { log_id: message.log_id } : {}),
-    data: { status: "active", active_user_turn_id: startedTurn.id },
+    data: {
+      status: connection.store.getFlow(message.flow_id)?.status ?? "idle",
+      current_work_run_id: startedTurn.id,
+      active_leader_agent_session_id: leader.id,
+    },
   }));
 
-  const leader = ensureLeaderSession(message.flow_id, connection);
   void connection.leaderRuntime.runLeaderTurn({
     flowId: message.flow_id,
-    userTurnId: startedTurn.id,
+    workRunId: startedTurn.id,
     kind: "spec_run",
     leaderAgentSessionId: leader.id,
-    leaderSessionId: leader.sessionId ?? leader.id,
+    leaderSessionId: leaderTranscriptChannelId(message.flow_id),
     resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     logId: message.log_id,
   }).catch((error: unknown) => publishLeaderError(message, connection, error));
@@ -1435,12 +1406,11 @@ export async function deliverDecisionCardLeaderInput(input: {
   if (!leaderInput) return;
   const card = input.store.getDecisionCard(leaderInput.cardId);
   const flow = input.store.getFlow(leaderInput.flowId);
-  const leader = input.store.listAgentSessions(leaderInput.flowId)
-    .find((session) => session.expertId === "exp-leader" && session.taskId === null);
-  if (!card || !flow || !leader) {
+  if (!card || !flow) {
     input.store.markDecisionCardLeaderInputFailed(leaderInput.id, "missing card, flow, or leader session");
     return;
   }
+  const leader = createLeaderAgentSession(leaderInput.flowId, input.store, card.workRunId);
   let decisionAnswers: Record<string, string | string[]> | undefined;
   if (leaderInput.kind === "resolved" && card.answers) {
     try {
@@ -1452,7 +1422,7 @@ export async function deliverDecisionCardLeaderInput(input: {
   try {
     await input.leaderRuntime.runLeaderTurn({
       flowId: leaderInput.flowId,
-      userTurnId: card.userTurnId ?? undefined,
+      workRunId: card.workRunId ?? undefined,
       kind: leaderInput.kind === "cancelled" ? "decision_cancelled" : "decision",
       decisionCardId: card.id,
       decisionMessageId: leaderInput.messageId,
@@ -1460,7 +1430,7 @@ export async function deliverDecisionCardLeaderInput(input: {
       ...(decisionAnswers ? { decisionAnswers } : {}),
       currentTurnInput: {
         trigger_kind: leaderInput.kind === "cancelled" ? "decision_cancelled" : "decision_resolved",
-        user_turn_id: card.userTurnId ?? undefined,
+        work_run_id: card.workRunId ?? undefined,
         card_id: card.id,
         message_id: leaderInput.messageId,
         content: leaderInput.content,
@@ -1468,7 +1438,7 @@ export async function deliverDecisionCardLeaderInput(input: {
         created_at: leaderInput.createdAt,
       },
       leaderAgentSessionId: leader.id,
-      leaderSessionId: leader.sessionId ?? card.sessionId ?? leader.id,
+      leaderSessionId: leaderTranscriptChannelId(leaderInput.flowId),
       resumeSessionId: leaderProviderResumeSessionId(flow, leader),
     });
     input.store.markDecisionCardLeaderInputSent(leaderInput.id);
@@ -1565,18 +1535,18 @@ async function handleDecision(message: ClientWsMessage & { type: "flow:decision"
   }
 
   const resolved = resolution.card;
-  const leader = ensureLeaderSession(message.flow_id, connection);
+  const leader = createLeaderAgentSession(message.flow_id, connection.store, resolved.workRunId);
   const resolvedAnswers = resolved.answers
     ? JSON.parse(resolved.answers) as Record<string, string | string[]>
     : {};
   if (resolution.newlyResolved) {
-    const turn = resolved.userTurnId
-      ? connection.store.resumeUserTurn(resolved.userTurnId)
-      : connection.store.getOpenUserTurn(message.flow_id);
-    if (turn) await publishUserTurnEvent(connection.eventBus, turn, message.log_id);
+    const turn = resolved.workRunId
+      ? connection.store.resumeWorkRun(resolved.workRunId)
+      : connection.store.getOpenWorkRun(message.flow_id);
+    if (turn) await publishWorkRunEvent(connection.eventBus, turn, message.log_id);
     connection.store.appendEventLog({
       flowId: message.flow_id,
-      userTurnId: resolved.userTurnId,
+      workRunId: resolved.workRunId,
       agentSessionId: leader.id,
       eventType: "decision_card.resolved",
       payload: {
@@ -1589,19 +1559,19 @@ async function handleDecision(message: ClientWsMessage & { type: "flow:decision"
     });
     const transcriptMessage = connection.chatJournal.recordUserMessage(
       message.flow_id,
-      leader.sessionId ?? leader.id,
+      leaderTranscriptChannelId(message.flow_id),
       `clarification_card_id: ${resolved.id}\n用户已回答澄清卡片。`,
       resolution.leaderInput.messageId,
       resolution.leaderInput.createdAt,
-      leader.id,
+      leaderTranscriptChannelId(message.flow_id),
       { decisionCardId: resolved.id, decisionStatus: "resolved" },
+      leader.id,
     );
     await connection.eventBus.publish(message.flow_id, {
       type: "session:transcript_event",
       flow_id: message.flow_id,
-      session_id: leader.sessionId ?? leader.id,
+      session_id: leaderTranscriptChannelId(message.flow_id),
       agent_session_id: leader.id,
-      flow_expert_id: leader.id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
         stream_epoch: connection.chatJournal.getStreamEpoch(),
@@ -1619,7 +1589,7 @@ async function handleDecision(message: ClientWsMessage & { type: "flow:decision"
     data: {
       card_id: resolved.id,
       card_type: resolved.cardType,
-      user_turn_id: resolved.userTurnId,
+      work_run_id: resolved.workRunId,
       answers: resolvedAnswers,
       status: resolved.status,
       message_id: resolution.leaderInput.messageId,
@@ -1677,15 +1647,15 @@ async function handleDecisionCancel(
   }
 
   const cancelled = resolution.card;
-  const leader = ensureLeaderSession(message.flow_id, connection);
+  const leader = createLeaderAgentSession(message.flow_id, connection.store, cancelled.workRunId);
   if (resolution.newlyResolved) {
-    const turn = cancelled.userTurnId
-      ? connection.store.resumeUserTurn(cancelled.userTurnId)
-      : connection.store.getOpenUserTurn(message.flow_id);
-    if (turn) await publishUserTurnEvent(connection.eventBus, turn, message.log_id);
+    const turn = cancelled.workRunId
+      ? connection.store.resumeWorkRun(cancelled.workRunId)
+      : connection.store.getOpenWorkRun(message.flow_id);
+    if (turn) await publishWorkRunEvent(connection.eventBus, turn, message.log_id);
     connection.store.appendEventLog({
       flowId: message.flow_id,
-      userTurnId: cancelled.userTurnId,
+      workRunId: cancelled.workRunId,
       eventType: "decision_card.cancelled",
       payload: {
         card_id: cancelled.id,
@@ -1697,19 +1667,19 @@ async function handleDecisionCancel(
     });
     const transcriptMessage = connection.chatJournal.recordUserMessage(
       message.flow_id,
-      leader.sessionId ?? leader.id,
+      leaderTranscriptChannelId(message.flow_id),
       `clarification_card_id: ${cancelled.id}\n用户取消了本次澄清卡片。`,
       resolution.leaderInput.messageId,
       resolution.leaderInput.createdAt,
-      leader.id,
+      leaderTranscriptChannelId(message.flow_id),
       { decisionCardId: cancelled.id, decisionStatus: "cancelled" },
+      leader.id,
     );
     await connection.eventBus.publish(message.flow_id, {
       type: "session:transcript_event",
       flow_id: message.flow_id,
-      session_id: leader.sessionId ?? leader.id,
+      session_id: leaderTranscriptChannelId(message.flow_id),
       agent_session_id: leader.id,
-      flow_expert_id: leader.id,
       ...(message.log_id ? { log_id: message.log_id } : {}),
       data: {
         stream_epoch: connection.chatJournal.getStreamEpoch(),
@@ -1726,7 +1696,7 @@ async function handleDecisionCancel(
     data: {
       card_id: cancelled.id,
       card_type: cancelled.cardType,
-      user_turn_id: cancelled.userTurnId,
+      work_run_id: cancelled.workRunId,
       answers: null,
       status: cancelled.status,
       message_id: resolution.leaderInput.messageId,
@@ -1741,24 +1711,28 @@ async function handleDecisionCancel(
   }
 }
 
-async function publishInterruptedSessions(
-  connection: WsConnection,
+export async function publishInterruptedSessions(
+  connection: Pick<WsConnection, "store" | "eventBus" | "chatJournal">,
   flowId: string,
   logId: string | undefined,
-  userTurnId: string,
+  filter: { workRunId?: string; agentSessionId?: string; includeLeader?: boolean },
 ) {
   const sessions = connection.store.listAgentSessions(flowId)
     .filter((session) => session.status === "queued" || session.status === "streaming")
-    .filter((session) => session.userTurnId === userTurnId
-      || (session.expertId === "exp-leader" && session.taskId === null));
+    .filter((session) => filter.includeLeader !== false || session.expertId !== "exp-leader" || session.taskId !== null)
+    .filter((session) => filter.agentSessionId
+      ? session.id === filter.agentSessionId
+      : session.workRunId === filter.workRunId);
 
   for (const session of sessions) {
+    const isLeader = session.expertId === "exp-leader" && session.taskId === null;
+    const transcriptChannelId = isLeader ? leaderTranscriptChannelId(flowId) : session.flowExpertId ?? session.id;
     const interruptedTiming = await finishInterruptedTurn({
       flowId,
-      sessionId: session.sessionId ?? session.id,
-      transcriptId: session.flowExpertId ?? session.id,
+      sessionId: transcriptChannelId,
+      transcriptId: transcriptChannelId,
       agentSessionId: session.id,
-      flowExpertId: session.flowExpertId ?? session.id,
+      flowExpertId: session.flowExpertId ?? "leader",
       eventBus: connection.eventBus,
       chatJournal: connection.chatJournal,
       ...(logId ? { logId } : {}),
@@ -1766,7 +1740,7 @@ async function publishInterruptedSessions(
     if (interruptedTiming) {
       connection.store.appendEventLog({
         flowId,
-        userTurnId: session.userTurnId,
+        workRunId: session.workRunId,
         taskId: session.taskId,
         agentSessionId: session.id,
         eventType: "agent_session.turn_completed",
@@ -1790,7 +1764,7 @@ async function publishInterruptedSessions(
       ...(logId ? { log_id: logId } : {}),
       data: {
         agent_session_id: updated.id,
-        user_turn_id: updated.userTurnId,
+        work_run_id: updated.workRunId,
         task_id: updated.taskId,
         expert_id: updated.expertId,
         flow_expert_id: updated.flowExpertId,
@@ -1816,92 +1790,69 @@ async function publishInterruptedSessions(
   }
 }
 
-async function cancelUserTurnState(
+async function handleWorkRunInterrupt(
   connection: WsConnection,
-  turn: NonNullable<ReturnType<Store["getUserTurn"]>>,
-  logId?: string,
+  message: ClientWsMessage & { type: "work_run:interrupt" },
 ) {
-  const pendingPlanApprovals = connection.store.listPlanApprovals(turn.flowId)
-    .filter((approval) => approval.userTurnId === turn.id && ["pending", "feedback_pending"].includes(approval.status));
-  const activePlanRuns = connection.store.listPlanRuns(turn.flowId)
-    .filter((run) => run.userTurnId === turn.id && ["running", "blocked", "paused_for_feedback"].includes(run.status));
-  connection.leaderRuntime.cancelFlow(turn.flowId, turn.id);
-  connection.expertRuntime?.cancelUserTurn({ flowId: turn.flowId, userTurnId: turn.id });
-  for (const task of connection.store.listUserTurnTasks(turn.id)) {
-    const cancelledTask = connection.store.cancelTask(task.id);
-    if (!cancelledTask) continue;
-    await connection.eventBus.publish(turn.flowId, ServerWsMessageSchema.parse({
-      type: "task:event",
-      flow_id: turn.flowId,
-      ...(logId ? { log_id: logId } : {}),
-      data: {
-        task_id: cancelledTask.id,
-        user_turn_id: cancelledTask.userTurnId,
-        expert_id: cancelledTask.expertId,
-        flow_expert_id: cancelledTask.flowExpertId,
-        agent_session_id: cancelledTask.agentSessionId,
-        status: cancelledTask.status,
-      },
-    }));
+  const turn = connection.store.getWorkRun(message.work_run_id);
+  if (!turn || turn.flowId !== message.flow_id) {
+    await connection.send(errorMessage("WORK_RUN_NOT_FOUND", "WorkRun not found in this Flow", message.flow_id, message.log_id));
+    return;
   }
-  await publishInterruptedSessions(connection, turn.flowId, logId, turn.id);
-  connection.store.cancelUserTurnPendingActions(turn.id);
-  for (const approval of pendingPlanApprovals) {
-    const updated = connection.store.getPlanApproval(approval.id);
-    if (!updated) continue;
-    await connection.eventBus.publish(turn.flowId, {
-      type: "plan_approval:event",
-      flow_id: turn.flowId,
-      ...(logId ? { log_id: logId } : {}),
-      data: updated,
-    });
-  }
-  for (const run of activePlanRuns) {
-    const updated = connection.store.getPlanRun(run.id);
-    if (!updated) continue;
-    await connection.eventBus.publish(turn.flowId, {
-      type: "plan_run:event",
-      flow_id: turn.flowId,
-      ...(logId ? { log_id: logId } : {}),
-      data: {
-        plan_run_id: updated.id,
-        plan_revision_id: updated.planRevisionId,
-        user_turn_id: updated.userTurnId,
-        status: updated.status,
-      },
-    });
-  }
-  const cancelled = connection.store.failUserTurn(turn.id, "cancelled");
-  if (!cancelled) return turn;
-  connection.store.appendEventLog({
-    flowId: turn.flowId,
-    userTurnId: turn.id,
-    eventType: "user_turn.cancelled",
+  const interrupted = connection.store.interruptWorkRun({
+    flowId: message.flow_id,
+    workRunId: message.work_run_id,
+    expectedRevision: message.expected_revision,
   });
-  await publishUserTurnEvent(connection.eventBus, cancelled, logId);
-  return cancelled;
+  if (interrupted.outcome === "revision_conflict") {
+    await connection.send(errorMessage("WORK_RUN_REVISION_CONFLICT", "WorkRun changed; refresh and try again.", message.flow_id, message.log_id, {
+      current_revision: interrupted.workRun?.revision,
+      client_action_id: message.client_action_id,
+    }));
+    return;
+  }
+  if (interrupted.outcome === "not_interruptible" || interrupted.outcome === "not_found") {
+    await connection.send(errorMessage("WORK_RUN_NOT_INTERRUPTIBLE", "WorkRun has not started or is already terminal.", message.flow_id, message.log_id, {
+      client_action_id: message.client_action_id,
+    }));
+    return;
+  }
+  const committed = interrupted.workRun;
+  if (!committed) return;
+  if (interrupted.outcome === "interrupted") {
+    connection.leaderRuntime.cancelFlow(turn.flowId, turn.id);
+    connection.expertRuntime?.cancelWorkRun({ flowId: turn.flowId, workRunId: turn.id });
+    await publishInterruptedSessions(connection, turn.flowId, message.log_id, { workRunId: turn.id });
+    connection.store.appendEventLog({
+      flowId: turn.flowId,
+      workRunId: turn.id,
+      eventType: "work_run.interrupted",
+      payload: { client_action_id: message.client_action_id, revision: committed.revision },
+    });
+  }
+  await publishWorkRunEvent(connection.eventBus, committed, message.log_id);
 }
 
-async function handleUserTurnCancel(
+async function handleAgentSessionInterrupt(
   connection: WsConnection,
-  message: ClientWsMessage & { type: "user_turn:cancel" },
+  message: ClientWsMessage & { type: "agent_session:interrupt" },
 ) {
-  const turn = connection.store.getUserTurn(message.user_turn_id);
-  if (!turn || turn.flowId !== message.flow_id) {
-    await connection.send(errorMessage("USER_TURN_NOT_ACTIVE", "UserTurn not found in this Flow", message.flow_id, message.log_id));
+  const session = connection.store.getAgentSession(message.agent_session_id);
+  if (!session || session.flowId !== message.flow_id || session.expertId !== "exp-leader" || session.taskId !== null) {
+    await connection.send(errorMessage("LEADER_SESSION_NOT_FOUND", "Active Leader AgentSession not found.", message.flow_id, message.log_id));
     return;
   }
-  if (["completed", "failed", "cancelled"].includes(turn.status)) {
-    await publishUserTurnEvent(connection.eventBus, turn, message.log_id);
-    return;
+  if (session.status === "queued" || session.status === "streaming") {
+    connection.leaderRuntime.cancelFlow(message.flow_id, undefined);
+    await publishInterruptedSessions(connection, message.flow_id, message.log_id, { agentSessionId: session.id });
+    connection.store.appendEventLog({
+      flowId: message.flow_id,
+      workRunId: session.workRunId,
+      agentSessionId: session.id,
+      eventType: "agent_session.interrupted",
+      payload: { client_action_id: message.client_action_id, actor: "user" },
+    });
   }
-  if (connection.store.getOpenUserTurn(message.flow_id)?.id !== turn.id) {
-    await connection.send(errorMessage("USER_TURN_NOT_ACTIVE", "UserTurn is not the current open turn", message.flow_id, message.log_id));
-    return;
-  }
-  await cancelUserTurnState(connection, turn, message.log_id);
-  connection.store.clearQueuedMessages(message.flow_id);
-  await publishQueueState(connection, message.flow_id, message.log_id);
 }
 
 function parseClientMessage(rawMessage: unknown):
@@ -1964,7 +1915,6 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
       connection.subscriptions.add(message.flow_id);
       connection.eventBus.subscribe(message.flow_id, connection.clientId, connection.send);
       await connection.send(flowStateMessage(message.flow_id, connection.store, message.log_id));
-      await connection.send(leaderRuntimeStateMessage(message.flow_id, connection.store, connection.leaderRuntime, message.log_id));
       connection.logger?.info({
         event: "flow_snapshot_sent",
         runId: connection.runId,
@@ -2073,8 +2023,11 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
     case "flow:plan_approve":
       await handlePlanApprove(message, connection);
       return;
-    case "user_turn:cancel":
-      await handleUserTurnCancel(connection, message);
+    case "work_run:interrupt":
+      await handleWorkRunInterrupt(connection, message);
+      return;
+    case "agent_session:interrupt":
+      await handleAgentSessionInterrupt(connection, message);
       return;
   }
 }

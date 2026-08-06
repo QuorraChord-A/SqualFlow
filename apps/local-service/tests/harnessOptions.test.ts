@@ -188,11 +188,12 @@ describe("harness base options", () => {
 
     expect(options.model).toBe("claude-test-model");
     expect(options.env).toMatchObject({
-      ANTHROPIC_API_KEY: "sk-test",
+      ANTHROPIC_AUTH_TOKEN: "sk-test",
       ANTHROPIC_BASE_URL: "https://example.test/anthropic",
       ANTHROPIC_MODEL: "claude-test-model",
       CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
     });
+    expect(options.env?.ANTHROPIC_API_KEY).toBeUndefined();
     expect(options.settings).toMatchObject({ model: "claude-test-model", language: "zh-CN" });
   });
 
@@ -236,7 +237,7 @@ describe("harness base options", () => {
     expect(options.settings).toMatchObject({ model: "explicit-model" });
   });
 
-  it("does not override provider credentials in inherited auth mode", () => {
+  it("does not leak settings provider credentials through unsupported inherited auth mode", () => {
     const settingsPath = withTempSettings({
       env: {
         ANTHROPIC_API_KEY: "sk-old",
@@ -254,11 +255,10 @@ describe("harness base options", () => {
       runtimeConfig: runtimeConfig({ authMode: "inherited", apiKey: "sk-new", baseUrl: "https://new.example" }),
     });
 
-    expect(options.env).toMatchObject({
-      ANTHROPIC_API_KEY: "sk-old",
-      ANTHROPIC_BASE_URL: "https://old.example",
-      ANTHROPIC_MODEL: "claude-test-model",
-    });
+    expect(options.env).toMatchObject({ ANTHROPIC_MODEL: "claude-test-model" });
+    expect(options.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(options.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+    expect(options.env?.ANTHROPIC_BASE_URL).toBeUndefined();
     expect(options.model).toBe("claude-test-model");
   });
 });
@@ -344,10 +344,10 @@ describe("leader harness options", () => {
         spec_revision: { spec_revision_id: "spec-1", status: "draft", revision_number: 1 },
         spec_approval: { spec_approval_id: "sca-1", status: "pending", actions: ["run"] },
       }),
-      askUser: (input) => ({ id: input.cardId, status: "pending", userTurnId: "utn-1" }),
+      askUser: (input) => ({ id: input.cardId, status: "pending", workRunId: "utn-1" }),
       createTask: () => ({
-        user_turn_id: "utn-1",
-        task: { task_id: "task-1", user_turn_id: "utn-1", subject: "Task", description: "", active_form: "", status: "pending" },
+        work_run_id: "utn-1",
+        task: { task_id: "task-1", work_run_id: "utn-1", subject: "Task", description: "", active_form: "", status: "pending" },
       }),
       saveExecutionPlan: (input) => ({ id: "art-1", type: "execution_plan", title: input.title, content: input.plan }),
       updateTask: (input) => ({ task_id: input.taskId, status: input.status ?? "pending" }),

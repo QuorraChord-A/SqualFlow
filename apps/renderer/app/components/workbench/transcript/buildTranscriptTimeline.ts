@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import { parseMcpOutput } from "./mcpToolPresenters";
+import { isMcpToolNamed, parseMcpOutput } from "./mcpToolPresenters";
 import type {
   TranscriptActivity,
   TimelineInputMessage,
@@ -368,7 +368,7 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
   function maybeEmitCardBlock(part: Extract<TimelineInputPart, { type: `tool-${string}` }>) {
     if (part.state !== "output-available" || !currentGroup) return;
 
-    if (part.toolName.endsWith("__ask_user")) {
+    if (isMcpToolNamed(part.toolName, "ask_user", part.mcp?.tool)) {
       const cardId = parseDecisionCardId(part.output);
       if (cardId && !currentGroup.cards.some((card) => card.type === "decision-card" && card.cardId === cardId)) {
         currentGroup.cards.push({
@@ -381,7 +381,7 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       return;
     }
 
-    if (part.toolName.endsWith("__create_plan")) {
+    if (isMcpToolNamed(part.toolName, "create_plan", part.mcp?.tool)) {
       const specCard = parseSpecCard(part.output);
       if (specCard) {
         currentGroup.cards.push({
@@ -394,10 +394,10 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       return;
     }
 
-    if (part.toolName.endsWith("__submit_orchestration_plan")) {
+    if (isMcpToolNamed(part.toolName, "submit_orchestration_plan", part.mcp?.tool)) {
       const planCard = parsePlanCard(part.output);
       if (planCard) currentGroup.cards.push({
-        id: `${message.id}:plan-card:${planCard.planRevisionId}`,
+        id: `tool-card:${part.toolCallId}:orchestration-plan`,
         type: "plan-card",
         planRevisionId: planCard.planRevisionId,
         toolCallId: part.toolCallId,
