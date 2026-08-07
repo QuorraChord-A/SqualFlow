@@ -1142,9 +1142,9 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
         reasoningEffort: roleReasoningEfforts[role],
       });
       setRuntimeFeedback(null);
-    } catch (error) {
+    } catch {
       setRoleEnabled((current) => ({ ...current, [role]: previousEnabled }));
-      setRuntimeFeedback(error instanceof Error ? error.message : "更新角色状态失败");
+      setRuntimeFeedback("角色状态保存失败，请稍后重试。");
     }
   };
 

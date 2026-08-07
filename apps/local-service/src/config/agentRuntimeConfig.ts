@@ -411,11 +411,12 @@ function resolvedRoleBinding(
     ? index.roles[role].configId
     : fallbackConfigId;
   const runtimeConfig = configs.find((item) => item.id === configId);
+  const modelId = runtimeConfig ? resolveRuntimeModelId(runtimeConfig, index.roles[role].modelId) : "";
   return {
     role,
-    enabled: role === "leader" ? true : index.roles[role].enabled,
+    enabled: role === "leader" ? true : Boolean(index.roles[role].enabled && runtimeConfig && modelId),
     configId,
-    modelId: runtimeConfig ? resolveRuntimeModelId(runtimeConfig, index.roles[role].modelId) : "",
+    modelId,
     reasoningEffort: normalizeRuntimeReasoningEffort(
       runtimeConfig?.sdk ?? "claudecode",
       index.roles[role].reasoningEffort,
@@ -586,11 +587,16 @@ export async function updateRoleRuntimeBinding(
   const configId = typeof input.configId === "string" && input.configId
     ? input.configId
     : index.roles[role].configId;
+  const requestedModelId = typeof input.modelId === "string" ? input.modelId.trim() : "";
   const runtimeConfig = configs.find((item) => item.id === configId);
   if (!runtimeConfig) {
+    if (role !== "leader" && input.enabled === false && !configId && !requestedModelId) {
+      index.roles[role] = { ...index.roles[role], enabled: false, configId: "", modelId: "" };
+      await writeIndex(index);
+      return { role, ...index.roles[role] };
+    }
     throw new Error("config_id must reference an existing runtime config");
   }
-  const requestedModelId = typeof input.modelId === "string" ? input.modelId.trim() : "";
   if (requestedModelId && !runtimeConfig.models.some((item) => item.id === requestedModelId && item.name.trim())) {
     throw new Error("model_id must reference an existing model in the runtime config");
   }

@@ -40,6 +40,22 @@ describe("agent runtime config storage", () => {
     ]);
     expect(snapshot.configs).toEqual([]);
     expect(snapshot.roles.every((role) => role.configId === "" && role.modelId === "")).toBe(true);
+    expect(snapshot.roles.find((role) => role.role === "leader")?.enabled).toBe(true);
+    expect(snapshot.roles.filter((role) => role.role !== "leader").every((role) => !role.enabled)).toBe(true);
+  });
+
+  it("allows an unbound Expert role to be disabled without a provider", async () => {
+    const { readAgentRuntimeConfigSnapshot, updateRoleRuntimeBinding } = await loadRuntimeConfigModule();
+
+    await expect(updateRoleRuntimeBinding("coder", {
+      enabled: false,
+      configId: "",
+      modelId: "",
+      reasoningEffort: "high",
+    })).resolves.toMatchObject({ role: "coder", enabled: false, configId: "", modelId: "" });
+
+    expect((await readAgentRuntimeConfigSnapshot()).roles.find((role) => role.role === "coder"))
+      .toMatchObject({ enabled: false, configId: "", modelId: "" });
   });
 
   it("removes the exact legacy seeded provider without deleting user-created configs", async () => {
