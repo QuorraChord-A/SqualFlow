@@ -19,10 +19,15 @@ import { createStorePort } from "../mcp/storePort.js";
 import type { CurrentTurnInput } from "../mcp/leaderServer.js";
 import {
   completeWorkRunIfSettled,
+  finalizeWorkRun,
   pauseWorkRunIfAwaitingPlanFeedback,
   publishWorkRunEvent,
 } from "../domain/workRun.js";
-import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/workRunReview.js";
+import {
+  capturePersistentChangeBaseline,
+  changesFromBaseline,
+  cleanupChangeBaseline,
+} from "./changeBaseline.js";
 import { planRevisionView } from "../domain/orchestrationView.js";
 import {
   contextUsageSnapshotToPayload,
@@ -36,6 +41,8 @@ import { WsPusher } from "../ws/pusher.js";
 import type { AgentDispatcher } from "./agentDispatcher.js";
 import type { OrchestrationScheduler } from "./orchestrationScheduler.js";
 import { ContextCompactionState } from "./contextCompactionState.js";
+import type { ContextCompactionSnapshot } from "./contextCompactionState.js";
+import { leaderTranscriptChannelId } from "../domain/transcriptChannels.js";
 import { createAgentRuntimeAdapter } from "./adapters/factory.js";
 import type { AgentRuntimeAdapterFactory } from "./adapters/factory.js";
 import type {
@@ -69,6 +76,11 @@ import { queryWaitFinishedMs } from "./queryLifecyclePolicy.js";
 import {
   type McpServerIconRegistry,
 } from "./mcpServerIcons.js";
+import {
+  WorkRunToolAttributor,
+  WorkspaceMutationCoordinator,
+  type WorkRunFileAttributionSummary,
+} from "./workRunFileAttribution.js";
 
 export type { LeaderTurnInput } from "./leaderPrompt.js";
 
@@ -109,6 +121,7 @@ export type CreateLeaderRuntimeInput = {
   desktopBridge?: DesktopBridge;
   orchestrationScheduler?: OrchestrationScheduler;
   permissionGate?: RuntimePermissionGate;
+  mutationCoordinator?: WorkspaceMutationCoordinator;
   onWorkRunFatal?: (input: { flowId: string; workRunId: string }) => void;
   onWorkRunAction?: (input: { flowId: string; workRunId: string; action: "interrupt" | "resume" | "cancel" }) => void;
   logger?: OperationalLogger;
@@ -125,6 +138,15 @@ function parseToolList(value: string | null | undefined) {
 }
 
 type RuntimeConfigWithReasoningEffort = ResolvedFlowRuntimeConfig["config"] & { reasoningEffort?: string | null };
+
+function persistContextCompactionTimelineItem(store: Store, snapshot: ContextCompactionSnapshot) {
+  return store.upsertContextCompactionTimelineItem({
+    flowId: snapshot.flow_id,
+    channelId: leaderTranscriptChannelId(snapshot.flow_id),
+    agentSessionId: snapshot.agent_session_id,
+    payload: snapshot,
+  });
+}
 
 function withFlowReasoningEffort(
   runtimeConfig: ResolvedFlowRuntimeConfig,
@@ -239,6 +261,8 @@ type DeferredTurn = {
   reject: (error: Error) => void;
   adapter?: RuntimeOutputAdapter;
   pusher?: WsPusher;
+  fileAttributor?: WorkRunToolAttributor;
+  fileAttribution?: WorkRunFileAttributionSummary;
 };
 
 type PendingLeaderStart = {
@@ -284,7 +308,7 @@ class LeaderFlowStream {
       userMessage: string;
       assistantMessage: string;
     }) => void,
-    private readonly deps: Pick<CreateLeaderRuntimeInput, "store" | "eventBus" | "chatJournal" | "onWorkRunFatal" | "logger">,
+    private readonly deps: Pick<CreateLeaderRuntimeInput, "store" | "eventBus" | "chatJournal" | "onWorkRunFatal" | "logger" | "mutationCoordinator">,
     private readonly onClosed: () => void,
     private readonly desktopBridge: DesktopBridge | undefined,
     private readonly browserTurnContext: { agentSessionId: string | null },
@@ -315,25 +339,10 @@ class LeaderFlowStream {
     return this.active?.turn.leaderAgentSessionId ?? null;
   }
 
-  captureControlledEditBefore(
-    toolName: string,
-    capability: RuntimeCapability | null,
-    toolInput: Record<string, unknown>,
-    toolUseId: string | null,
-  ) {
+  markWriteExecutionStarted() {
     const active = this.active;
-    if (!active) return;
-    beginControlledEditReview({
-      flowId: active.turn.flowId,
-      workRunId: active.turn.workRunId
-        ?? active.turn.currentTurnInput?.work_run_id
-        ?? active.currentTurnInput?.work_run_id,
-      rootPath: this.reviewRootPath,
-      toolName,
-      capability,
-      toolInput,
-      toolUseId,
-    });
+    if (!active) return null;
+    return this.ensureWorkRunForExecution(active, true);
   }
 
   enqueue(turn: LeaderTurnInput): Promise<void> {
@@ -584,6 +593,14 @@ class LeaderFlowStream {
       startedAt: next.startedAt,
       mcpServerIcons: this.mcpServerIcons,
     });
+    next.fileAttributor = new WorkRunToolAttributor(
+      this.deps.mutationCoordinator ?? new WorkspaceMutationCoordinator(),
+      {
+        rootPath: this.reviewRootPath,
+        ownerKey: next.turn.flowId,
+        agentSessionId: next.turn.leaderAgentSessionId,
+      },
+    );
     next.pusher = new WsPusher(
       next.turn.flowId,
       () => this.sessionId,
@@ -599,6 +616,13 @@ class LeaderFlowStream {
 
     try {
       this.deps.store.updateAgentSessionStatus(next.turn.leaderAgentSessionId, "streaming");
+      capturePersistentChangeBaseline({
+        store: this.deps.store,
+        flowId: next.turn.flowId,
+        sourceAgentSessionId: next.turn.leaderAgentSessionId,
+        workRunId: next.turn.workRunId ?? next.currentTurnInput?.work_run_id ?? null,
+        rootPath: this.reviewRootPath,
+      });
       await this.deps.eventBus.publish(next.turn.flowId, {
         type: "session:event",
         flow_id: next.turn.flowId,
@@ -628,11 +652,14 @@ class LeaderFlowStream {
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
         const chunks = active.adapter.adapt(event);
+        await active.fileAttributor?.observe(event, chunks);
         this.syncSdkSessionId(active);
         for (const chunk of chunks) {
           await active.pusher.consume(chunk);
         }
-        consumeControlledEditToolResults(event);
+        if (chunks.some((chunk) => chunk.type === "tool-output-available")) {
+          this.promoteWorkspaceChanges(active);
+        }
         if (event.type === "turn_completed") {
           if (this.shouldStartFlowNameGeneration(active)) {
             if (active.adapter.resultStatus !== "success" || active.adapter.resultIsError) {
@@ -709,11 +736,14 @@ class LeaderFlowStream {
       return;
     }
 
+    active.fileAttribution = await active.fileAttributor?.finish();
+    const resolvedWorkRunId = this.resolveCompletedTurnWorkRun(active);
+    this.persistFileAttribution(active, resolvedWorkRunId);
     this.deps.store.updateAgentSessionStatus(active.turn.leaderAgentSessionId, "completed");
     this.deps.logger?.info({
       runtimeRole: "leader",
       flowId: active.turn.flowId,
-      workRunId: active.turn.workRunId ?? null,
+      workRunId: resolvedWorkRunId,
       agentSessionId: active.turn.leaderAgentSessionId,
       sdkSessionId: active.adapter.sdkSessionId ?? this.providerSessionId,
       durationMs: active.adapter.durationMs,
@@ -721,7 +751,7 @@ class LeaderFlowStream {
     }, "runtime turn completed");
     this.deps.store.appendEventLog({
       flowId: active.turn.flowId,
-      workRunId: active.turn.workRunId ?? null,
+      workRunId: resolvedWorkRunId,
       taskId: null,
       agentSessionId: active.turn.leaderAgentSessionId,
       eventType: "agent_session.turn_completed",
@@ -732,7 +762,7 @@ class LeaderFlowStream {
         started_at: active.startedAt,
         finished_at: new Date().toISOString(),
         duration_ms: active.adapter.durationMs,
-        work_run_id: active.turn.workRunId ?? null,
+        work_run_id: resolvedWorkRunId,
         turn_kind: active.turn.kind ?? "user",
       },
     });
@@ -741,7 +771,7 @@ class LeaderFlowStream {
       flow_id: active.turn.flowId,
       data: {
         agent_session_id: active.turn.leaderAgentSessionId,
-        work_run_id: null,
+        work_run_id: resolvedWorkRunId,
         expert_id: "exp-leader",
         status: "completed",
       },
@@ -755,15 +785,17 @@ class LeaderFlowStream {
       void this.activateNext();
       return;
     }
-    if (active.turn.workRunId) {
+    if (resolvedWorkRunId) {
       const completed = await completeWorkRunIfSettled({
         store: this.deps.store,
         eventBus: this.deps.eventBus,
-        workRunId: active.turn.workRunId,
+        chatJournal: this.deps.chatJournal,
+        workRunId: resolvedWorkRunId,
+        terminalMessageId: active.messageId,
         logId: active.turn.logId,
       });
       if (!completed) {
-        const waiting = pauseWorkRunIfAwaitingPlanFeedback(this.deps.store, active.turn.workRunId);
+        const waiting = pauseWorkRunIfAwaitingPlanFeedback(this.deps.store, resolvedWorkRunId);
         if (waiting) await publishWorkRunEvent(this.deps.eventBus, waiting, active.turn.logId);
       }
     }
@@ -774,6 +806,91 @@ class LeaderFlowStream {
     this.finishInput();
     await this.releaseForReuse("idle_after_turn_complete");
     active.resolve();
+  }
+
+  private initializeWorkRun(active: DeferredTurn, workRunId: string) {
+    let turn = this.deps.store.getWorkRun(workRunId);
+    if (!turn || turn.flowId !== active.turn.flowId) return null;
+    if (!turn.workSource) {
+      const flow = this.deps.store.getFlow(active.turn.flowId);
+      if (!flow?.projectId) return null;
+      turn = this.deps.store.startWorkRunWork({
+        flowId: active.turn.flowId,
+        workRunId,
+        workSource: "direct_message",
+        targetProjectId: flow.projectId,
+        inputSnapshotJson: JSON.stringify({
+          type: "direct_message",
+          message_id: active.currentTurnInput?.message_id ?? turn.triggerMessageId,
+        }),
+      });
+    }
+    return turn;
+  }
+
+  private ensureWorkRunForExecution(active: DeferredTurn, startExecution: boolean) {
+    let workRunId = active.turn.workRunId ?? active.currentTurnInput?.work_run_id ?? null;
+    if (!workRunId) {
+      const current = active.currentTurnInput;
+      if (!current || !["user_message", "decision_resolved", "spec_run", "plan_approved"].includes(current.trigger_kind)) {
+        return null;
+      }
+      const open = this.deps.store.getOpenWorkRun(active.turn.flowId);
+      const created = open ?? this.deps.store.createWorkRun({
+        flowId: active.turn.flowId,
+        triggerMessageId: current.message_id ?? `msg-work-${Date.now()}`,
+        specRequested: current.spec_requested === true,
+      });
+      if (!created || ["interrupted", "waiting_user"].includes(created.status)) return null;
+      workRunId = created.id;
+      current.work_run_id = created.id;
+    }
+    const turn = this.initializeWorkRun(active, workRunId);
+    if (!turn) return null;
+    this.deps.store.attachChangeBaselineToWorkRun(active.turn.leaderAgentSessionId, workRunId);
+    this.deps.store.assignAgentSessionWorkRun(active.turn.leaderAgentSessionId, workRunId);
+    const updated = startExecution ? this.deps.store.startWorkRunExecution(workRunId) : turn;
+    if (updated && startExecution) void publishWorkRunEvent(this.deps.eventBus, updated, active.turn.logId);
+    return updated?.id ?? workRunId;
+  }
+
+  private resolveCompletedTurnWorkRun(active: DeferredTurn) {
+    const candidate = this.deps.store.getChangeBaselineByAgentSession(active.turn.leaderAgentSessionId);
+    let workRunId = active.turn.workRunId ?? active.currentTurnInput?.work_run_id ?? null;
+    let workspaceChanged = false;
+    if (candidate) {
+      const changes = changesFromBaseline(candidate);
+      workspaceChanged = changes.status === "ready" && changes.changes.length > 0;
+    }
+    if (!workRunId && workspaceChanged) workRunId = this.ensureWorkRunForExecution(active, true);
+    if (workRunId) {
+      workRunId = this.ensureWorkRunForExecution(active, workspaceChanged) ?? workRunId;
+    } else if (candidate) {
+      cleanupChangeBaseline(this.deps.store, candidate);
+    }
+    return workRunId;
+  }
+
+  private persistFileAttribution(active: DeferredTurn, workRunId: string | null) {
+    if (!workRunId || !active.fileAttribution) return;
+    this.deps.store.recordWorkRunFileAttribution({
+      flowId: active.turn.flowId,
+      workRunId,
+      agentSessionId: active.turn.leaderAgentSessionId,
+      files: active.fileAttribution.files,
+      partialReason: active.fileAttribution.partialReason,
+    });
+  }
+
+  private promoteWorkspaceChanges(active: DeferredTurn) {
+    const workRunId = active.turn.workRunId ?? active.currentTurnInput?.work_run_id ?? null;
+    const baseline = this.deps.store.getChangeBaselineByAgentSession(active.turn.leaderAgentSessionId)
+      ?? (workRunId ? this.deps.store.getChangeBaselineForWorkRun(workRunId) : undefined);
+    if (!baseline) return null;
+    const changes = changesFromBaseline(baseline);
+    return changes.status === "ready" && changes.changes.length > 0
+      ? this.ensureWorkRunForExecution(active, true)
+      : null;
   }
 
   private syncSdkSessionId(active: DeferredTurn) {
@@ -837,16 +954,19 @@ class LeaderFlowStream {
     this.active = null;
     this.onCurrentTurnInput(undefined);
     if (active) {
+      active.fileAttribution = await active.fileAttributor?.finish();
+      const resolvedWorkRunId = this.resolveCompletedTurnWorkRun(active);
+      this.persistFileAttribution(active, resolvedWorkRunId);
       this.deps.logger?.error({
         runtimeRole: "leader",
         flowId: active.turn.flowId,
-        workRunId: active.turn.workRunId ?? active.turn.currentTurnInput?.work_run_id ?? null,
+        workRunId: resolvedWorkRunId,
         agentSessionId: active.turn.leaderAgentSessionId,
       sdkSessionId: this.providerSessionId,
         ...errorDiagnostic(failure),
       }, "runtime turn failed");
       this.deps.store.updateAgentSessionStatus(active.turn.leaderAgentSessionId, "failed");
-      const workRunId = active.turn.workRunId ?? active.turn.currentTurnInput?.work_run_id;
+      const workRunId = resolvedWorkRunId;
       if (workRunId) {
         this.deps.onWorkRunFatal?.({ flowId: active.turn.flowId, workRunId });
         // A Leader/provider fault ends this WorkRun but is not an actor-authored
@@ -858,8 +978,15 @@ class LeaderFlowStream {
           }
         }
         this.deps.store.cancelWorkRunPendingActions(workRunId);
-        const failedTurn = this.deps.store.failWorkRun(workRunId, "failed");
-        if (failedTurn) await publishWorkRunEvent(this.deps.eventBus, failedTurn, active.turn.logId);
+        await finalizeWorkRun({
+          store: this.deps.store,
+          eventBus: this.deps.eventBus,
+          chatJournal: this.deps.chatJournal,
+          workRunId,
+          terminalStatus: "failed",
+          terminalMessageId: active.messageId,
+          logId: active.turn.logId,
+        });
       }
       await this.deps.eventBus.publish(active.turn.flowId, {
         type: "session:event",
@@ -877,6 +1004,7 @@ class LeaderFlowStream {
 }
 
 export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRuntime {
+  const mutationCoordinator = input.mutationCoordinator ?? new WorkspaceMutationCoordinator();
   const streams = new Map<string, LeaderFlowStream>();
   const pendingStarts = new Map<string, PendingLeaderStart>();
   const flowNameJobs = new Map<string, Promise<void>>();
@@ -1107,7 +1235,14 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
     mcpTurnContext.currentTurnInput = turn.currentTurnInput ?? currentTurnInputFromTurn(turn);
     mcpTurnContexts.set(turn.flowId, mcpTurnContext);
     const leaderToolHandlers = createLeaderToolHandlers(
-      createStorePort(input.store, input.agentDispatcher),
+      createStorePort(input.store, input.agentDispatcher, {
+        onWorkRunEnsured: ({ flowId, workRunId }) => {
+          const agentSessionId = streams.get(flowId)?.activeLeaderAgentSessionId;
+          if (!agentSessionId) return;
+          input.store.attachChangeBaselineToWorkRun(agentSessionId, workRunId);
+          input.store.assignAgentSessionWorkRun(agentSessionId, workRunId);
+        },
+      }),
       {
         onFlowNameUpdated: ({ flowId, flow }) => input.eventBus.publish(flowId, {
           type: "flow:name_updated",
@@ -1327,19 +1462,20 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         };
         const result = checkPermission(permissionArgs);
         if (result.behavior === "deny" && result.requiresConfirmation) {
-          if (!turn.workRunId || !input.permissionGate) {
+          const permissionWorkRunId = stream?.markWriteExecutionStarted() ?? turn.workRunId;
+          if (!permissionWorkRunId || !input.permissionGate) {
             return { behavior: "deny", message: "风险操作无法取得用户确认，已拒绝。" };
           }
           return input.permissionGate({
             flowId: turn.flowId,
-            workRunId: turn.workRunId,
+            workRunId: permissionWorkRunId,
             scope: { kind: "leader_work_run" },
             request,
             permissionArgs,
           });
         }
-        if (result.behavior === "allow") {
-          stream.captureControlledEditBefore(request.providerToolName, request.capability, request.providerInput, request.context.toolUseId);
+        if (result.behavior === "allow" && (request.capability === "write" || request.capability === "edit")) {
+          stream?.markWriteExecutionStarted();
         }
         return result;
       },
@@ -1370,7 +1506,7 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       cwd,
       (value) => { mcpTurnContext.currentTurnInput = value; },
       scheduleFlowNameGeneration,
-      input,
+      { ...input, mutationCoordinator },
       () => {
         if (streams.get(turn.flowId) === stream) {
           streams.delete(turn.flowId);
@@ -1462,10 +1598,11 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       flow_expert_id: null,
       display_name: leaderAgentSession.displayName ?? "Leader",
     });
+    const runningTimeline = persistContextCompactionTimelineItem(input.store, runningCompaction);
     await input.eventBus.publish(flowId, {
       type: "context_compaction:event",
       flow_id: flowId,
-      data: runningCompaction,
+      data: { ...runningCompaction, timeline_item: runningTimeline.item },
     });
 
     let resultSessionId: string | null = null;
@@ -1519,11 +1656,12 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       if (!compactedSnapshot) {
         const completed = contextCompactions.complete(leaderAgentSession.id);
         if (completed) {
+          const completedTimeline = persistContextCompactionTimelineItem(input.store, completed);
           input.store.markFlowOutputCompleted(flowId, completed.updated_at);
           await input.eventBus.publish(flowId, {
             type: "context_compaction:event",
             flow_id: flowId,
-            data: completed,
+            data: { ...completed, timeline_item: completedTimeline.item },
           });
         }
         return null;
@@ -1564,11 +1702,12 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
       });
       const completed = contextCompactions.complete(leaderAgentSession.id);
       if (completed) {
+        const completedTimeline = persistContextCompactionTimelineItem(input.store, completed);
         input.store.markFlowOutputCompleted(flowId, completed.updated_at);
         await input.eventBus.publish(flowId, {
           type: "context_compaction:event",
           flow_id: flowId,
-          data: completed,
+          data: { ...completed, timeline_item: completedTimeline.item },
         });
       }
       return compactedSnapshot;
@@ -1578,10 +1717,11 @@ export function createLeaderRuntime(input: CreateLeaderRuntimeInput): LeaderRunt
         error instanceof Error ? error.message : String(error),
       );
       if (failed) {
+        const failedTimeline = persistContextCompactionTimelineItem(input.store, failed);
         await input.eventBus.publish(flowId, {
           type: "context_compaction:event",
           flow_id: flowId,
-          data: failed,
+          data: { ...failed, timeline_item: failedTimeline.item },
         });
       }
       throw error;

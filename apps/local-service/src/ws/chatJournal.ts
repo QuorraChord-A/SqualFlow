@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { UiMcpIcon, UiMcpResult, UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { isRuntimeCapability, type RuntimeCapability } from "../domain/runtimeCapabilities.js";
-import type { CanonicalTranscriptEntry, Store } from "../db/store.js";
+import type { CanonicalMessageKind, CanonicalTimelineItem, Store } from "../db/store.js";
 
 type TextPart = { type: "text"; id?: string; text: string };
 type ReasoningPart = { type: "reasoning"; id?: string; text: string; state: "done" };
@@ -38,7 +38,12 @@ export type AssistantUIMessage = {
   parts: AssistantMessagePart[];
   content: string;
   createdAt?: string;
-  metadata?: { turnTiming?: TurnTiming };
+  metadata?: {
+    turnTiming?: TurnTiming;
+    messageKind?: "assistant" | "assistant-continuation" | "work-run-terminal";
+    presentationTurnId?: string;
+    agentSessionId?: string;
+  };
 };
 
 type UserUIMessage = {
@@ -56,12 +61,13 @@ type JournalEvent = UiMessageChunk | Record<string, unknown>;
 
 export type JournalRecordResult = {
   cursor: number;
+  timelineItems: CanonicalTimelineItem[];
   messageId?: string;
   ignored?: boolean;
   removedMessageIds?: string[];
   activeTurn?: {
     messageId: string;
-    rootMessageId: string;
+    presentationTurnId: string;
     segmentIndex: number;
     startedAt: string;
   };
@@ -69,10 +75,10 @@ export type JournalRecordResult = {
 
 type TranscriptPersistence = Pick<
   Store,
-  | "commitTranscriptMutation"
+  | "commitTimelineMutation"
   | "getTranscriptCursor"
-  | "listTranscriptEntries"
-  | "renameTranscriptSession"
+  | "listTimelineItems"
+  | "renameTimelineSession"
 >;
 
 function keyFor(flowId: string, sessionId: string): string {
@@ -91,6 +97,16 @@ function runtimeCapabilityValue(event: Record<string, unknown>): RuntimeCapabili
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function canonicalMessageKind(value: unknown, role: ChatUIMessage["role"]): CanonicalMessageKind {
+  return value === "assistant-continuation"
+    || value === "running-guide"
+    || value === "work-run-terminal"
+    || value === "assistant"
+    || value === "user"
+    ? value
+    : role;
 }
 
 function isToolOutput(value: unknown): value is { content: string; is_error: boolean; mcp?: UiMcpResult } {
@@ -145,31 +161,40 @@ export class ChatJournal {
     transcriptId = sessionId,
     metadata?: Record<string, unknown>,
     agentSessionId = transcriptId,
-  ): { cursor: number; message: ChatUIMessage } & Pick<JournalRecordResult, "removedMessageIds" | "activeTurn"> {
+  ): { cursor: number; timelineItems: CanonicalTimelineItem[]; message: ChatUIMessage } & Pick<JournalRecordResult, "removedMessageIds" | "activeTurn"> {
     const key = keyFor(flowId, sessionId);
     this.registerSession(flowId, sessionId, transcriptId, agentSessionId);
+    const runningGuide = metadata?.messageKind === "running-guide";
+    const presentationTurnId = runningGuide
+      ? this.rootMessageIds.get(key) ?? this.current.get(key)?.id
+      : undefined;
     const message: UserUIMessage = {
       id: messageId,
       role: "user",
       parts: [{ type: "text", text: content }],
       content,
       ...(createdAt ? { createdAt } : {}),
-      ...(metadata ? { metadata } : {}),
+      metadata: {
+        ...(metadata ?? {}),
+        messageKind: runningGuide ? "running-guide" : "user",
+        ...(presentationTurnId ? { presentationTurnId } : {}),
+        agentSessionId,
+      },
     };
-    if (metadata?.localMessageKind === "running-guide") {
+    if (runningGuide) {
       const activeMessageIdBefore = this.current.get(key)?.id;
       const removedMessageIds = this.recordPendingGuideBoundary(flowId, sessionId, message);
-      const cursor = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+      const commit = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
       const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
       return {
-        cursor,
+        ...commit,
         message,
         ...(removedMessageIds.length > 0 ? { removedMessageIds } : {}),
         ...(activeTurn ? { activeTurn } : {}),
       };
     }
     this.appendHistory(flowId, sessionId, message);
-    return { cursor: this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), message };
+    return { ...this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), message };
   }
 
   record(
@@ -193,23 +218,28 @@ export class ChatJournal {
         parts: [],
         content: "",
         createdAt: startedAt,
-        metadata: { turnTiming: { startedAt, finishedAt: null, durationMs: null } },
+        metadata: {
+          messageKind: "assistant",
+          presentationTurnId: messageId,
+          agentSessionId,
+          turnTiming: { startedAt, finishedAt: null, durationMs: null },
+        },
       });
       this.rootMessageIds.set(key, messageId);
       this.segmentIndex.set(key, 0);
       this.textIndex.set(key, -1);
       this.reasoningIndex.set(key, -1);
       this.markMessageDirty(flowId, sessionId, messageId);
-      return { cursor: this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), messageId };
+      return { ...this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), messageId };
     }
 
     const message = this.current.get(key);
-    if (!message) return { cursor: this.getCursor(flowId, transcriptId), ignored: true };
+    if (!message) return { cursor: this.getCursor(flowId, transcriptId), timelineItems: [], ignored: true };
     const activeMessageIdBefore = message.id;
 
     this.flushPendingGuideBoundaryBeforeEvent(flowId, sessionId, eventType);
     const activeMessage = this.current.get(key);
-    if (!activeMessage) return { cursor: this.getCursor(flowId, transcriptId), ignored: true };
+    if (!activeMessage) return { cursor: this.getCursor(flowId, transcriptId), timelineItems: [], ignored: true };
     let canonicalMessageId = activeMessage.id;
 
     switch (eventType) {
@@ -301,10 +331,10 @@ export class ChatJournal {
     const currentAfterEvent = this.current.get(key);
     if (currentAfterEvent) this.updateMessageContent(currentAfterEvent);
     this.markMessageDirty(flowId, sessionId, canonicalMessageId);
-    const cursor = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+    const commit = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
     const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
     return {
-      cursor,
+      ...commit,
       messageId: canonicalMessageId,
       ...(activeTurn ? { activeTurn } : {}),
     };
@@ -315,12 +345,12 @@ export class ChatJournal {
     return this.cursors.get(keyFor(flowId, transcriptId)) ?? 0;
   }
 
-  getTranscriptEntries(flowId: string, transcriptId: string): CanonicalTranscriptEntry[] {
-    if (this.persistence) return this.persistence.listTranscriptEntries(flowId, transcriptId);
+  getTimelineItems(flowId: string, transcriptId: string): CanonicalTimelineItem[] {
+    if (this.persistence) return this.persistence.listTimelineItems(flowId, transcriptId);
     const transcriptKey = keyFor(flowId, transcriptId);
     const sessionIds = this.transcriptSessions.get(transcriptKey) ?? new Set([transcriptId]);
     let position = 0;
-    const entries: CanonicalTranscriptEntry[] = [];
+    const entries: CanonicalTimelineItem[] = [];
     const seen = new Set<string>();
     for (const sessionId of sessionIds) {
       const sessionKey = keyFor(flowId, sessionId);
@@ -332,12 +362,19 @@ export class ChatJournal {
         entries.push({
           flowId,
           channelId: transcriptId,
+          itemId: item.message.id,
+          itemType: "message",
           messageId: item.message.id,
           position: ++position,
           sessionId,
           agentSessionId: this.agentSessionIds.get(sessionKey) ?? transcriptId,
+          workRunId: null,
+          presentationTurnId: typeof item.message.metadata?.presentationTurnId === "string"
+            ? item.message.metadata.presentationTurnId
+            : null,
+          messageKind: canonicalMessageKind(item.message.metadata?.messageKind, item.message.role),
           lifecycle: item.lifecycle,
-          message: item.message as unknown as Record<string, unknown>,
+          payload: item.message as unknown as Record<string, unknown>,
           createdAt: timestamp,
           updatedAt: timestamp,
         });
@@ -346,9 +383,10 @@ export class ChatJournal {
     return entries;
   }
 
-  getTranscriptMessages(flowId: string, transcriptId: string): ChatUIMessage[] {
-    return this.getTranscriptEntries(flowId, transcriptId)
-      .map((entry) => entry.message as ChatUIMessage);
+  getTimelineMessages(flowId: string, transcriptId: string): ChatUIMessage[] {
+    return this.getTimelineItems(flowId, transcriptId)
+      .filter((item) => item.itemType === "message")
+      .map((item) => item.payload as ChatUIMessage);
   }
 
   getCurrentMessage(flowId: string, sessionId: string): AssistantUIMessage | null {
@@ -357,7 +395,7 @@ export class ChatJournal {
 
   getActiveTurn(flowId: string, sessionId: string): {
     message: AssistantUIMessage;
-    rootMessageId: string;
+    presentationTurnId: string;
     segmentIndex: number;
   } | null {
     const key = keyFor(flowId, sessionId);
@@ -365,7 +403,7 @@ export class ChatJournal {
     if (!message) return null;
     return {
       message,
-      rootMessageId: this.rootMessageIds.get(key) ?? message.id,
+      presentationTurnId: this.rootMessageIds.get(key) ?? message.id,
       segmentIndex: this.segmentIndex.get(key) ?? 0,
     };
   }
@@ -389,7 +427,7 @@ export class ChatJournal {
 
   renameSession(flowId: string, fromSessionId: string, toSessionId: string): void {
     if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
-    this.persistence?.renameTranscriptSession(flowId, fromSessionId, toSessionId);
+    this.persistence?.renameTimelineSession(flowId, fromSessionId, toSessionId);
 
     const fromKey = keyFor(flowId, fromSessionId);
     const toKey = keyFor(flowId, toSessionId);
@@ -491,16 +529,19 @@ export class ChatJournal {
     sessionId: string,
     transcriptId: string,
     agentSessionId: string,
-  ): number {
+  ): { cursor: number; timelineItems: CanonicalTimelineItem[] } {
     const sessionKey = keyFor(flowId, sessionId);
+    const dirtyMessageIds = this.dirtyMessageIds.get(sessionKey) ?? new Set<string>();
     if (!this.persistence) {
+      const cursor = this.nextCursor(flowId, transcriptId);
+      const timelineItems = this.getTimelineItems(flowId, transcriptId)
+        .filter((item) => dirtyMessageIds.has(item.itemId));
       this.dirtyMessageIds.delete(sessionKey);
       this.removedMessageIds.delete(sessionKey);
-      return this.nextCursor(flowId, transcriptId);
+      return { cursor, timelineItems };
     }
     try {
-      const dirtyMessageIds = this.dirtyMessageIds.get(sessionKey) ?? new Set<string>();
-      const cursor = this.persistence.commitTranscriptMutation({
+      const commit = this.persistence.commitTimelineMutation({
         flowId,
         channelId: transcriptId,
         sessionId,
@@ -516,7 +557,7 @@ export class ChatJournal {
       });
       this.dirtyMessageIds.delete(sessionKey);
       this.removedMessageIds.delete(sessionKey);
-      return cursor;
+      return commit;
     } catch (error) {
       this.clearMemorySession(flowId, sessionId);
       throw error;
@@ -602,7 +643,7 @@ export class ChatJournal {
     if (!active || active.message.id === previousMessageId) return undefined;
     return {
       messageId: active.message.id,
-      rootMessageId: active.rootMessageId,
+      presentationTurnId: active.presentationTurnId,
       segmentIndex: active.segmentIndex,
       startedAt: active.message.metadata?.turnTiming?.startedAt ?? active.message.createdAt ?? new Date().toISOString(),
     };
@@ -685,7 +726,12 @@ export class ChatJournal {
       parts: [],
       content: "",
       ...(startedAt ? { createdAt: startedAt } : {}),
-      metadata: { turnTiming: { startedAt, finishedAt: null, durationMs: null } },
+      metadata: {
+        messageKind: "assistant-continuation",
+        presentationTurnId: rootMessageId,
+        agentSessionId: previous.metadata?.agentSessionId,
+        turnTiming: { startedAt, finishedAt: null, durationMs: null },
+      },
     };
   }
 

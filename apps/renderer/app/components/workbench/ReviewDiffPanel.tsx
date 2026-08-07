@@ -49,12 +49,22 @@ function ReviewFileCard({ file }: { file: WorkRunReviewFile }) {
         {expanded ? <ChevronDown className="size-4 text-muted-foreground" /> : <ChevronRight className="size-4 text-muted-foreground" />}
         <FileText className="size-4 text-muted-foreground" />
         <span className="min-w-0 flex-1 truncate text-sm font-medium">{file.path}</span>
-        <span className={statClassName("additions")}>+{file.additions}</span>
-        <span className={statClassName("deletions")}>-{file.deletions}</span>
+        <span className={statClassName("additions")}>{file.additions === null ? "—" : `+${file.additions}`}</span>
+        <span className={statClassName("deletions")}>{file.deletions === null ? "—" : `-${file.deletions}`}</span>
       </button>
       {expanded ? (
         <div className="max-h-[560px] overflow-auto bg-background/45 font-mono">
-          <UnifiedDiff lines={file.lines} lineNumbers="single" />
+          {file.detail_status === "ready" ? (
+            <UnifiedDiff lines={file.lines} lineNumbers="single" />
+          ) : (
+            <div className="px-4 py-8 text-center font-sans text-sm text-muted-foreground">
+              {file.detail_status === "binary"
+                ? "二进制文件不提供逐行 Diff"
+                : file.detail_status === "large"
+                  ? "文件超过 1 MB，不提供逐行 Diff"
+                  : "文件详情不可用"}
+            </div>
+          )}
         </div>
       ) : null}
     </section>
@@ -104,8 +114,8 @@ function ReviewFileList({ files }: { files: WorkRunReviewFile[] }) {
                 >
                   <span className={`font-semibold ${statusClassName(file.status)}`}>{statusLabel(file.status)}</span>
                   <span className="truncate text-muted-foreground" title={file.path}>{fileName(file.path)}</span>
-                  <span className={statClassName("additions")}>+{file.additions}</span>
-                  <span className={statClassName("deletions")}>-{file.deletions}</span>
+                  <span className={statClassName("additions")}>{file.additions === null ? "—" : `+${file.additions}`}</span>
+                  <span className={statClassName("deletions")}>{file.deletions === null ? "—" : `-${file.deletions}`}</span>
                 </div>
               ))}
             </div>
@@ -130,6 +140,28 @@ export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
     );
   }
 
+  if (review.status !== "ready") {
+    return (
+      <div data-testid="review-diff-panel" className="flex h-full flex-col bg-background">
+        <header className="flex min-h-14 items-center border-b border-border/70 px-4">
+          <h2 className="text-sm font-semibold">WorkRun Review</h2>
+        </header>
+        <div className="flex flex-1 items-center justify-center px-8 text-center">
+          <div>
+            <div className="text-sm font-medium">
+              {review.status === "empty"
+                ? "本次 WorkRun 无文件变化"
+                : review.status === "skipped"
+                  ? "未生成完整 Diff"
+                  : "Diff 生成失败"}
+            </div>
+            {review.reason ? <div className="mt-2 max-w-xl text-xs text-muted-foreground">{review.reason}</div> : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       data-testid="review-diff-panel"
@@ -138,7 +170,7 @@ export default function ReviewDiffPanel({ review }: ReviewDiffPanelProps) {
     >
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-border/70 px-4">
-          <h2 className="text-sm font-semibold">本轮对话</h2>
+          <h2 className="text-sm font-semibold">WorkRun Review</h2>
           <span className={statClassName("additions")}>+{review.totals.additions}</span>
           <span className={statClassName("deletions")}>-{review.totals.deletions}</span>
           <div className="ml-auto flex items-center gap-2 text-xs">

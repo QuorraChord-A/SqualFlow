@@ -46,7 +46,7 @@ describe("canonical transcript persistence", () => {
     expect(store.getAgentSession(leader.id)?.status).toBe("interrupted");
     expect(store.getWorkRun(turn.id)?.status).toBe("ready");
     expect(store.getFlow(flow.id)?.status).toBe("idle");
-    expect(journal.getTranscriptMessages(flow.id, leader.id).map((message) => message.content)).toEqual([
+    expect(journal.getTimelineMessages(flow.id, leader.id).map((message) => message.content)).toEqual([
       "重启前消息",
       "最后已提交内容",
     ]);
@@ -98,7 +98,7 @@ describe("canonical transcript persistence", () => {
     const restartedStore = createStore(databasePath);
     restartedStore.migrate();
     const restartedJournal = new ChatJournal(restartedStore);
-    const messages = restartedJournal.getTranscriptMessages("flow-1", "ags-leader-1");
+    const messages = restartedJournal.getTimelineMessages("flow-1", "ags-leader-1");
 
     expect(messages.map((message) => message.id)).toEqual([
       "msg-user-1",
@@ -135,14 +135,14 @@ describe("canonical transcript persistence", () => {
       "msg-guide-1",
       "2026-07-18T10:00:01.000Z",
       "ags-leader-1",
-      { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+      { messageKind: "running-guide", guideStatusLabel: "已引导对话" },
       "ags-leader-1",
     );
     record({ type: "text-end", id: "before" });
     record({ type: "text-delta", id: "after", delta: "引导后。" });
     record({ type: "finish", finishedAt: "2026-07-18T10:00:02.000Z", durationMs: 2_000 });
 
-    expect(journal.getTranscriptMessages("flow-1", "ags-leader-1").map((message) => `${message.id}:${message.content}`)).toEqual([
+    expect(journal.getTimelineMessages("flow-1", "ags-leader-1").map((message) => `${message.id}:${message.content}`)).toEqual([
       "msg-user-1:初始需求",
       "msg-assistant-1:引导前。",
       "msg-guide-1:改成十八次",
@@ -172,19 +172,19 @@ describe("canonical transcript persistence", () => {
       "msg-guide-1",
       "2026-07-18T10:00:01.000Z",
       "ags-leader-1",
-      { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+      { messageKind: "running-guide", guideStatusLabel: "已引导对话" },
       "ags-leader-1",
     );
     expect(guideCommit.removedMessageIds).toEqual(["msg-assistant-1"]);
     expect(guideCommit.activeTurn).toEqual(expect.objectContaining({
       messageId: "msg-assistant-1:guide-1",
-      rootMessageId: "msg-assistant-1",
+      presentationTurnId: "msg-assistant-1",
       segmentIndex: 1,
     }));
     record({ type: "text-delta", id: "after", delta: "按新方向回答。" });
     record({ type: "finish", finishedAt: "2026-07-18T10:00:02.000Z", durationMs: 2_000 });
 
-    expect(journal.getTranscriptMessages("flow-1", "ags-leader-1").map((message) => `${message.id}:${message.content}`)).toEqual([
+    expect(journal.getTimelineMessages("flow-1", "ags-leader-1").map((message) => `${message.id}:${message.content}`)).toEqual([
       "msg-user-1:初始需求",
       "msg-guide-1:立刻改方向",
       "msg-assistant-1:guide-1:按新方向回答。",
@@ -213,7 +213,7 @@ describe("canonical transcript persistence", () => {
       "msg-guide-1",
       "2026-07-18T10:00:01.000Z",
       "ags-leader-1",
-      { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+      { messageKind: "running-guide", guideStatusLabel: "已引导对话" },
       "ags-leader-1",
     );
     const boundaryCommit = record({
@@ -225,10 +225,10 @@ describe("canonical transcript persistence", () => {
     expect(boundaryCommit.messageId).toBe("msg-assistant-1");
     expect(boundaryCommit.activeTurn).toEqual(expect.objectContaining({
       messageId: "msg-assistant-1:guide-1",
-      rootMessageId: "msg-assistant-1",
+      presentationTurnId: "msg-assistant-1",
       segmentIndex: 1,
     }));
-    expect(journal.getTranscriptMessages("flow-1", "ags-leader-1").map((message) => message.id)).toEqual([
+    expect(journal.getTimelineMessages("flow-1", "ags-leader-1").map((message) => message.id)).toEqual([
       "msg-assistant-1",
       "msg-guide-1",
       "msg-assistant-1:guide-1",
@@ -240,17 +240,17 @@ describe("canonical transcript persistence", () => {
     const committedMessageIds: string[][] = [];
     let cursor = 0;
     const persistence = {
-      commitTranscriptMutation(input: { messages: Array<{ message: { id?: unknown } }> }) {
+      commitTimelineMutation(input: { messages: Array<{ message: { id?: unknown } }> }) {
         committedMessageIds.push(input.messages.map((item) => String(item.message.id)));
         return ++cursor;
       },
       getTranscriptCursor() {
         return cursor;
       },
-      listTranscriptEntries() {
+      listTimelineItems() {
         return [];
       },
-      renameTranscriptSession() {},
+      renameTimelineSession() {},
     };
     const journal = new ChatJournal(persistence as never);
 
@@ -292,7 +292,7 @@ describe("canonical transcript persistence", () => {
     expect(journal.getCurrentMessage("flow-icons", "sdk-icons")?.parts).toEqual([
       expect.objectContaining({ mcp }),
     ]);
-    expect(store.listTranscriptEntries("flow-icons", "sdk-icons")[0]?.message).toEqual(expect.objectContaining({
+    expect(store.listTimelineItems("flow-icons", "sdk-icons")[0]?.payload).toEqual(expect.objectContaining({
       parts: [expect.objectContaining({
         mcp: { server: "context7", tool: "query-docs" },
       })],
@@ -302,16 +302,16 @@ describe("canonical transcript persistence", () => {
 
   it("does not publish a websocket event when the transcript commit fails", async () => {
     const persistence = {
-      commitTranscriptMutation() {
+      commitTimelineMutation() {
         throw new Error("disk full");
       },
       getTranscriptCursor() {
         return 0;
       },
-      listTranscriptEntries() {
+      listTimelineItems() {
         return [];
       },
-      renameTranscriptSession() {},
+      renameTimelineSession() {},
     };
     const journal = new ChatJournal(persistence as never);
     const eventBus = new EventBus();

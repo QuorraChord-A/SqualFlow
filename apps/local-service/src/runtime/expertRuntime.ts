@@ -26,14 +26,12 @@ import type {
 } from "./adapters/runtimeAdapter.js";
 import { hasWriteRuntimeCapability, normalizeRuntimeCapabilities, type RuntimeCapability } from "./capabilities.js";
 import { assembleExpertResult, type ExpertResult, type TurnOutcome } from "../harness/expertResult.js";
-import { captureWorkRunBaselineAsync, summarizeWorkRunDiffAsync, type WorkRunBaseline } from "./workRunDiff.js";
 import {
   contextUsageSnapshotToPayload,
   overallContextUsageFromResultCache,
   type ContextUsageSnapshot,
 } from "../domain/contextUsage.js";
 import { runtimeModelContextWindowK } from "../config/runtimeModelContext.js";
-import { beginControlledEditReview, consumeControlledEditToolResults } from "../domain/workRunReview.js";
 import { checkPermission, type CheckPermissionArgs, type PermissionResult } from "../permissions/permissionPolicy.js";
 import type { ChatJournal } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
@@ -54,6 +52,16 @@ import { buildPlatformEvent, computeFlowSig, parseMessageSegments } from "../pro
 import {
   type McpServerIconRegistry,
 } from "./mcpServerIcons.js";
+import {
+  capturePersistentChangeBaseline,
+  cleanupChangeBaseline,
+} from "./changeBaseline.js";
+import { publishWorkRunEvent } from "../domain/workRun.js";
+import {
+  WorkRunToolAttributor,
+  WorkspaceMutationCoordinator,
+  type WorkRunFileAttributionSummary,
+} from "./workRunFileAttribution.js";
 
 export type ExpertTaskInput = {
   flowId: string;
@@ -124,6 +132,8 @@ export type ExpertTaskFinishedEvent = {
   summary: string;
   error: string | null;
   artifactRefs: string[];
+  filesChanged: string[];
+  metrics: Record<string, unknown>;
   completedAt: string;
 };
 
@@ -137,6 +147,8 @@ export type ExpertConversationFinishedEvent = {
   summary: string;
   error: string | null;
   artifactRefs: string[];
+  filesChanged: string[];
+  metrics: Record<string, unknown>;
   completedAt: string;
 };
 
@@ -152,6 +164,7 @@ export type CreateExpertRuntimeInput = {
   /** Called only after an explicit Expert Task MCP update is persisted. */
   onTaskUpdated?: (event: { flowId: string; task: ExpertTask }) => Promise<void> | void;
   logger?: OperationalLogger;
+  mutationCoordinator?: WorkspaceMutationCoordinator;
 };
 
 function parseToolList(value: string | null | undefined) {
@@ -358,7 +371,8 @@ type FlowExpertTurn = {
   startedAt: string;
   adapter?: RuntimeOutputAdapter;
   pusher?: WsPusher;
-  baseline?: WorkRunBaseline;
+  fileAttributor?: WorkRunToolAttributor;
+  fileAttribution?: WorkRunFileAttributionSummary;
 };
 
 type RuntimeTask = NonNullable<ReturnType<Store["getTask"]>>;
@@ -434,25 +448,6 @@ class FlowExpertWorker {
 
   get acceptsInput() {
     return !this.closed && !this.inputClosed;
-  }
-
-  captureControlledEditBefore(
-    toolName: string,
-    capability: RuntimeCapability | null,
-    toolInput: Record<string, unknown>,
-    toolUseId: string | null,
-  ) {
-    const active = this.active;
-    if (!active) return;
-    beginControlledEditReview({
-      flowId: active.flowId,
-      workRunId: active.workRunId,
-      rootPath: this.reviewRootPath,
-      toolName,
-      capability,
-      toolInput,
-      toolUseId,
-    });
   }
 
   enqueueTask(input: Pick<FlowExpertTurn, "task" | "agentSessionId" | "scratchDir" | "content">): Promise<void> | null {
@@ -821,12 +816,22 @@ class FlowExpertWorker {
         startedAt: next.startedAt,
         mcpServerIcons: this.mcpServerIcons,
       });
+      next.fileAttributor = new WorkRunToolAttributor(
+        this.deps.mutationCoordinator ?? new WorkspaceMutationCoordinator(),
+        {
+          rootPath: this.reviewRootPath,
+          ownerKey: next.flowId,
+          agentSessionId: next.agentSessionId,
+        },
+      );
       if (this.canWrite) {
-        try {
-          next.baseline = await captureWorkRunBaselineAsync(this.reviewRootPath);
-        } catch {
-          // Best-effort: files_changed simply stays empty for this turn.
-        }
+        capturePersistentChangeBaseline({
+          store: this.deps.store,
+          flowId: next.flowId,
+          sourceAgentSessionId: next.agentSessionId,
+          workRunId: next.workRunId,
+          rootPath: this.reviewRootPath,
+        });
       }
       next.pusher = new WsPusher(
         next.flowId,
@@ -860,9 +865,9 @@ class FlowExpertWorker {
         const active = this.active;
         if (!active?.adapter || !active.pusher) continue;
         const chunks = active.adapter.adapt(event);
+        await active.fileAttributor?.observe(event, chunks);
         this.syncSdkSessionId(active);
         for (const chunk of chunks) await active.pusher.consume(chunk);
-        consumeControlledEditToolResults(event);
         if (event.type === "turn_completed") await this.completeTurn(active);
       }
       if (this.active || this.queued.length > 0) {
@@ -944,6 +949,9 @@ class FlowExpertWorker {
     }
     if (nextIsSameTask) {
       // Keep the shared query for ordered same-task queue processing; no telemetry here.
+      const changed = await this.filesChangedSince(active);
+      await this.resolveTasklessWorkRun(active, changed.files);
+      this.persistFileAttribution(active);
       this.logTurnCompleted(active);
       this.clearBrowserTurnContext(active.agentSessionId);
       this.clearTaskTurnContext(active.agentSessionId);
@@ -953,6 +961,8 @@ class FlowExpertWorker {
     }
     this.logTurnCompleted(active);
     const changed = await this.filesChangedSince(active);
+    await this.resolveTasklessWorkRun(active, changed.files);
+    this.persistFileAttribution(active);
     const result = assembleExpertResult({
       finalAssistantText: active.adapter.finalAssistantText,
       turnOutcome: "completed",
@@ -995,13 +1005,21 @@ class FlowExpertWorker {
   }
 
   private async publishCancelled(active: FlowExpertTurn, result: ExpertResult) {
+    const changed = await this.filesChangedSince(active);
+    await this.resolveTasklessWorkRun(active, changed.files);
+    this.persistFileAttribution(active);
+    const completionResult: ExpertResult = {
+      ...result,
+      files_changed: changed.files,
+      metrics: this.turnMetrics(active, changed.filesChangedSkipped),
+    };
     if (!active.task) {
       await publishConversationFinished(
         this.deps,
         active,
         this.flowExpertId,
         "cancelled",
-        result,
+        completionResult,
         "Expert conversation cancelled by Leader",
       );
       return;
@@ -1012,7 +1030,7 @@ class FlowExpertWorker {
       active.agentSessionId,
       this.flowExpertId,
       "cancelled",
-      result,
+      completionResult,
       "Expert task cancelled by Leader",
       { awaitLeader: false },
     );
@@ -1053,16 +1071,22 @@ class FlowExpertWorker {
   }
 
   private async filesChangedSince(active: FlowExpertTurn): Promise<{ files: string[]; filesChangedSkipped?: boolean }> {
-    if (!active.baseline) return { files: [] };
-    try {
-      const summary = await summarizeWorkRunDiffAsync(this.reviewRootPath, active.baseline);
-      return {
-        files: summary.changedFiles.map((file) => file.path),
-        filesChangedSkipped: summary.filesChangedSkipped,
-      };
-    } catch {
-      return { files: [] };
-    }
+    active.fileAttribution ??= await active.fileAttributor?.finish() ?? { files: [] };
+    return {
+      files: active.fileAttribution.files.map((file) => file.path),
+      ...(active.fileAttribution.partialReason ? { filesChangedSkipped: true } : {}),
+    };
+  }
+
+  private persistFileAttribution(active: FlowExpertTurn) {
+    if (!active.workRunId || !active.fileAttribution) return;
+    this.deps.store.recordWorkRunFileAttribution({
+      flowId: active.flowId,
+      workRunId: active.workRunId,
+      agentSessionId: active.agentSessionId,
+      files: active.fileAttribution.files,
+      partialReason: active.fileAttribution.partialReason,
+    });
   }
 
   private turnMetrics(active: FlowExpertTurn, filesChangedSkipped?: boolean): Record<string, unknown> {
@@ -1075,6 +1099,43 @@ class FlowExpertWorker {
       cache_hit_rate: cacheUsage?.cacheHitRate ?? null,
       ...(filesChangedSkipped ? { files_changed_skipped: true } : {}),
     };
+  }
+
+  private async resolveTasklessWorkRun(active: FlowExpertTurn, filesChanged: string[]) {
+    const candidate = this.deps.store.getChangeBaselineByAgentSession(active.agentSessionId);
+    if (active.workRunId) {
+      this.deps.store.attachChangeBaselineToWorkRun(active.agentSessionId, active.workRunId);
+      this.deps.store.assignAgentSessionWorkRun(active.agentSessionId, active.workRunId);
+      if (filesChanged.length > 0) {
+        const executing = this.deps.store.startWorkRunExecution(active.workRunId);
+        if (executing) await publishWorkRunEvent(this.deps.eventBus, executing);
+      }
+      return;
+    }
+    if (active.task || filesChanged.length === 0) {
+      if (candidate) cleanupChangeBaseline(this.deps.store, candidate);
+      return;
+    }
+    const flow = this.deps.store.getFlow(active.flowId);
+    if (!flow?.projectId) return;
+    const created = this.deps.store.createWorkRun({
+      flowId: active.flowId,
+      triggerMessageId: active.userMessageId,
+    });
+    if (!created) return;
+    const initialized = this.deps.store.startWorkRunWork({
+      flowId: active.flowId,
+      workRunId: created.id,
+      workSource: "direct_message",
+      targetProjectId: flow.projectId,
+      inputSnapshotJson: JSON.stringify({ type: "expert_message", message_id: active.userMessageId }),
+    });
+    if (!initialized) return;
+    active.workRunId = created.id;
+    this.deps.store.attachChangeBaselineToWorkRun(active.agentSessionId, created.id);
+    this.deps.store.assignAgentSessionWorkRun(active.agentSessionId, created.id);
+    const executing = this.deps.store.startWorkRunExecution(created.id);
+    if (executing) await publishWorkRunEvent(this.deps.eventBus, executing);
   }
 
   private dropQueuedTurnsForGroup(group: CompletionGroup) {
@@ -1104,7 +1165,14 @@ class FlowExpertWorker {
     };
     if (turnOutcome === "interrupted") this.deps.logger?.warn(fields, "runtime turn interrupted");
     else this.deps.logger?.error(fields, "runtime turn failed");
-    const failed = failureResult(error.message, turnOutcome);
+    const changed = await this.filesChangedSince(turn);
+    await this.resolveTasklessWorkRun(turn, changed.files);
+    this.persistFileAttribution(turn);
+    const failed: ExpertResult = {
+      ...failureResult(error.message, turnOutcome),
+      files_changed: changed.files,
+      metrics: this.turnMetrics(turn, changed.filesChangedSkipped),
+    };
     const session = this.deps.store.getAgentSession(turn.agentSessionId);
     if (session && ["queued", "streaming", "interrupted"].includes(session.status)) {
       this.deps.store.updateAgentSessionStatus(turn.agentSessionId, "failed");
@@ -1461,7 +1529,6 @@ class FlowExpertWorkerRegistry {
           });
         }
         if (result.behavior === "allow") {
-          worker.captureControlledEditBefore(request.providerToolName, request.capability, request.providerInput, request.context.toolUseId);
         }
         return result;
       },
@@ -1554,6 +1621,7 @@ class FlowExpertWorkerRegistry {
 }
 
 export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRuntime {
+  const mutationCoordinator = input.mutationCoordinator ?? new WorkspaceMutationCoordinator();
   type PermissionWaitOutcome = "approved" | "user_denied" | "card_cancelled" | "work_run_cancelled" | "runtime_closed";
   type PermissionWaiter = {
     flowId: string;
@@ -1789,7 +1857,7 @@ export function createExpertRuntime(input: CreateExpertRuntimeInput): ExpertRunt
     });
   };
 
-  const workerRegistry = new FlowExpertWorkerRegistry(input, permissionGate);
+  const workerRegistry = new FlowExpertWorkerRegistry({ ...input, mutationCoordinator }, permissionGate);
 
   const runTask = async (taskInput: ExpertTaskInput): Promise<void> => {
     let task = input.store.getTask(taskInput.taskId);
@@ -1973,6 +2041,8 @@ async function publishFinished(
     summary: result.summary,
     error: errorMessage ?? null,
     artifact_refs: [] as string[],
+    files_changed: result.files_changed,
+    metrics: result.metrics,
     completed_at: completedAt,
   };
 
@@ -2000,6 +2070,8 @@ async function publishFinished(
     summary: completion.summary,
     error: completion.error,
     artifactRefs: completion.artifact_refs,
+    filesChanged: completion.files_changed,
+    metrics: completion.metrics,
     completedAt: completion.completed_at,
   }));
   await input.eventBus.publish(task.flowId, {
@@ -2060,6 +2132,8 @@ async function publishConversationFinished(
     summary: result.summary,
     error: errorMessage ?? null,
     artifact_refs: [] as string[],
+    files_changed: result.files_changed,
+    metrics: result.metrics,
     completed_at: completedAt,
   };
   input.store.appendEventLog({
@@ -2095,6 +2169,8 @@ async function publishConversationFinished(
     summary: completion.summary,
     error: completion.error,
     artifactRefs: completion.artifact_refs,
+    filesChanged: completion.files_changed,
+    metrics: completion.metrics,
     completedAt: completion.completed_at,
   });
 }

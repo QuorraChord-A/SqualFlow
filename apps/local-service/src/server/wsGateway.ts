@@ -17,7 +17,7 @@ import {
   type MessageImageAttachment,
   type ServerWsMessage,
 } from "../protocol/wsMessages.js";
-import type { Store } from "../db/store.js";
+import type { CanonicalTimelineItem, Store } from "../db/store.js";
 import { buildFlowSnapshot } from "../domain/flowSnapshot.js";
 import { planRevisionView } from "../domain/orchestrationView.js";
 import { publishWorkRunEvent } from "../domain/workRun.js";
@@ -27,7 +27,6 @@ import { LeaderSessionRecoveryError } from "../runtime/adapters/runtimeErrors.js
 import { DECISION_CANCELLED_BODY } from "../runtime/leaderPrompt.js";
 import type { ExpertRuntime } from "../runtime/expertRuntime.js";
 import type { OrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
-import { captureWorkRunBaseline } from "../runtime/workRunDiff.js";
 import type { ChatJournal, ChatUIMessage } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
 import { finishInterruptedTurn } from "../ws/pusher.js";
@@ -340,33 +339,42 @@ function planFeedbackMetadata(feedback: Array<{ id: string; plan_revision_id: st
   return feedback?.length ? { planFeedback: feedback } : undefined;
 }
 
+function timelineItemDto(item: CanonicalTimelineItem) {
+  return {
+    id: item.itemId,
+    position: item.position,
+    type: item.itemType,
+    lifecycle: item.lifecycle,
+    message_id: item.messageId,
+    session_id: item.sessionId,
+    agent_session_id: item.agentSessionId,
+    work_run_id: item.workRunId,
+    presentation_turn_id: item.presentationTurnId,
+    message_kind: item.messageKind,
+    payload: item.payload,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+  };
+}
+
 function transcriptCommitMetadata(result: {
+  timelineItems: CanonicalTimelineItem[];
   removedMessageIds?: string[];
-  activeTurn?: { messageId: string; rootMessageId: string; segmentIndex: number; startedAt: string };
+  activeTurn?: { messageId: string; presentationTurnId: string; segmentIndex: number; startedAt: string };
 }) {
   return {
+    timeline_items: result.timelineItems.map(timelineItemDto),
     ...(result.removedMessageIds?.length ? { removed_message_ids: result.removedMessageIds } : {}),
     ...(result.activeTurn ? {
       active_turn: {
         message_id: result.activeTurn.messageId,
-        root_message_id: result.activeTurn.rootMessageId,
+        presentation_turn_id: result.activeTurn.presentationTurnId,
         segment_index: result.activeTurn.segmentIndex,
         started_at: result.activeTurn.startedAt,
       },
     } : {}),
   };
 }
-
-type HistoryBoundary = {
-  id: string;
-  kind: "history_session_boundary";
-  flow_expert_id: string;
-  agent_session_id: string;
-  display_name: string;
-  started_at: string;
-  status: "loaded" | "missing";
-  before_message_id?: string;
-};
 
 async function sessionHistoryMessage(message: ClientWsMessage & { type: "session:get" }, connection: WsConnection): Promise<ServerWsMessage> {
   let flowExpert = message.flow_expert_id
@@ -396,32 +404,9 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
     ? leaderTranscriptChannelId(message.flow_id)
     : flowExpert?.id ?? agentSession?.id ?? message.agent_session_id ?? message.session_id ?? "";
   const sessionId = channelId;
-  const entries = channelId
-    ? connection.chatJournal.getTranscriptEntries(message.flow_id, channelId)
+  const timelineItems = channelId
+    ? connection.chatJournal.getTimelineItems(message.flow_id, channelId)
     : [];
-  const history = entries.map((entry) => entry.message as unknown as ChatUIMessage);
-  const sessionsById = new Map(sessions.map((session) => [session.id, session]));
-  const historyBoundaries: HistoryBoundary[] = [];
-  if (flowExpert) {
-    let previousAgentSessionId: string | null = null;
-    for (const entry of entries) {
-      if (!entry.agentSessionId || entry.agentSessionId === previousAgentSessionId) continue;
-      if (previousAgentSessionId !== null) {
-        const boundarySession = sessionsById.get(entry.agentSessionId);
-        historyBoundaries.push({
-          id: `history-boundary-${entry.agentSessionId}`,
-          kind: "history_session_boundary",
-          flow_expert_id: flowExpert.id,
-          agent_session_id: entry.agentSessionId,
-          display_name: boundarySession?.displayName ?? flowExpert.displayName,
-          started_at: boundarySession?.createdAt ?? entry.createdAt,
-          status: "loaded",
-          before_message_id: entry.messageId,
-        });
-      }
-      previousAgentSessionId = entry.agentSessionId;
-    }
-  }
 
   const journalActiveTurn = sessionId ? connection.chatJournal.getActiveTurn(message.flow_id, sessionId) : null;
   const activeTurn = agentSession && ["completed", "failed", "interrupted"].includes(agentSession.status)
@@ -439,12 +424,11 @@ async function sessionHistoryMessage(message: ClientWsMessage & { type: "session
     data: {
       stream_epoch: connection.chatJournal.getStreamEpoch(),
       cursor: connection.chatJournal.getCursor(message.flow_id, channelId),
-      messages: history,
-      ...(historyBoundaries.length > 0 ? { history_boundaries: historyBoundaries } : {}),
+      timeline_items: timelineItems.map(timelineItemDto),
       ...(activeTurn ? {
         active_turn: {
           message_id: activeTurn.message.id,
-          root_message_id: activeTurn.rootMessageId,
+          presentation_turn_id: activeTurn.presentationTurnId,
           segment_index: activeTurn.segmentIndex,
           started_at: activeTurn.message.metadata?.turnTiming?.startedAt ?? activeTurn.message.createdAt!,
         },
@@ -1037,7 +1021,7 @@ async function handleFlowGuide(
             createdAt,
             leaderTranscriptChannelId(message.flow_id),
             {
-              localMessageKind: "running-guide",
+              messageKind: "running-guide",
               guideStatusLabel: "已引导对话",
               ...imageAttachmentMetadata(message.attachments),
               ...planFeedbackMetadata(guideFeedback),
@@ -1329,7 +1313,6 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
     await connection.send(errorMessage("PROJECT_ROOT_NOT_FOUND", "Flow project root is not configured", message.flow_id, message.log_id));
     return;
   }
-  const diffBaseline = captureWorkRunBaseline(project.localPath);
   const startedTurn = connection.store.runApprovedSpecForWorkRun({
     flowId: message.flow_id,
     specApprovalId: approval.id,
@@ -1342,7 +1325,6 @@ async function handleRunSpec(message: ClientWsMessage & { type: "flow:run_spec" 
       file_name: spec.fileName,
       overview: spec.overview,
       content: spec.content,
-      diff_baseline: diffBaseline,
     }),
   });
   if (!startedTurn) {
@@ -1965,7 +1947,7 @@ export async function handleWsClientMessage(rawMessage: unknown, connection: WsC
           agentSessionId: response.agent_session_id ?? null,
           sdkSessionId: response.session_id ?? null,
           logId: message.log_id ?? null,
-          messageCount: response.data.messages.length,
+          timelineItemCount: response.data.timeline_items.length,
           durationMs: Date.now() - startedAt,
         }, "Session history loaded");
       }

@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import { and, eq, sql } from "drizzle-orm";
 import { openDatabase } from "./client.js";
 import type { DecisionAnswers } from "../domain/types.js";
@@ -57,15 +58,29 @@ export type AgentContextUsageSnapshotRow = {
   updatedAt: string;
 };
 
-export type CanonicalTranscriptEntry = {
+export type CanonicalTimelineItemType = "message" | "session_boundary" | "context_compaction";
+
+export type CanonicalMessageKind =
+  | "user"
+  | "assistant"
+  | "assistant-continuation"
+  | "running-guide"
+  | "work-run-terminal";
+
+export type CanonicalTimelineItem = {
   flowId: string;
   channelId: string;
-  messageId: string;
+  itemId: string;
   position: number;
-  sessionId: string;
-  agentSessionId: string;
+  itemType: CanonicalTimelineItemType;
+  messageId: string | null;
+  sessionId: string | null;
+  agentSessionId: string | null;
+  workRunId: string | null;
+  presentationTurnId: string | null;
+  messageKind: CanonicalMessageKind | null;
   lifecycle: "active" | "complete" | "sealed";
-  message: Record<string, unknown>;
+  payload: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
@@ -365,11 +380,28 @@ export function createStore(databasePath: string) {
       .where(eq(flows.id, flowId))
       .run();
   };
+  const beginWorkRunExecution = (workRunId: string, timestamp = now()) => {
+    const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+    if (!existing || !["ready", "executing"].includes(existing.status)) return existing;
+    if (existing.status === "executing") return existing;
+    db.update(workRuns)
+      .set({
+        status: "executing",
+        revision: existing.revision + 1,
+        executionStartedAt: existing.executionStartedAt ?? timestamp,
+        activeStartedAt: timestamp,
+        waitingStartedAt: null,
+        updatedAt: timestamp,
+      })
+      .where(and(eq(workRuns.id, workRunId), eq(workRuns.revision, existing.revision)))
+      .run();
+    return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+  };
   const clearAllFlowData = () => {
     sqlite.exec(`
       DELETE FROM chat_queue_items;
       DELETE FROM chat_submissions;
-      DELETE FROM chat_messages;
+      DELETE FROM chat_timeline_items;
       DELETE FROM chat_transcript_channels;
       DELETE FROM task_dependencies;
       DELETE FROM tasks;
@@ -380,6 +412,9 @@ export function createStore(databasePath: string) {
       DELETE FROM decision_card_leader_inputs;
       DELETE FROM flow_read_states;
       DELETE FROM work_run_reviews;
+      DELETE FROM work_run_touched_files;
+      DELETE FROM work_run_file_attributions;
+      DELETE FROM change_baselines;
       DELETE FROM work_runs;
       DELETE FROM artifacts;
       DELETE FROM spec_revisions;
@@ -417,7 +452,7 @@ export function createStore(databasePath: string) {
       const executionModelVersion = sqlite
         .prepare("SELECT value FROM app_metadata WHERE key = ?")
         .get(executionModelKey) as { value?: string } | undefined;
-      if (executionModelVersion?.value !== "3") {
+      if (executionModelVersion?.value !== "5") {
         const nativeSessions = hasTable(sqlite, "agent_sessions")
           && hasColumn(sqlite, "agent_sessions", "session_id")
           ? sqlite.prepare(`
@@ -433,6 +468,7 @@ export function createStore(databasePath: string) {
             DROP TABLE IF EXISTS chat_queue_items;
             DROP TABLE IF EXISTS chat_submissions;
             DROP TABLE IF EXISTS chat_messages;
+            DROP TABLE IF EXISTS chat_timeline_items;
             DROP TABLE IF EXISTS chat_transcript_channels;
             DROP TABLE IF EXISTS task_dependencies;
             DROP TABLE IF EXISTS tasks;
@@ -443,6 +479,9 @@ export function createStore(databasePath: string) {
             DROP TABLE IF EXISTS decision_card_leader_inputs;
             DROP TABLE IF EXISTS flow_read_states;
             DROP TABLE IF EXISTS work_run_reviews;
+            DROP TABLE IF EXISTS work_run_touched_files;
+            DROP TABLE IF EXISTS work_run_file_attributions;
+            DROP TABLE IF EXISTS change_baselines;
             DROP TABLE IF EXISTS user_turn_reviews;
             DROP TABLE IF EXISTS work_runs;
             DROP TABLE IF EXISTS user_turns;
@@ -463,11 +502,8 @@ export function createStore(databasePath: string) {
           sqlite.prepare(`
             INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-          `).run(executionModelKey, "3", now());
+          `).run(executionModelKey, "5", now());
         })();
-      }
-      if (hasTable(sqlite, "chat_messages") && !hasColumn(sqlite, "chat_messages", "flow_id")) {
-        sqlite.exec("DROP TABLE chat_messages");
       }
       sqlite.exec(`
         CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, local_path TEXT NOT NULL, description TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT '');
@@ -621,11 +657,52 @@ export function createStore(databasePath: string) {
           ON decision_card_leader_inputs(flow_id, card_id, client_action_id);
         CREATE TABLE IF NOT EXISTS flow_read_states (flow_id TEXT NOT NULL, viewer_id TEXT NOT NULL DEFAULT 'local-default', last_read_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (flow_id, viewer_id));
         CREATE TABLE IF NOT EXISTS work_run_reviews (
-          flow_id TEXT PRIMARY KEY,
-          work_run_id TEXT NOT NULL,
+          work_run_id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL,
+          anchor_message_id TEXT NOT NULL,
+          status TEXT NOT NULL,
           review_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS work_run_reviews_flow_idx
+          ON work_run_reviews(flow_id, updated_at);
+        CREATE TABLE IF NOT EXISTS work_run_file_attributions (
+          work_run_id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL,
+          status TEXT NOT NULL,
+          reason TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS work_run_file_attributions_flow_idx
+          ON work_run_file_attributions(flow_id, updated_at);
+        CREATE TABLE IF NOT EXISTS work_run_touched_files (
+          work_run_id TEXT NOT NULL,
+          relative_path TEXT NOT NULL,
+          sources_json TEXT NOT NULL,
+          agent_session_ids_json TEXT NOT NULL,
+          first_seen_at TEXT NOT NULL,
+          last_seen_at TEXT NOT NULL,
+          PRIMARY KEY (work_run_id, relative_path)
+        );
+        CREATE INDEX IF NOT EXISTS work_run_touched_files_work_run_idx
+          ON work_run_touched_files(work_run_id, relative_path);
+        CREATE TABLE IF NOT EXISTS change_baselines (
+          id TEXT PRIMARY KEY,
+          flow_id TEXT NOT NULL,
+          source_agent_session_id TEXT NOT NULL UNIQUE,
+          work_run_id TEXT UNIQUE,
+          root_path TEXT NOT NULL,
+          snapshot_path TEXT NOT NULL,
+          manifest_json TEXT NOT NULL,
+          status TEXT NOT NULL,
+          error_message TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS change_baselines_flow_idx
+          ON change_baselines(flow_id, created_at);
         CREATE TABLE IF NOT EXISTS work_runs (
           id TEXT PRIMARY KEY,
           flow_id TEXT NOT NULL,
@@ -655,23 +732,32 @@ export function createStore(databasePath: string) {
           updated_at TEXT NOT NULL,
           PRIMARY KEY (flow_id, channel_id)
         );
-        CREATE TABLE IF NOT EXISTS chat_messages (
+        CREATE TABLE IF NOT EXISTS chat_timeline_items (
           flow_id TEXT NOT NULL,
           channel_id TEXT NOT NULL,
-          message_id TEXT NOT NULL,
+          item_id TEXT NOT NULL,
           position INTEGER NOT NULL,
-          session_id TEXT NOT NULL,
-          agent_session_id TEXT NOT NULL,
+          item_type TEXT NOT NULL,
+          message_id TEXT,
+          session_id TEXT,
+          agent_session_id TEXT,
+          work_run_id TEXT,
+          presentation_turn_id TEXT,
+          message_kind TEXT,
           lifecycle TEXT NOT NULL,
           payload_json TEXT NOT NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
-          PRIMARY KEY (flow_id, channel_id, message_id)
+          PRIMARY KEY (flow_id, channel_id, item_id)
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS chat_messages_channel_position_unique
-          ON chat_messages(flow_id, channel_id, position);
-        CREATE INDEX IF NOT EXISTS chat_messages_session_idx
-          ON chat_messages(flow_id, session_id, position);
+        CREATE UNIQUE INDEX IF NOT EXISTS chat_timeline_items_channel_position_unique
+          ON chat_timeline_items(flow_id, channel_id, position);
+        CREATE INDEX IF NOT EXISTS chat_timeline_items_session_idx
+          ON chat_timeline_items(flow_id, session_id, position);
+        CREATE INDEX IF NOT EXISTS chat_timeline_items_agent_session_idx
+          ON chat_timeline_items(agent_session_id, position);
+        CREATE INDEX IF NOT EXISTS chat_timeline_items_work_run_idx
+          ON chat_timeline_items(work_run_id, position);
         CREATE TABLE IF NOT EXISTS chat_queue_items (
           id TEXT NOT NULL,
           flow_id TEXT NOT NULL,
@@ -822,13 +908,13 @@ export function createStore(databasePath: string) {
       const canonicalTranscriptVersion = sqlite
         .prepare("SELECT value FROM app_metadata WHERE key = ?")
         .get(canonicalTranscriptMigrationKey) as { value?: string } | undefined;
-      if (canonicalTranscriptVersion?.value !== "2") {
+      if (canonicalTranscriptVersion?.value !== "3") {
         sqlite.transaction(() => {
           clearAllFlowData();
           sqlite.prepare(`
             INSERT INTO app_metadata (key, value, updated_at) VALUES (?, ?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
-          `).run(canonicalTranscriptMigrationKey, "2", now());
+          `).run(canonicalTranscriptMigrationKey, "3", now());
         })();
       }
     },
@@ -984,7 +1070,7 @@ export function createStore(databasePath: string) {
         .run();
       return db.select().from(flows).where(eq(flows.id, flowId)).get()!;
     },
-    commitTranscriptMutation(input: {
+    commitTimelineMutation(input: {
       flowId: string;
       channelId: string;
       sessionId: string;
@@ -994,6 +1080,7 @@ export function createStore(databasePath: string) {
     }) {
       const timestamp = now();
       return sqlite.transaction(() => {
+        const committedItemIds = new Set<string>();
         const channel = sqlite.prepare(`
           SELECT cursor FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?
         `).get(input.flowId, input.channelId) as { cursor: number } | undefined;
@@ -1009,32 +1096,108 @@ export function createStore(databasePath: string) {
 
         const selectExisting = sqlite.prepare(`
           SELECT position, session_id AS sessionId, agent_session_id AS agentSessionId,
-            lifecycle, payload_json AS payloadJson, created_at AS createdAt
-          FROM chat_messages
-          WHERE flow_id = ? AND channel_id = ? AND message_id = ?
+            work_run_id AS workRunId, presentation_turn_id AS presentationTurnId,
+            message_kind AS messageKind, lifecycle, payload_json AS payloadJson,
+            created_at AS createdAt
+          FROM chat_timeline_items
+          WHERE flow_id = ? AND channel_id = ? AND item_id = ? AND item_type = 'message'
         `);
         const selectNextPosition = sqlite.prepare(`
           SELECT COALESCE(MAX(position), 0) + 1 AS position
-          FROM chat_messages
+          FROM chat_timeline_items
           WHERE flow_id = ? AND channel_id = ?
         `);
         const upsert = sqlite.prepare(`
-          INSERT INTO chat_messages (
-            flow_id, channel_id, message_id, position, session_id, agent_session_id,
-            lifecycle, payload_json, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(flow_id, channel_id, message_id) DO UPDATE SET
+          INSERT INTO chat_timeline_items (
+            flow_id, channel_id, item_id, position, item_type, message_id,
+            session_id, agent_session_id, work_run_id, presentation_turn_id,
+            message_kind, lifecycle, payload_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(flow_id, channel_id, item_id) DO UPDATE SET
             session_id = excluded.session_id,
             agent_session_id = excluded.agent_session_id,
+            work_run_id = excluded.work_run_id,
+            presentation_turn_id = excluded.presentation_turn_id,
+            message_kind = excluded.message_kind,
             lifecycle = excluded.lifecycle,
             payload_json = excluded.payload_json,
             updated_at = excluded.updated_at
         `);
+        const agentSession = sqlite.prepare(`
+          SELECT work_run_id AS workRunId, flow_expert_id AS flowExpertId,
+            display_name AS displayName, created_at AS createdAt
+          FROM agent_sessions WHERE id = ? AND flow_id = ?
+        `).get(input.agentSessionId, input.flowId) as {
+          workRunId: string | null;
+          flowExpertId: string | null;
+          displayName: string;
+          createdAt: string;
+        } | undefined;
+        const hasAgentSessionMessage = sqlite.prepare(`
+          SELECT 1 FROM chat_timeline_items
+          WHERE flow_id = ? AND channel_id = ? AND item_type = 'message' AND agent_session_id = ?
+          LIMIT 1
+        `).get(input.flowId, input.channelId, input.agentSessionId);
+        const hasAnyMessage = sqlite.prepare(`
+          SELECT 1 FROM chat_timeline_items
+          WHERE flow_id = ? AND channel_id = ? AND item_type = 'message'
+          LIMIT 1
+        `).get(input.flowId, input.channelId);
+        if (agentSession?.flowExpertId && !hasAgentSessionMessage && hasAnyMessage) {
+          const boundaryId = `session-boundary:${input.agentSessionId}`;
+          const boundaryPosition = (selectNextPosition.get(input.flowId, input.channelId) as { position: number }).position;
+          sqlite.prepare(`
+            INSERT OR IGNORE INTO chat_timeline_items (
+              flow_id, channel_id, item_id, position, item_type, message_id,
+              session_id, agent_session_id, work_run_id, presentation_turn_id,
+              message_kind, lifecycle, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'session_boundary', NULL, ?, ?, ?, NULL, NULL, 'complete', ?, ?, ?)
+          `).run(
+            input.flowId,
+            input.channelId,
+            boundaryId,
+            boundaryPosition,
+            input.sessionId,
+            input.agentSessionId,
+            agentSession.workRunId,
+            JSON.stringify({
+              flow_expert_id: agentSession.flowExpertId,
+              agent_session_id: input.agentSessionId,
+              display_name: agentSession.displayName,
+              started_at: agentSession.createdAt,
+              status: "loaded",
+            }),
+            agentSession.createdAt,
+            timestamp,
+          );
+          committedItemIds.add(boundaryId);
+        }
         for (const item of input.messages) {
           const messageId = typeof item.message.id === "string" ? item.message.id : "";
-          if (!messageId) throw new Error("Canonical transcript message is missing an id");
+          if (!messageId) throw new Error("Canonical timeline message is missing an id");
+          committedItemIds.add(messageId);
+          const metadata = typeof item.message.metadata === "object" && item.message.metadata !== null
+            ? item.message.metadata as Record<string, unknown>
+            : {};
+          const role = item.message.role === "assistant" ? "assistant" : "user";
+          const messageKind = typeof metadata.messageKind === "string"
+            ? metadata.messageKind
+            : role;
+          const presentationTurnId = typeof metadata.presentationTurnId === "string"
+            ? metadata.presentationTurnId
+            : role === "assistant" ? messageId : null;
           const existing = selectExisting.get(input.flowId, input.channelId, messageId) as
-            | { position: number; sessionId: string; agentSessionId: string; lifecycle: string; payloadJson: string; createdAt: string }
+            | {
+                position: number;
+                sessionId: string | null;
+                agentSessionId: string | null;
+                workRunId: string | null;
+                presentationTurnId: string | null;
+                messageKind: string | null;
+                lifecycle: string;
+                payloadJson: string;
+                createdAt: string;
+              }
             | undefined;
           const position = existing?.position
             ?? (selectNextPosition.get(input.flowId, input.channelId) as { position: number }).position;
@@ -1046,6 +1209,9 @@ export function createStore(databasePath: string) {
             existing
             && existing.sessionId === input.sessionId
             && existing.agentSessionId === input.agentSessionId
+            && existing.workRunId === (agentSession?.workRunId ?? null)
+            && existing.presentationTurnId === presentationTurnId
+            && existing.messageKind === messageKind
             && existing.lifecycle === item.lifecycle
             && existing.payloadJson === payloadJson
           ) continue;
@@ -1054,8 +1220,12 @@ export function createStore(databasePath: string) {
             input.channelId,
             messageId,
             position,
+            messageId,
             input.sessionId,
             input.agentSessionId,
+            agentSession?.workRunId ?? null,
+            presentationTurnId,
+            messageKind,
             item.lifecycle,
             payloadJson,
             messageCreatedAt,
@@ -1064,41 +1234,116 @@ export function createStore(databasePath: string) {
         }
         if (input.removedMessageIds?.length) {
           const remove = sqlite.prepare(`
-            DELETE FROM chat_messages WHERE flow_id = ? AND channel_id = ? AND message_id = ?
+            DELETE FROM chat_timeline_items
+            WHERE flow_id = ? AND channel_id = ? AND item_type = 'message' AND message_id = ?
           `);
           for (const messageId of new Set(input.removedMessageIds)) {
             remove.run(input.flowId, input.channelId, messageId);
           }
         }
-        return cursor;
+        const timelineItems = this.listTimelineItems(input.flowId, input.channelId)
+          .filter((item) => committedItemIds.has(item.itemId));
+        return { cursor, timelineItems };
       })();
     },
-    listTranscriptEntries(flowId: string, channelId: string): CanonicalTranscriptEntry[] {
+    listTimelineItems(flowId: string, channelId: string): CanonicalTimelineItem[] {
       const rows = sqlite.prepare(`
         SELECT
           flow_id AS flowId,
           channel_id AS channelId,
-          message_id AS messageId,
+          item_id AS itemId,
           position,
+          item_type AS itemType,
+          message_id AS messageId,
           session_id AS sessionId,
           agent_session_id AS agentSessionId,
+          work_run_id AS workRunId,
+          presentation_turn_id AS presentationTurnId,
+          message_kind AS messageKind,
           lifecycle,
           payload_json AS payloadJson,
           created_at AS createdAt,
           updated_at AS updatedAt
-        FROM chat_messages
+        FROM chat_timeline_items
         WHERE flow_id = ? AND channel_id = ?
         ORDER BY position ASC
-      `).all(flowId, channelId) as Array<Omit<CanonicalTranscriptEntry, "message"> & { payloadJson: string }>;
+      `).all(flowId, channelId) as Array<Omit<CanonicalTimelineItem, "payload"> & { payloadJson: string }>;
       return rows.map(({ payloadJson, ...row }) => ({
         ...row,
+        itemType: row.itemType === "session_boundary"
+          ? "session_boundary"
+          : row.itemType === "context_compaction" ? "context_compaction" : "message",
         lifecycle: row.lifecycle === "active" ? "active" : row.lifecycle === "sealed" ? "sealed" : "complete",
-        message: parseJsonObject(payloadJson),
+        payload: parseJsonObject(payloadJson),
       }));
+    },
+    upsertContextCompactionTimelineItem(input: {
+      flowId: string;
+      channelId: string;
+      agentSessionId: string;
+      payload: Record<string, unknown> & { started_at: string; status: string };
+    }) {
+      const timestamp = now();
+      const itemId = `context-compaction:${input.agentSessionId}:${input.payload.started_at}`;
+      const lifecycle = input.payload.status === "running" ? "active" : "complete";
+      return sqlite.transaction(() => {
+        const channel = sqlite.prepare(`
+          SELECT cursor FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?
+        `).get(input.flowId, input.channelId) as { cursor: number } | undefined;
+        const cursor = (channel?.cursor ?? 0) + 1;
+        sqlite.prepare(`
+          INSERT INTO chat_transcript_channels (flow_id, channel_id, cursor, revision, updated_at)
+          VALUES (?, ?, ?, 1, ?)
+          ON CONFLICT(flow_id, channel_id) DO UPDATE SET
+            cursor = excluded.cursor,
+            revision = chat_transcript_channels.revision + 1,
+            updated_at = excluded.updated_at
+        `).run(input.flowId, input.channelId, cursor, timestamp);
+        const existing = sqlite.prepare(`
+          SELECT position, created_at AS createdAt
+          FROM chat_timeline_items
+          WHERE flow_id = ? AND channel_id = ? AND item_id = ?
+        `).get(input.flowId, input.channelId, itemId) as { position: number; createdAt: string } | undefined;
+        const position = existing?.position ?? (sqlite.prepare(`
+          SELECT COALESCE(MAX(position), 0) + 1 AS position
+          FROM chat_timeline_items WHERE flow_id = ? AND channel_id = ?
+        `).get(input.flowId, input.channelId) as { position: number }).position;
+        const session = sqlite.prepare(`
+          SELECT session_id AS sessionId, work_run_id AS workRunId
+          FROM agent_sessions WHERE id = ? AND flow_id = ?
+        `).get(input.agentSessionId, input.flowId) as { sessionId: string | null; workRunId: string | null } | undefined;
+        sqlite.prepare(`
+          INSERT INTO chat_timeline_items (
+            flow_id, channel_id, item_id, position, item_type, message_id,
+            session_id, agent_session_id, work_run_id, presentation_turn_id,
+            message_kind, lifecycle, payload_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, 'context_compaction', NULL, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)
+          ON CONFLICT(flow_id, channel_id, item_id) DO UPDATE SET
+            work_run_id = excluded.work_run_id,
+            lifecycle = excluded.lifecycle,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        `).run(
+          input.flowId,
+          input.channelId,
+          itemId,
+          position,
+          session?.sessionId ?? input.channelId,
+          input.agentSessionId,
+          session?.workRunId ?? null,
+          lifecycle,
+          JSON.stringify(input.payload),
+          existing?.createdAt ?? input.payload.started_at,
+          timestamp,
+        );
+        const item = this.listTimelineItems(input.flowId, input.channelId)
+          .find((candidate) => candidate.itemId === itemId);
+        return { cursor, item };
+      })();
     },
     sealActiveTranscriptMessages() {
       return sqlite.prepare(`
-        UPDATE chat_messages SET lifecycle = 'sealed', updated_at = ? WHERE lifecycle = 'active'
+        UPDATE chat_timeline_items SET lifecycle = 'sealed', updated_at = ? WHERE lifecycle = 'active'
       `).run(now()).changes;
     },
     interruptStaleLeaderSessions() {
@@ -1131,20 +1376,20 @@ export function createStore(databasePath: string) {
       `).get(flowId, channelId) as { cursor: number } | undefined;
       return row?.cursor ?? 0;
     },
-    renameTranscriptSession(flowId: string, fromSessionId: string, toSessionId: string) {
+    renameTimelineSession(flowId: string, fromSessionId: string, toSessionId: string) {
       if (!fromSessionId || !toSessionId || fromSessionId === toSessionId) return;
       sqlite.prepare(`
-        UPDATE chat_messages SET session_id = ?, updated_at = ?
+        UPDATE chat_timeline_items SET session_id = ?, updated_at = ?
         WHERE flow_id = ? AND session_id = ?
       `).run(toSessionId, now(), flowId, fromSessionId);
     },
-    clearTranscript(flowId: string, channelId?: string) {
+    clearTimeline(flowId: string, channelId?: string) {
       sqlite.transaction(() => {
         if (channelId) {
-          sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ? AND channel_id = ?").run(flowId, channelId);
+          sqlite.prepare("DELETE FROM chat_timeline_items WHERE flow_id = ? AND channel_id = ?").run(flowId, channelId);
           sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?").run(flowId, channelId);
         } else {
-          sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ?").run(flowId);
+          sqlite.prepare("DELETE FROM chat_timeline_items WHERE flow_id = ?").run(flowId);
           sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ?").run(flowId);
         }
       })();
@@ -1239,9 +1484,10 @@ export function createStore(databasePath: string) {
             payload_json = '{}', last_error_code = NULL, updated_at = ?
           WHERE receipt_state = 'dispatching'
             AND EXISTS (
-              SELECT 1 FROM chat_messages
-              WHERE chat_messages.flow_id = chat_submissions.flow_id
-                AND chat_messages.message_id = chat_submissions.client_message_id
+              SELECT 1 FROM chat_timeline_items
+              WHERE chat_timeline_items.flow_id = chat_submissions.flow_id
+                AND chat_timeline_items.item_type = 'message'
+                AND chat_timeline_items.message_id = chat_submissions.client_message_id
             )
         `).run(timestamp).changes;
         const requeued = sqlite.prepare(`
@@ -1516,6 +1762,9 @@ export function createStore(databasePath: string) {
       db.update(workRuns).set({ ...desired, updatedAt: now() }).where(eq(workRuns.id, turn.id)).run();
       return db.select().from(workRuns).where(eq(workRuns.id, turn.id)).get()!;
     },
+    startWorkRunExecution(workRunId: string, timestamp = now()) {
+      return beginWorkRunExecution(workRunId, timestamp);
+    },
     updateWorkRunInputSnapshot(workRunId: string, inputSnapshotJson: string) {
       const existing = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
       if (!existing || existing.status !== "ready") return undefined;
@@ -1654,6 +1903,134 @@ export function createStore(databasePath: string) {
         .where(eq(workRuns.id, workRunId))
         .run();
       return db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get()!;
+    },
+    finalizeWorkRunWithReview(input: {
+      workRunId: string;
+      expectedRevision: number;
+      terminalStatus: "completed" | "failed" | "cancelled";
+      timestamp: string;
+      reviewStatus: "ready" | "empty" | "skipped" | "failed";
+      reviewJson: string;
+      anchorMessageId?: string | null;
+    }) {
+      let finalized = false;
+      sqlite.transaction(() => {
+        const existing = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+        if (!existing || existing.revision !== input.expectedRevision) return;
+        if (["completed", "failed", "cancelled"].includes(existing.status)) return;
+        if (input.terminalStatus === "completed" && !["executing", "waiting_user"].includes(existing.status)) return;
+        const activeDurationMs = existing.status === "executing"
+          ? existing.activeDurationMs + elapsedMs(existing.activeStartedAt, input.timestamp)
+          : existing.activeDurationMs;
+        const leaderChannelId = `leader:${existing.flowId}`;
+        const requestedAnchor = input.anchorMessageId
+          ? sqlite.prepare(`
+              SELECT message_id AS messageId
+              FROM chat_timeline_items
+              WHERE flow_id = ? AND channel_id = ? AND item_type = 'message'
+                AND message_id = ? AND json_extract(payload_json, '$.role') = 'assistant'
+            `).get(existing.flowId, leaderChannelId, input.anchorMessageId) as { messageId: string } | undefined
+          : undefined;
+        const latestAssistant = requestedAnchor ?? sqlite.prepare(`
+          SELECT message_id AS messageId
+          FROM chat_timeline_items
+          WHERE flow_id = ? AND channel_id = ? AND item_type = 'message'
+            AND work_run_id = ? AND json_extract(payload_json, '$.role') = 'assistant'
+          ORDER BY position DESC LIMIT 1
+        `).get(existing.flowId, leaderChannelId, existing.id) as { messageId: string } | undefined;
+        let anchorMessageId = latestAssistant?.messageId ?? null;
+        if (anchorMessageId) {
+          sqlite.prepare(`
+            UPDATE chat_timeline_items SET work_run_id = ?, updated_at = ?
+            WHERE flow_id = ? AND channel_id = ? AND message_id = ?
+          `).run(existing.id, input.timestamp, existing.flowId, leaderChannelId, anchorMessageId);
+        } else {
+          anchorMessageId = `msg-work-run-terminal-${existing.id}`;
+          const position = (sqlite.prepare(`
+            SELECT COALESCE(MAX(position), 0) + 1 AS position
+            FROM chat_timeline_items WHERE flow_id = ? AND channel_id = ?
+          `).get(existing.flowId, leaderChannelId) as { position: number }).position;
+          const payload = {
+            id: anchorMessageId,
+            role: "assistant",
+            parts: [],
+            content: "",
+            createdAt: input.timestamp,
+            metadata: {
+              messageKind: "work-run-terminal",
+              presentationTurnId: anchorMessageId,
+              workRunId: existing.id,
+              turnTiming: { startedAt: input.timestamp, finishedAt: input.timestamp, durationMs: 0 },
+            },
+          };
+          sqlite.prepare(`
+            INSERT INTO chat_timeline_items (
+              flow_id, channel_id, item_id, position, item_type, message_id,
+              session_id, agent_session_id, work_run_id, presentation_turn_id,
+              message_kind, lifecycle, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, 'message', ?, ?, NULL, ?, ?, 'work-run-terminal', 'complete', ?, ?, ?)
+          `).run(
+            existing.flowId,
+            leaderChannelId,
+            anchorMessageId,
+            position,
+            anchorMessageId,
+            leaderChannelId,
+            existing.id,
+            anchorMessageId,
+            JSON.stringify(payload),
+            input.timestamp,
+            input.timestamp,
+          );
+          const channel = sqlite.prepare(`
+            SELECT cursor FROM chat_transcript_channels WHERE flow_id = ? AND channel_id = ?
+          `).get(existing.flowId, leaderChannelId) as { cursor: number } | undefined;
+          sqlite.prepare(`
+            INSERT INTO chat_transcript_channels (flow_id, channel_id, cursor, revision, updated_at)
+            VALUES (?, ?, ?, 1, ?)
+            ON CONFLICT(flow_id, channel_id) DO UPDATE SET
+              cursor = excluded.cursor,
+              revision = chat_transcript_channels.revision + 1,
+              updated_at = excluded.updated_at
+          `).run(existing.flowId, leaderChannelId, (channel?.cursor ?? 0) + 1, input.timestamp);
+        }
+        const review = { ...parseJsonObject(input.reviewJson), anchor_message_id: anchorMessageId };
+        sqlite.prepare(`
+          INSERT INTO work_run_reviews (
+            work_run_id, flow_id, anchor_message_id, status, review_json, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(work_run_id) DO UPDATE SET
+            flow_id = excluded.flow_id,
+            anchor_message_id = excluded.anchor_message_id,
+            status = excluded.status,
+            review_json = excluded.review_json,
+            updated_at = excluded.updated_at
+        `).run(
+          existing.id,
+          existing.flowId,
+          anchorMessageId,
+          input.reviewStatus,
+          JSON.stringify(review),
+          input.timestamp,
+          input.timestamp,
+        );
+        db.update(workRuns)
+          .set({
+            status: input.terminalStatus,
+            revision: existing.revision + 1,
+            activeStartedAt: null,
+            activeDurationMs,
+            waitingStartedAt: null,
+            completedAt: input.timestamp,
+            updatedAt: input.timestamp,
+          })
+          .where(and(eq(workRuns.id, existing.id), eq(workRuns.revision, input.expectedRevision)))
+          .run();
+        finalized = true;
+      })();
+      return finalized
+        ? db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get()
+        : undefined;
     },
     cancelWorkRunPendingActions(workRunId: string, timestamp = now()) {
       const turn = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
@@ -1898,10 +2275,12 @@ export function createStore(databasePath: string) {
     deleteFlow(flowId: string) {
       const existing = db.select().from(flows).where(eq(flows.id, flowId)).get();
       if (!existing) return false;
+      const baselineSnapshotPaths = (sqlite.prepare("SELECT snapshot_path AS snapshotPath FROM change_baselines WHERE flow_id = ?").all(flowId) as Array<{ snapshotPath: string }>)
+        .map((row) => row.snapshotPath);
       sqlite.transaction(() => {
         sqlite.prepare("DELETE FROM chat_queue_items WHERE flow_id = ?").run(flowId);
         sqlite.prepare("DELETE FROM chat_submissions WHERE flow_id = ?").run(flowId);
-        sqlite.prepare("DELETE FROM chat_messages WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM chat_timeline_items WHERE flow_id = ?").run(flowId);
         sqlite.prepare("DELETE FROM chat_transcript_channels WHERE flow_id = ?").run(flowId);
         for (const task of db.select().from(tasks).where(eq(tasks.flowId, flowId)).all()) {
           db.delete(taskDependencies).where(eq(taskDependencies.taskId, task.id)).run();
@@ -1915,6 +2294,9 @@ export function createStore(databasePath: string) {
         db.delete(decisionCardLeaderInputs).where(eq(decisionCardLeaderInputs.flowId, flowId)).run();
         db.delete(flowReadStates).where(eq(flowReadStates.flowId, flowId)).run();
         sqlite.prepare("DELETE FROM work_run_reviews WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM work_run_touched_files WHERE work_run_id IN (SELECT id FROM work_runs WHERE flow_id = ?)").run(flowId);
+        sqlite.prepare("DELETE FROM work_run_file_attributions WHERE flow_id = ?").run(flowId);
+        sqlite.prepare("DELETE FROM change_baselines WHERE flow_id = ?").run(flowId);
         db.delete(workRuns).where(eq(workRuns.flowId, flowId)).run();
         db.delete(artifacts).where(eq(artifacts.flowId, flowId)).run();
         db.delete(specRevisions).where(eq(specRevisions.flowId, flowId)).run();
@@ -1931,6 +2313,13 @@ export function createStore(databasePath: string) {
         sqlite.prepare("DELETE FROM orchestration_rules WHERE scope_type = 'flow' AND scope_id = ?").run(flowId);
         db.delete(flows).where(eq(flows.id, flowId)).run();
       })();
+      for (const snapshotPath of baselineSnapshotPaths) {
+        try {
+          fs.rmSync(snapshotPath, { recursive: true, force: true });
+        } catch {
+          // Best-effort cleanup for snapshots owned by the deleted Flow.
+        }
+      }
       return true;
     },
     clearFlows() {
@@ -2620,18 +3009,7 @@ export function createStore(databasePath: string) {
           .set({ status: flowExpert.status === "streaming" ? "streaming" : "queued", updatedAt: timestamp })
           .where(eq(flowExperts.id, input.flowExpertId))
           .run();
-        if (turn.status === "ready") {
-          db.update(workRuns)
-            .set({
-              status: "executing",
-              revision: turn.revision + 1,
-              executionStartedAt: timestamp,
-              activeStartedAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .where(and(eq(workRuns.id, turn.id), eq(workRuns.revision, turn.revision)))
-            .run();
-        }
+        beginWorkRunExecution(turn.id, timestamp);
         syncFlowExecutionStatus(input.flowId, timestamp);
         started = true;
       })();
@@ -2708,12 +3086,7 @@ export function createStore(databasePath: string) {
           })
           .where(eq(tasks.id, input.taskId))
           .run();
-        if (turn.status === "ready") {
-          db.update(workRuns)
-            .set({ status: "executing", revision: turn.revision + 1, executionStartedAt: timestamp, activeStartedAt: timestamp, updatedAt: timestamp })
-            .where(and(eq(workRuns.id, turn.id), eq(workRuns.revision, turn.revision)))
-            .run();
-        }
+        beginWorkRunExecution(turn.id, timestamp);
         syncFlowExecutionStatus(input.flowId, timestamp);
         started = db.select().from(tasks).where(eq(tasks.id, input.taskId)).get() ?? undefined;
       })();
@@ -2780,18 +3153,7 @@ export function createStore(databasePath: string) {
           .set({ status: "in_progress", agentSessionId, revision: existing.revision + 1, startedAt: timestamp, updatedAt: timestamp })
           .where(eq(tasks.id, taskId))
           .run();
-        if (workRun.status === "ready") {
-          db.update(workRuns)
-            .set({
-              status: "executing",
-              revision: workRun.revision + 1,
-              executionStartedAt: timestamp,
-              activeStartedAt: timestamp,
-              updatedAt: timestamp,
-            })
-            .where(and(eq(workRuns.id, workRun.id), eq(workRuns.revision, workRun.revision)))
-            .run();
-        }
+        beginWorkRunExecution(workRun.id, timestamp);
         syncFlowExecutionStatus(existing.flowId, timestamp);
       })();
       return db.select().from(tasks).where(eq(tasks.id, taskId)).get()!;
@@ -3268,6 +3630,27 @@ export function createStore(databasePath: string) {
         syncFlowExecutionStatus(input.flowId, timestamp);
       })();
       return db.select().from(agentSessions).where(eq(agentSessions.id, row.id)).get()!;
+    },
+    assignAgentSessionWorkRun(agentSessionId: string, workRunId: string) {
+      const session = db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get();
+      const turn = db.select().from(workRuns).where(eq(workRuns.id, workRunId)).get();
+      if (!session || !turn || session.flowId !== turn.flowId) return undefined;
+      if (session.workRunId && session.workRunId !== workRunId) return undefined;
+      if (!session.workRunId) {
+        const timestamp = now();
+        sqlite.transaction(() => {
+          db.update(agentSessions)
+            .set({ workRunId, updatedAt: timestamp })
+            .where(eq(agentSessions.id, agentSessionId))
+            .run();
+          sqlite.prepare(`
+            UPDATE chat_timeline_items
+            SET work_run_id = ?, updated_at = ?
+            WHERE flow_id = ? AND agent_session_id = ? AND work_run_id IS NULL
+          `).run(workRunId, timestamp, session.flowId, agentSessionId);
+        })();
+      }
+      return db.select().from(agentSessions).where(eq(agentSessions.id, agentSessionId)).get();
     },
     listAgentSessions(flowId: string) {
       return db.select().from(agentSessions).where(eq(agentSessions.flowId, flowId)).all();
@@ -3762,31 +4145,271 @@ export function createStore(databasePath: string) {
     listArtifacts(flowId: string) {
       return db.select().from(artifacts).where(eq(artifacts.flowId, flowId)).all();
     },
-    replaceLatestWorkRunReview(input: { flowId: string; workRunId: string; reviewJson: string }) {
-      const updatedAt = now();
-      sqlite.prepare(`
-        INSERT INTO work_run_reviews (flow_id, work_run_id, review_json, updated_at)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(flow_id) DO UPDATE SET
-          work_run_id = excluded.work_run_id,
-          review_json = excluded.review_json,
-          updated_at = excluded.updated_at
-      `).run(input.flowId, input.workRunId, input.reviewJson, updatedAt);
-    },
-    getLatestWorkRunReview(flowId: string) {
+    getWorkRunReview(workRunId: string) {
       return sqlite.prepare(`
-        SELECT flow_id AS flowId, work_run_id AS workRunId, review_json AS reviewJson, updated_at AS updatedAt
+        SELECT work_run_id AS workRunId, flow_id AS flowId, anchor_message_id AS anchorMessageId,
+          status, review_json AS reviewJson,
+          created_at AS createdAt, updated_at AS updatedAt
         FROM work_run_reviews
-        WHERE flow_id = ?
-      `).get(flowId) as {
-        flowId: string;
+        WHERE work_run_id = ?
+      `).get(workRunId) as {
         workRunId: string;
+        flowId: string;
+        anchorMessageId: string;
+        status: string;
         reviewJson: string;
+        createdAt: string;
         updatedAt: string;
       } | undefined;
     },
-    deleteLatestWorkRunReview(flowId: string) {
+    listWorkRunReviews(flowId: string) {
+      return sqlite.prepare(`
+        SELECT work_run_id AS workRunId, flow_id AS flowId, anchor_message_id AS anchorMessageId,
+          status, review_json AS reviewJson,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM work_run_reviews
+        WHERE flow_id = ?
+        ORDER BY updated_at ASC
+      `).all(flowId) as Array<{
+        workRunId: string;
+        flowId: string;
+        anchorMessageId: string;
+        status: string;
+        reviewJson: string;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+    },
+    deleteWorkRunReviews(flowId: string) {
       sqlite.prepare("DELETE FROM work_run_reviews WHERE flow_id = ?").run(flowId);
+    },
+    recordWorkRunFileAttribution(input: {
+      flowId: string;
+      workRunId: string;
+      agentSessionId: string;
+      files: Array<{ path: string; source: "write" | "edit" | "file_change" | "shell" }>;
+      partialReason?: string | null;
+    }) {
+      const workRun = db.select().from(workRuns).where(eq(workRuns.id, input.workRunId)).get();
+      if (!workRun || workRun.flowId !== input.flowId) return undefined;
+      const timestamp = now();
+      sqlite.transaction(() => {
+        const existingAttribution = sqlite.prepare(`
+          SELECT status, reason FROM work_run_file_attributions WHERE work_run_id = ?
+        `).get(input.workRunId) as { status: "ready" | "partial"; reason: string | null } | undefined;
+        const reasons = new Set([
+          ...(existingAttribution?.reason ? existingAttribution.reason.split("；").filter(Boolean) : []),
+          ...(input.partialReason ? [input.partialReason] : []),
+        ]);
+        const status = existingAttribution?.status === "partial" || input.partialReason ? "partial" : "ready";
+        sqlite.prepare(`
+          INSERT INTO work_run_file_attributions (
+            work_run_id, flow_id, status, reason, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(work_run_id) DO UPDATE SET
+            status = excluded.status,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at
+        `).run(
+          input.workRunId,
+          input.flowId,
+          status,
+          reasons.size > 0 ? [...reasons].join("；") : null,
+          timestamp,
+          timestamp,
+        );
+        for (const file of input.files) {
+          const relativePath = file.path.trim().replaceAll("\\", "/");
+          if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || relativePath.startsWith("/")) continue;
+          const existing = sqlite.prepare(`
+            SELECT sources_json AS sourcesJson, agent_session_ids_json AS agentSessionIdsJson,
+              first_seen_at AS firstSeenAt
+            FROM work_run_touched_files WHERE work_run_id = ? AND relative_path = ?
+          `).get(input.workRunId, relativePath) as {
+            sourcesJson: string;
+            agentSessionIdsJson: string;
+            firstSeenAt: string;
+          } | undefined;
+          const sources = new Set([...(existing ? parseJsonStringArray(existing.sourcesJson) : []), file.source]);
+          const agentSessionIds = new Set([
+            ...(existing ? parseJsonStringArray(existing.agentSessionIdsJson) : []),
+            input.agentSessionId,
+          ]);
+          sqlite.prepare(`
+            INSERT INTO work_run_touched_files (
+              work_run_id, relative_path, sources_json, agent_session_ids_json,
+              first_seen_at, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(work_run_id, relative_path) DO UPDATE SET
+              sources_json = excluded.sources_json,
+              agent_session_ids_json = excluded.agent_session_ids_json,
+              last_seen_at = excluded.last_seen_at
+          `).run(
+            input.workRunId,
+            relativePath,
+            JSON.stringify([...sources].sort()),
+            JSON.stringify([...agentSessionIds].sort()),
+            existing?.firstSeenAt ?? timestamp,
+            timestamp,
+          );
+        }
+      })();
+      return { workRunId: input.workRunId, flowId: input.flowId };
+    },
+    getWorkRunFileAttribution(workRunId: string) {
+      const attribution = sqlite.prepare(`
+        SELECT work_run_id AS workRunId, flow_id AS flowId, status, reason,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM work_run_file_attributions WHERE work_run_id = ?
+      `).get(workRunId) as {
+        workRunId: string;
+        flowId: string;
+        status: "ready" | "partial";
+        reason: string | null;
+        createdAt: string;
+        updatedAt: string;
+      } | undefined;
+      if (!attribution) return undefined;
+      const files = sqlite.prepare(`
+        SELECT relative_path AS path, sources_json AS sourcesJson,
+          agent_session_ids_json AS agentSessionIdsJson,
+          first_seen_at AS firstSeenAt, last_seen_at AS lastSeenAt
+        FROM work_run_touched_files
+        WHERE work_run_id = ?
+        ORDER BY relative_path ASC
+      `).all(workRunId) as Array<{
+        path: string;
+        sourcesJson: string;
+        agentSessionIdsJson: string;
+        firstSeenAt: string;
+        lastSeenAt: string;
+      }>;
+      return {
+        ...attribution,
+        files: files.map((file) => ({
+          path: file.path,
+          sources: parseJsonStringArray(file.sourcesJson),
+          agentSessionIds: parseJsonStringArray(file.agentSessionIdsJson),
+          firstSeenAt: file.firstSeenAt,
+          lastSeenAt: file.lastSeenAt,
+        })),
+      };
+    },
+    createChangeBaseline(input: {
+      flowId: string;
+      sourceAgentSessionId: string;
+      workRunId?: string | null;
+      rootPath: string;
+      snapshotPath: string;
+      manifestJson: string;
+      status: "ready" | "skipped" | "failed";
+      errorMessage?: string | null;
+    }) {
+      const timestamp = now();
+      const baselineId = id("cbl");
+      sqlite.prepare(`
+        INSERT INTO change_baselines (
+          id, flow_id, source_agent_session_id, work_run_id, root_path, snapshot_path,
+          manifest_json, status, error_message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        baselineId,
+        input.flowId,
+        input.sourceAgentSessionId,
+        input.workRunId ?? null,
+        input.rootPath,
+        input.snapshotPath,
+        input.manifestJson,
+        input.status,
+        input.errorMessage ?? null,
+        timestamp,
+        timestamp,
+      );
+      return sqlite.prepare(`
+        SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+          work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+          manifest_json AS manifestJson, status, error_message AS errorMessage,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM change_baselines WHERE source_agent_session_id = ?
+      `).get(input.sourceAgentSessionId) as {
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      } | undefined;
+    },
+    getChangeBaselineByAgentSession(agentSessionId: string) {
+      return sqlite.prepare(`
+        SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+          work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+          manifest_json AS manifestJson, status, error_message AS errorMessage,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM change_baselines WHERE source_agent_session_id = ?
+      `).get(agentSessionId) as {
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      } | undefined;
+    },
+    getChangeBaselineForWorkRun(workRunId: string) {
+      return sqlite.prepare(`
+        SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+          work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+          manifest_json AS manifestJson, status, error_message AS errorMessage,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM change_baselines WHERE work_run_id = ?
+      `).get(workRunId) as {
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      } | undefined;
+    },
+    attachChangeBaselineToWorkRun(agentSessionId: string, workRunId: string) {
+      const existing = sqlite.prepare(`
+        SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+          work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+          manifest_json AS manifestJson, status, error_message AS errorMessage,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM change_baselines WHERE work_run_id = ?
+      `).get(workRunId) as {
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      } | undefined;
+      if (existing) return existing;
+      sqlite.prepare(`
+        UPDATE change_baselines SET work_run_id = ?, updated_at = ?
+        WHERE source_agent_session_id = ? AND work_run_id IS NULL
+      `).run(workRunId, now(), agentSessionId);
+      return sqlite.prepare(`
+        SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+          work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+          manifest_json AS manifestJson, status, error_message AS errorMessage,
+          created_at AS createdAt, updated_at AS updatedAt
+        FROM change_baselines WHERE work_run_id = ?
+      `).get(workRunId) as {
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      } | undefined;
+    },
+    deleteChangeBaseline(baselineId: string) {
+      return sqlite.prepare("DELETE FROM change_baselines WHERE id = ?").run(baselineId).changes > 0;
+    },
+    listChangeBaselines(flowId?: string) {
+      const rows = flowId
+        ? sqlite.prepare(`SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+            work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+            manifest_json AS manifestJson, status, error_message AS errorMessage,
+            created_at AS createdAt, updated_at AS updatedAt FROM change_baselines WHERE flow_id = ?`).all(flowId)
+        : sqlite.prepare(`SELECT id, flow_id AS flowId, source_agent_session_id AS sourceAgentSessionId,
+            work_run_id AS workRunId, root_path AS rootPath, snapshot_path AS snapshotPath,
+            manifest_json AS manifestJson, status, error_message AS errorMessage,
+            created_at AS createdAt, updated_at AS updatedAt FROM change_baselines`).all();
+      return rows as Array<{
+        id: string; flowId: string; sourceAgentSessionId: string; workRunId: string | null;
+        rootPath: string; snapshotPath: string; manifestJson: string; status: "ready" | "skipped" | "failed";
+        errorMessage: string | null; createdAt: string; updatedAt: string;
+      }>;
     },
     createArtifact(input: { flowId: string; workRunId?: string | null; taskId?: string | null; type: string; title: string; content: string; sourceAgentSessionId?: string }) {
       const timestamp = now();

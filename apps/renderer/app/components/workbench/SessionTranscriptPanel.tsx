@@ -7,7 +7,7 @@ import { ConversationEmptyState } from "@/components/ai-elements-official/conver
 import { PromptInlineContent } from "@/components/ai-elements-official/prompt-inline-entity";
 import { CheckIcon, CopyIcon, FileText, MessageSquareIcon } from "lucide-react";
 import { wsClient } from "../../lib/ws";
-import type { HistorySessionBoundary, WsInMessage } from "../../lib/ws";
+import type { TranscriptTimelineItem, WsInMessage } from "../../lib/ws";
 import {
   extractMessageAgentSessionId,
   extractMessageFlowExpertId,
@@ -31,8 +31,10 @@ import { TranscriptScrollProvider, useTranscriptScroll } from "./transcript/Tran
 import {
   emptyTranscriptState,
   transcriptReducer,
+  projectTranscriptPresentationItems,
   type TranscriptCommittedEvent,
   type TranscriptEvent,
+  type TranscriptPresentationItem,
 } from "./transcript/transcriptState";
 import { ImagePreviewOverlay, ImageThumbnailContent } from "./transcript/ImagePreview";
 import { isMcpToolNamed, parseMcpOutput } from "./transcript/mcpToolPresenters";
@@ -60,13 +62,9 @@ export interface SessionTranscriptPanelProps {
   onOpenPlan?: (plan: OrchestrationPlanView) => void;
   onApprovePlan?: (plan: OrchestrationPlanView) => void;
   showReasoning?: boolean;
-  workRuns?: WorkRunDisplay[];
-  review?: WorkRunReview | null;
-  onOpenReview?: () => void;
+  reviews?: WorkRunReview[];
+  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
-  statusDividerLabel?: string | null;
-  statusDividerAnimated?: boolean;
-  statusDividerAt?: string | null;
   workspaceRootPath?: string | null;
 }
 
@@ -126,8 +124,8 @@ function FileDiffPreview({ file }: { file: WorkRunReviewFile }) {
     >
       <div className="flex items-center gap-3 border-b border-border/70 px-3 py-2 text-xs">
         <span className="min-w-0 flex-1 truncate font-medium" title={file.path}>{file.path}</span>
-        <span className="shrink-0 text-emerald-400">+{file.additions}</span>
-        <span className="shrink-0 text-red-400">-{file.deletions}</span>
+        <span className="shrink-0 text-emerald-400">{file.additions === null ? "—" : `+${file.additions}`}</span>
+        <span className="shrink-0 text-red-400">{file.deletions === null ? "—" : `-${file.deletions}`}</span>
       </div>
       <div data-testid="review-file-diff-preview-body" className="max-h-72 overflow-auto bg-background/90 font-mono">
         {file.lines.length > 0 ? (
@@ -147,7 +145,7 @@ function WorkRunReviewSummaryCard({
   onOpenReview,
 }: {
   review: WorkRunReview;
-  onOpenReview?: () => void;
+  onOpenReview?: (workRunId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [previewPath, setPreviewPath] = useState<string | null>(null);
@@ -214,15 +212,28 @@ function WorkRunReviewSummaryCard({
           <FileText className="size-4 text-muted-foreground" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">已编辑 {review.totals.files} 个文件</div>
-          <div className="mt-0.5 flex gap-2 text-xs">
-            <span className="text-emerald-400">+{review.totals.additions}</span>
-            <span className="text-red-400">-{review.totals.deletions}</span>
+          <div className="text-sm font-semibold">
+            {review.status === "ready"
+              ? `已编辑 ${review.totals.files} 个文件`
+              : review.status === "empty"
+                ? "本次 WorkRun 无文件变化"
+                : review.status === "skipped"
+                  ? "本次 WorkRun 未生成完整 Diff"
+                  : "本次 WorkRun Diff 生成失败"}
           </div>
+          {review.status === "ready" ? (
+            <>
+              <div className="mt-0.5 flex gap-2 text-xs">
+                <span className="text-emerald-400">+{review.totals.additions}</span>
+                <span className="text-red-400">-{review.totals.deletions}</span>
+              </div>
+              {review.reason ? <div className="mt-1 truncate text-xs text-muted-foreground">{review.reason}</div> : null}
+            </>
+          ) : review.reason ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{review.reason}</div> : null}
         </div>
         <button
           type="button"
-          onClick={onOpenReview}
+          onClick={() => onOpenReview?.(review.work_run_id)}
           className="shrink-0 cursor-pointer rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
         >
           查看全部
@@ -241,8 +252,8 @@ function WorkRunReviewSummaryCard({
             className="relative grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 px-4 py-2 text-xs outline-none transition-colors hover:bg-muted/45 focus-visible:bg-muted/45"
           >
             <span className="truncate text-muted-foreground" title={file.path}>{file.path}</span>
-            <span className="text-emerald-400">+{file.additions}</span>
-            <span className="text-red-400">-{file.deletions}</span>
+            <span className="text-emerald-400">{file.additions === null ? "—" : `+${file.additions}`}</span>
+            <span className="text-red-400">{file.deletions === null ? "—" : `-${file.deletions}`}</span>
             {previewPath === file.path ? <FileDiffPreview file={file} /> : null}
           </div>
         ))}
@@ -317,63 +328,7 @@ function messageTimestampValue(message: UIMessage): unknown {
     ?? timestamped.metadata?.createdAt
     ?? timestamped.metadata?.created_at
     ?? timestamped.metadata?.turnTiming?.startedAt;
-  if (explicit) return explicit;
-
-  const idTimestamp = /^msg-(?:user|assistant)-(\d{13})(?:-|$)/.exec(message.id)?.[1];
-  return idTimestamp ? Number(idTimestamp) : undefined;
-}
-
-function workRunTiming(turn: WorkRunDisplay): TurnTiming {
-  if (turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled") {
-    return {
-      startedAt: turn.startedAt,
-      finishedAt: turn.completedAt,
-      durationMs: turn.activeDurationMs,
-      activeDurationMs: turn.activeDurationMs,
-      label: "finished",
-    };
-  }
-  if (turn.status === "waiting_user") {
-    return {
-      startedAt: null,
-      finishedAt: null,
-      durationMs: null,
-      activeDurationMs: turn.activeDurationMs,
-      label: "waiting",
-    };
-  }
-  return {
-    startedAt: turn.activeStartedAt ?? turn.startedAt,
-    finishedAt: null,
-    durationMs: null,
-    activeDurationMs: turn.activeDurationMs,
-    label: "working",
-  };
-}
-
-function timestampMs(value: unknown): number | null {
-  if (!value) return null;
-  const date = value instanceof Date
-    ? value
-    : typeof value === "number"
-      ? new Date(value)
-      : new Date(String(value));
-  const timestamp = date.getTime();
-  return Number.isNaN(timestamp) ? null : timestamp;
-}
-
-function findWorkRunStartIndex(
-  messages: UIMessage[],
-  turn: WorkRunDisplay,
-  usedIndexes: Set<number>,
-): number {
-  return messages.findIndex((message, index) =>
-    !usedIndexes.has(index) && message.id === turn.triggerMessageId
-  );
-}
-
-function pickAnchorAssistant(assistants: UIMessage[]): UIMessage | undefined {
-  return assistants[0];
+  return explicit;
 }
 
 export function formatMessageTimestamp(value: unknown, now = new Date()): string | null {
@@ -414,7 +369,7 @@ function userGuideStatusLabel(message: UIMessage): string | null {
 
 function isRunningGuideMessage(message: UIMessage): boolean {
   return message.role === "user"
-    && (message as { metadata?: { localMessageKind?: unknown } }).metadata?.localMessageKind === "running-guide";
+    && (message as { metadata?: { messageKind?: unknown } }).metadata?.messageKind === "running-guide";
 }
 
 function messageText(message: UIMessage): string {
@@ -662,32 +617,8 @@ function useCardMaps(
     }
 
     const plansByRevisionId = new Map((orchestrationPlans ?? []).map((plan) => [plan.revision.plan_revision_id, plan]));
-    const latestPlanByWorkRunId = new Map<string, OrchestrationPlanView>();
-    for (const plan of orchestrationPlans ?? []) {
-      const current = latestPlanByWorkRunId.get(plan.work_run_id);
-      if (!current || current.revision.revision_number < plan.revision.revision_number) {
-        latestPlanByWorkRunId.set(plan.work_run_id, plan);
-      }
-    }
-    return { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByWorkRunId };
+    return { decisionCardsById, specCardsById, plansByRevisionId };
   }, [decisionCards, decisionCardStatuses, decisionCardAnswers, orchestrationPlans, specCards]);
-}
-
-export function ensureDurableSpecCards(blocks: TranscriptBlock[], cards: Iterable<SpecCardState>) {
-  const existingIds = new Set(
-    blocks.flatMap((block) => block.type === "spec-card" ? [block.specApprovalId] : []),
-  );
-  const missing = [...cards].flatMap((card) => {
-    if (existingIds.has(card.spec_approval_id)) return [];
-    existingIds.add(card.spec_approval_id);
-    return [{
-      id: `durable-spec-card:${card.spec_approval_id}`,
-      type: "spec-card" as const,
-      specApprovalId: card.spec_approval_id,
-      toolCallId: "durable-spec-state",
-    }];
-  });
-  return missing.length > 0 ? [...blocks, ...missing] : blocks;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -708,12 +639,7 @@ function submissionToolMatchesPlan(
 ) {
   if (!isMcpToolNamed(tool.toolName, "submit_orchestration_plan", tool.mcp?.tool)) return false;
   const revisionId = submittedPlanRevisionId(tool.output);
-  if (revisionId) return revisionId === plan.revision.plan_revision_id;
-
-  const input = tool.input;
-  const inputFlowId = typeof input?.flow_id === "string" ? input.flow_id : null;
-  const inputTitle = typeof input?.title === "string" ? input.title : null;
-  return inputFlowId === plan.flow_id && inputTitle === plan.revision.title;
+  return revisionId === plan.revision.plan_revision_id;
 }
 
 export function hasMatchingPlanToolAnchor(messages: UIMessage[], plan: OrchestrationPlanView) {
@@ -745,17 +671,13 @@ export function hasMatchingPlanToolAnchor(messages: UIMessage[], plan: Orchestra
 export function reconcileDurablePlanCard(
   blocks: TranscriptBlock[],
   plans: OrchestrationPlanView[],
-  preferredPlan?: OrchestrationPlanView,
 ) {
   const toolAnchors = blocks.flatMap((block) => block.type === "tool-group"
     ? block.tools
       .filter((tool) => isMcpToolNamed(tool.toolName, "submit_orchestration_plan", tool.mcp?.tool))
       .map((tool) => ({ blockId: block.id, tool }))
     : []);
-  const planCandidates = preferredPlan
-    ? [preferredPlan, ...plans.filter((plan) => plan.revision.plan_revision_id !== preferredPlan.revision.plan_revision_id)]
-    : plans;
-  const match = planCandidates
+  const match = plans
     .map((plan) => ({
       plan,
       anchor: [...toolAnchors].reverse().find(({ tool }) => submissionToolMatchesPlan(tool, plan)),
@@ -796,72 +718,21 @@ export function reconcileDurablePlanCard(
   });
 }
 
-export function interleaveHistoryBoundaries(
-  messages: UIMessage[],
-  boundaries: HistorySessionBoundary[],
-) {
-  const byBeforeMessage = new Map<string, HistorySessionBoundary[]>();
-  const trailing: HistorySessionBoundary[] = [];
-  for (const boundary of boundaries) {
-    if (boundary.before_message_id) {
-      const list = byBeforeMessage.get(boundary.before_message_id) ?? [];
-      list.push(boundary);
-      byBeforeMessage.set(boundary.before_message_id, list);
-    } else {
-      trailing.push(boundary);
-    }
-  }
-  const result: Array<UIMessage | HistorySessionBoundary> = [];
-  for (const message of messages) {
-    result.push(...(byBeforeMessage.get(message.id) ?? []));
-    result.push(message);
-  }
-  result.push(...trailing);
-  return result;
+function timelinePayload(item: TranscriptTimelineItem): Record<string, unknown> {
+  return item.payload && typeof item.payload === "object" && !Array.isArray(item.payload)
+    ? item.payload as Record<string, unknown>
+    : {};
 }
 
-type TranscriptStatusDivider = {
-  kind: "status_divider";
-  id: string;
-  label: string;
-  animated: boolean;
-};
-
-export function interleaveStatusDivider(
-  items: Array<UIMessage | HistorySessionBoundary>,
-  label: string | null | undefined,
-  animated: boolean,
-  dividerAt: string | null | undefined,
-) {
-  if (!label) return items;
-  const divider: TranscriptStatusDivider = {
-    kind: "status_divider",
-    id: `status-divider:${dividerAt ?? label}`,
-    label,
-    animated,
-  };
-  const dividerTimestamp = timestampMs(dividerAt);
-  if (dividerTimestamp === null) return [...items, divider];
-  const nextMessageIndex = items.findIndex((item) => {
-    if (isHistoryBoundary(item)) return false;
-    const messageTimestamp = timestampMs(messageTimestampValue(item));
-    return messageTimestamp !== null && messageTimestamp > dividerTimestamp;
-  });
-  if (nextMessageIndex < 0) return [...items, divider];
-  return [...items.slice(0, nextMessageIndex), divider, ...items.slice(nextMessageIndex)];
-}
-
-function isHistoryBoundary(value: UIMessage | HistorySessionBoundary): value is HistorySessionBoundary {
-  return "kind" in value && value.kind === "history_session_boundary";
-}
-
-function isStatusDivider(value: UIMessage | HistorySessionBoundary | TranscriptStatusDivider): value is TranscriptStatusDivider {
-  return "kind" in value && value.kind === "status_divider";
+function compactionLabel(item: TranscriptTimelineItem) {
+  const payload = timelinePayload(item);
+  return payload.status === "running"
+    ? "正在压缩上下文"
+    : payload.status === "failed" ? "上下文压缩失败" : "已压缩上下文";
 }
 
 function SessionTranscriptContent({
-  messages,
-  historyBoundaries,
+  presentationItems,
   isLoadingHistory,
   emptyTitle,
   emptyDescription,
@@ -879,21 +750,16 @@ function SessionTranscriptContent({
   activity,
   activityMessageId,
   activeTurnTiming,
-  workRuns,
-  review,
+  reviews,
   onOpenReview,
   onOpenWorkspaceFile,
   expandedDecisionResultIds,
   showReasoning,
   bottomOverlayHeight,
-  statusDividerLabel,
-  statusDividerAnimated,
-  statusDividerAt,
   workspaceRootPath,
   thinkingLabel,
 }: {
-  messages: UIMessage[];
-  historyBoundaries: HistorySessionBoundary[];
+  presentationItems: TranscriptPresentationItem[];
   isLoadingHistory: boolean;
   emptyTitle: string;
   emptyDescription?: string;
@@ -911,23 +777,19 @@ function SessionTranscriptContent({
   activity?: TranscriptActivity | null;
   activityMessageId?: string | null;
   activeTurnTiming?: TurnTiming | null;
-  workRuns?: WorkRunDisplay[];
-  review?: WorkRunReview | null;
-  onOpenReview?: () => void;
+  reviews?: WorkRunReview[];
+  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
   expandedDecisionResultIds: Set<string>;
   showReasoning: boolean;
   bottomOverlayHeight?: number;
-  statusDividerLabel?: string | null;
-  statusDividerAnimated?: boolean;
-  statusDividerAt?: string | null;
   workspaceRootPath?: string | null;
   thinkingLabel?: string | null;
 }) {
   const lastFollowRequestKeyRef = useRef(followRequestKey);
   const followedPlanRevisionIdsRef = useRef(new Set<string>());
   const { follow, followIfAtBottom, registerThread } = useTranscriptScroll();
-  const { decisionCardsById, specCardsById, plansByRevisionId, latestPlanByWorkRunId } = useCardMaps(
+  const { decisionCardsById, specCardsById, plansByRevisionId } = useCardMaps(
     decisionCards,
     decisionCardStatuses,
     decisionCardAnswers,
@@ -935,126 +797,41 @@ function SessionTranscriptContent({
     orchestrationPlans,
   );
 
-  const visibleMessages = messages.filter((message) => {
-    if (activity !== null && message.id === activityMessageId) return true;
-    return hasRenderableContent(message, showReasoning);
+  const reviewAnchorIds = new Set((reviews ?? []).map((review) => review.anchor_message_id));
+  const visiblePresentationItems = presentationItems.flatMap((item): TranscriptPresentationItem[] => {
+    if (item.type === "session-boundary" || item.type === "context-compaction") return [item];
+    if (item.type === "user-message") {
+      return hasRenderableContent(item.message, showReasoning) ? [item] : [];
+    }
+    const messages = item.messages.filter((message) =>
+      message.id === activityMessageId
+      || reviewAnchorIds.has(message.id)
+      || hasRenderableContent(message, showReasoning)
+    );
+    return messages.length > 0 ? [{ ...item, messages }] : [];
   });
+  const visibleMessages = visiblePresentationItems.flatMap((item) =>
+    item.type === "user-message" ? [item.message] : item.type === "assistant-turn" ? item.messages : []
+  );
   const renderablePlanRevisionIds = (orchestrationPlans ?? [])
     .filter((plan) => hasMatchingPlanToolAnchor(visibleMessages, plan))
     .map((plan) => plan.revision.plan_revision_id);
   const renderablePlanRevisionKey = renderablePlanRevisionIds.join(":");
 
-  const timelineItems = interleaveStatusDivider(
-    interleaveHistoryBoundaries(visibleMessages, historyBoundaries),
-    statusDividerLabel,
-    Boolean(statusDividerAnimated),
-    statusDividerAt,
-  );
-  const { workRunRenderTargets, workRunGroupedMessageIds } = useMemo(() => {
-    const targets = new Map<string, { activity: TranscriptActivity; timing: TurnTiming; messageIds: string[]; turn?: WorkRunDisplay }>();
-    const grouped = new Set<string>();
-    if (!workRuns || workRuns.length === 0) {
-      // Continue to inferred grouping below. Active snapshots can arrive before
-      // WorkRun state after switching flows.
-    } else {
-      const usedStartIndexes = new Set<number>();
-      const turnStartIndexes: Array<{ turn: WorkRunDisplay; startIndex: number }> = [];
-      for (const turn of workRuns) {
-        const startIndex = findWorkRunStartIndex(visibleMessages, turn, usedStartIndexes);
-        if (startIndex < 0) continue;
-        usedStartIndexes.add(startIndex);
-        turnStartIndexes.push({ turn, startIndex });
-      }
-      turnStartIndexes.sort((left, right) => left.startIndex - right.startIndex);
-
-      for (let index = 0; index < turnStartIndexes.length; index += 1) {
-        const item = turnStartIndexes[index];
-        if (!item) continue;
-        const { turn, startIndex } = item;
-        const endIndex = turnStartIndexes[index + 1]?.startIndex ?? visibleMessages.length;
-        const turnMessages = visibleMessages
-          .slice(startIndex + 1, endIndex)
-          .filter((message) => message.role === "assistant" || message.role === "user");
-        const assistants = turnMessages.filter((message) => message.role === "assistant");
-        for (const message of turnMessages) grouped.add(message.id);
-        const assistant = pickAnchorAssistant(assistants);
-        if (!assistant) continue;
-        targets.set(assistant.id, {
-          activity: turn.status === "completed" || turn.status === "failed" || turn.status === "cancelled"
-            ? "finished"
-            : "waiting",
-          timing: workRunTiming(turn),
-          messageIds: turnMessages.map((message) => message.id),
-          turn,
-        });
-      }
-    }
-
-    // The backend-driven grouping above is authoritative when it accounts for
-    // every assistant message; only fall back to the inferred heuristic below
-    // for turns it hasn't covered yet (e.g. workRuns arriving late after a
-    // flow switch). Skipping it entirely once fully covered avoids the two
-    // algorithms ever picking different anchor ids for the same turn.
-    const allAssistantsCovered = visibleMessages.every(
-      (message) => message.role !== "assistant" || grouped.has(message.id),
-    );
-
-    for (let startIndex = 0; !allAssistantsCovered && startIndex < visibleMessages.length; startIndex += 1) {
-      const startMessage = visibleMessages[startIndex];
-      if (!startMessage || startMessage.role !== "user" || isRunningGuideMessage(startMessage)) continue;
-      const nextUserIndex = visibleMessages.findIndex(
-        (message, index) => index > startIndex && message.role === "user" && !isRunningGuideMessage(message),
-      );
-      const endIndex = nextUserIndex < 0 ? visibleMessages.length : nextUserIndex;
-      const turnMessages = visibleMessages
-        .slice(startIndex + 1, endIndex)
-        .filter((message) => message.role === "assistant" || isRunningGuideMessage(message));
-      const activeInTurn = Boolean(activityMessageId && turnMessages.some((message) => message.id === activityMessageId));
-      const assistants = turnMessages.filter((message) => message.role === "assistant");
-      const assistant = pickAnchorAssistant(assistants);
-      if (!assistant || targets.has(assistant.id)) continue;
-      const hasGuides = turnMessages.some(isRunningGuideMessage);
-      const completedTiming = [...assistants]
-        .reverse()
-        .map((message) => readHistoryTurnTiming(message))
-        .find((timing): timing is TurnTiming => timing !== null);
-      if (!activeInTurn && (!hasGuides || !completedTiming)) continue;
-      const targetTiming = activeInTurn ? activeTurnTiming ?? completedTiming : completedTiming;
-      if (!targetTiming) continue;
-      for (const message of turnMessages) grouped.add(message.id);
-      targets.set(assistant.id, {
-        activity: activeInTurn ? activity ?? "waiting" : "finished",
-        timing: targetTiming,
-        messageIds: turnMessages.map((message) => message.id),
-      });
-    }
-
-    return { workRunRenderTargets: targets, workRunGroupedMessageIds: grouped };
-  }, [activity, activityMessageId, activeTurnTiming, workRuns, visibleMessages]);
-  const durableSpecTargetMessageId = [...visibleMessages].reverse().find(
-    (message) => message.role === "assistant"
-      && (!workRunGroupedMessageIds.has(message.id) || workRunRenderTargets.has(message.id)),
-  )?.id;
-  const durableSpecCards = [...specCardsById.values()].filter((card) =>
-    !visibleMessages.some((message) => message.role === "assistant"
-      && buildTranscriptTimeline({ message: timelineInputMessage(message), activity: "finished" })
-        .some((block) => block.type === "spec-card" && block.specApprovalId === card.spec_approval_id))
-  );
   const activeAssistantMessage = visibleMessages.find(
     (message) => message.role === "assistant" && message.id === activityMessageId,
   );
   const lastVisibleMessage = visibleMessages.at(-1);
-  const durablePlanFallback = visibleMessages.length === 0
-    ? [...latestPlanByWorkRunId.values()].reduce<OrchestrationPlanView | undefined>(
-      (latest, plan) => !latest || latest.revision.created_at < plan.revision.created_at ? plan : latest,
-      undefined,
-    )
-    : undefined;
-  const durablePlanTurn = durablePlanFallback
-    ? workRuns?.find((turn) => turn.id === durablePlanFallback.work_run_id)
-    : undefined;
+  const missingPlanAnchors = (orchestrationPlans ?? []).filter((plan) => !hasMatchingPlanToolAnchor(visibleMessages, plan));
+  const anchoredSpecIds = new Set(visibleMessages.flatMap((message) => message.role === "assistant"
+    ? buildTranscriptTimeline({ message: timelineInputMessage(message), activity: "finished" })
+      .flatMap((block) => block.type === "spec-card" ? [block.specApprovalId] : [])
+    : []));
+  const missingSpecAnchors = [...specCardsById.values()].filter((card) => !anchoredSpecIds.has(card.spec_approval_id));
+  const visibleMessageIds = new Set(visibleMessages.map((message) => message.id));
+  const missingReviewAnchors = (reviews ?? []).filter((review) => !visibleMessageIds.has(review.anchor_message_id));
   const showThinkingIndicator =
-    isAwaitingResponse && !durablePlanFallback && !activeAssistantMessage && lastVisibleMessage?.role !== "assistant";
+    isAwaitingResponse && !activeAssistantMessage && lastVisibleMessage?.role !== "assistant";
 
   useEffect(() => {
     if (followRequestKey === undefined || followRequestKey === lastFollowRequestKeyRef.current) return;
@@ -1085,7 +862,7 @@ function SessionTranscriptContent({
             className={styles.thread}
             style={bottomOverlayHeight ? { "--transcript-bottom-overlay": `${bottomOverlayHeight}px` } as CSSProperties : undefined}
           >
-            {visibleMessages.length === 0 && !durablePlanFallback && !isLoadingHistory && !isAwaitingResponse && (
+            {visiblePresentationItems.length === 0 && !isLoadingHistory && !isAwaitingResponse && (
               <ConversationEmptyState
                 title={emptyTitle}
                 description={emptyDescription}
@@ -1093,75 +870,61 @@ function SessionTranscriptContent({
               />
             )}
 
-            {durablePlanFallback ? (
-              <TranscriptTimelineRenderer
-                key={`durable-plan-fallback:${durablePlanFallback.revision.plan_revision_id}`}
-                turnId={`durable-plan-fallback:${durablePlanFallback.work_run_id}`}
-                blocks={[{
-                  id: `orphaned-plan-card:${durablePlanFallback.revision.plan_revision_id}`,
-                  type: "plan-card",
-                  planRevisionId: durablePlanFallback.revision.plan_revision_id,
-                  toolCallId: "orphaned-plan-state",
-                }]}
-                flowId={flowId ?? ""}
-                decisionCardsById={decisionCardsById}
-                specCardsById={specCardsById}
-                plansByRevisionId={plansByRevisionId}
-                onSpecOpen={onOpenSpec ?? (() => {})}
-                onPlanOpen={onOpenPlan ?? (() => {})}
-                onPlanApprove={onApprovePlan ?? (() => {})}
-                activity="finished"
-                turnTiming={durablePlanTurn ? workRunTiming(durablePlanTurn) : null}
-                showReasoning={showReasoning}
-                workspaceRootPath={durablePlanTurn?.workRootPath?.trim() || workspaceRootPath}
-                onOpenWorkspaceFile={onOpenWorkspaceFile}
-                data-testid="chat-message-assistant"
-              />
-            ) : null}
+            {missingPlanAnchors.map((plan) => (
+              <button key={`missing-plan:${plan.revision.plan_revision_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenPlan?.(plan)}>
+                编排计划缺少 Transcript 锚点，请在右侧查看
+              </button>
+            ))}
+            {missingSpecAnchors.map((card) => (
+              <button key={`missing-spec:${card.spec_approval_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenSpec?.(card.spec_revision_id, card.file_name)}>
+                Spec 审批缺少 Transcript 锚点，请在右侧查看
+              </button>
+            ))}
+            {missingReviewAnchors.map((review) => (
+              <button key={`missing-review:${review.work_run_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenReview?.(review.work_run_id)}>
+                文件 Review 缺少 Transcript 锚点，请在右侧查看
+              </button>
+            ))}
 
-          {timelineItems.map((item) => {
-            if (isStatusDivider(item)) {
+          {visiblePresentationItems.map((item) => {
+            if (item.type === "context-compaction") {
+              const payload = timelinePayload(item.item);
               return (
                 <div key={item.id} data-testid="transcript-status-divider" className={styles.compactionDivider}>
                   <span
-                    className={`${item.animated ? styles.animatedStatusText : ""} ${styles.compactionDividerText}`}
-                    data-text={item.label}
+                    className={`${payload.status === "running" ? styles.animatedStatusText : ""} ${styles.compactionDividerText}`}
+                    data-text={compactionLabel(item.item)}
                   >
-                    {item.label}
+                    {compactionLabel(item.item)}
                   </span>
                 </div>
               );
             }
-            if (isHistoryBoundary(item)) {
+            if (item.type === "session-boundary") {
+              const payload = timelinePayload(item.item);
               return (
                 <div key={item.id} data-testid="history-session-boundary" className={styles.historyBoundary}>
-                  {item.status === "loaded"
-                    ? `历史会话：${item.display_name}`
-                    : `历史会话不可用：${item.display_name}`}
+                  {payload.status === "missing"
+                    ? `历史会话不可用：${String(payload.display_name ?? "Expert")}`
+                    : `历史会话：${String(payload.display_name ?? "Expert")}`}
                 </div>
               );
             }
-            const msg = item;
-            const isActive = msg.id === activityMessageId;
-            const workRunTarget = workRunRenderTargets.get(msg.id);
-            const groupedByWorkRun = workRunGroupedMessageIds.has(msg.id);
-            if (groupedByWorkRun && !workRunTarget) return null;
-
-            if (isRunningGuideMessage(msg)) {
-              return (
-                <UserMessage
-                  key={msg.id}
-                  anchorId={msg.id}
-                  text={messageText(msg)}
-                  createdAt={messageTimestampValue(msg)}
-                  browserAttachments={browserAttachmentsFromMessage(msg)}
-                  imageAttachments={imageAttachmentsFromMessage(msg)}
-                  statusLabel={userGuideStatusLabel(msg) ?? "已引导对话"}
-                />
-              );
-            }
-
-            if (msg.role === "user") {
+            if (item.type === "user-message") {
+              const msg = item.message;
+              if (isRunningGuideMessage(msg)) {
+                return (
+                  <UserMessage
+                    key={item.id}
+                    anchorId={msg.id}
+                    text={messageText(msg)}
+                    createdAt={messageTimestampValue(msg)}
+                    browserAttachments={browserAttachmentsFromMessage(msg)}
+                    imageAttachments={imageAttachmentsFromMessage(msg)}
+                    statusLabel={userGuideStatusLabel(msg) ?? "已引导对话"}
+                  />
+                );
+              }
               const blocks = buildTranscriptTimeline({ message: timelineInputMessage(msg), activity: "finished" });
               const hasDecisionResult = blocks.some((block) => block.type === "decision-card-result");
               if (hasDecisionResult) {
@@ -1172,16 +935,16 @@ function SessionTranscriptContent({
                 );
                 return (
                   <TranscriptTimelineRenderer
-                    key={msg.id}
+                    key={item.id}
                     turnId={msg.id}
                     blocks={projectedBlocks}
                     flowId={flowId ?? ""}
                     decisionCardsById={decisionCardsById}
-                  specCardsById={specCardsById}
-                  plansByRevisionId={plansByRevisionId}
-                  onSpecOpen={onOpenSpec ?? (() => {})}
-                  onPlanOpen={onOpenPlan ?? (() => {})}
-                  onPlanApprove={onApprovePlan ?? (() => {})}
+                    specCardsById={specCardsById}
+                    plansByRevisionId={plansByRevisionId}
+                    onSpecOpen={onOpenSpec ?? (() => {})}
+                    onPlanOpen={onOpenPlan ?? (() => {})}
+                    onPlanApprove={onApprovePlan ?? (() => {})}
                     activity="finished"
                     showReasoning={showReasoning}
                     workspaceRootPath={workspaceRootPath}
@@ -1190,10 +953,9 @@ function SessionTranscriptContent({
                   />
                 );
               }
-
               return (
                 <UserMessage
-                  key={msg.id}
+                  key={item.id}
                   anchorId={msg.id}
                   text={messageText(msg)}
                   createdAt={messageTimestampValue(msg)}
@@ -1202,56 +964,31 @@ function SessionTranscriptContent({
                 />
               );
             }
-
-            const projectionActivity: TranscriptActivity = isActive ? activity ?? "finished" : "finished";
-            const rendererActivity = workRunTarget
-              ? workRunTarget.activity
-              : isActive
-                ? activity ?? undefined
-                : groupedByWorkRun
-                  ? undefined
-                  : "finished";
-            const rendererTurnTiming = workRunTarget
-              ? workRunTarget.timing
-              : isActive
-                ? activeTurnTiming
-                : groupedByWorkRun
-                  ? null
-                  : readHistoryTurnTiming(msg);
-            const targetMessages = workRunTarget
-              ? workRunTarget.messageIds
-                .map((messageId) => visibleMessages.find((message) => message.id === messageId))
-                .filter((message): message is UIMessage => Boolean(message))
-              : [msg];
+            const targetMessages = item.messages;
+            const activeInGroup = targetMessages.some((message) => message.id === activityMessageId);
+            const completedTiming = [...targetMessages]
+              .reverse()
+              .filter((message) => message.role === "assistant")
+              .map((message) => readHistoryTurnTiming(message))
+              .find((timing): timing is TurnTiming => timing !== null) ?? null;
+            const rendererTurnTiming = activeInGroup ? activeTurnTiming ?? completedTiming : completedTiming;
             const blocks = targetMessages.flatMap((message) => {
-              const guideBlock = ((workRunTarget && message.role === "user") || isRunningGuideMessage(message))
-                ? guideMessageBlock(message)
-                : null;
+              const guideBlock = isRunningGuideMessage(message) ? guideMessageBlock(message) : null;
               if (guideBlock) return [guideBlock];
               return buildTranscriptTimeline({
                 message: timelineInputMessage(message),
-                activity: message.id === activityMessageId ? activity ?? "finished" : projectionActivity,
+                activity: message.id === activityMessageId ? activity ?? "finished" : "finished",
               });
             });
-            const planReconciledBlocks = reconcileDurablePlanCard(
-              blocks,
-              orchestrationPlans ?? [],
-              workRunTarget?.turn ? latestPlanByWorkRunId.get(workRunTarget.turn.id) : undefined,
-            );
-            const renderedBlocks = msg.id === durableSpecTargetMessageId
-              ? ensureDurableSpecCards(planReconciledBlocks, durableSpecCards)
-              : planReconciledBlocks;
-            const activeInGroup = targetMessages.some((message) => message.id === activityMessageId);
-            const reviewForTurn = workRunTarget?.turn
-              && workRunTarget.turn.status === "completed"
-              && review?.work_run_id === workRunTarget.turn.id
-              ? review
-              : null;
+            const renderedBlocks = reconcileDurablePlanCard(blocks, orchestrationPlans ?? []);
+            const reviewForTurn = reviews?.find((review) =>
+              targetMessages.some((message) => message.id === review.anchor_message_id)
+            ) ?? null;
 
             return (
               <TranscriptTimelineRenderer
-                key={msg.id}
-                turnId={msg.id}
+                key={item.id}
+                turnId={item.presentationTurnId}
                 blocks={renderedBlocks}
                 flowId={flowId ?? ""}
                 decisionCardsById={decisionCardsById}
@@ -1260,10 +997,10 @@ function SessionTranscriptContent({
                 onSpecOpen={onOpenSpec ?? (() => {})}
                 onPlanOpen={onOpenPlan ?? (() => {})}
                 onPlanApprove={onApprovePlan ?? (() => {})}
-                activity={rendererTurnTiming ? rendererActivity : undefined}
+                activity={activeInGroup ? activity ?? "waiting" : "finished"}
                 turnTiming={rendererTurnTiming}
                 showReasoning={showReasoning}
-                workspaceRootPath={workRunTarget?.turn?.workRootPath?.trim() || workspaceRootPath}
+                workspaceRootPath={workspaceRootPath}
                 onOpenWorkspaceFile={onOpenWorkspaceFile}
                 beforeFooter={reviewForTurn ? <WorkRunReviewSummaryCard review={reviewForTurn} onOpenReview={onOpenReview} /> : undefined}
                 data-testid="chat-message-assistant"
@@ -1289,6 +1026,8 @@ function SessionTranscriptContent({
   );
 }
 
+const EMPTY_OPTIMISTIC_MESSAGES: UIMessage[] = [];
+
 export default function SessionTranscriptPanel({
   flowId,
   agentSessionId,
@@ -1301,7 +1040,7 @@ export default function SessionTranscriptPanel({
   decisionCardAnswers,
   specCards,
   orchestrationPlans,
-  optimisticMessages = [],
+  optimisticMessages = EMPTY_OPTIMISTIC_MESSAGES,
   followRequestKey,
   isAwaitingResponse = false,
   allowInferredAgentSessionId = false,
@@ -1312,13 +1051,9 @@ export default function SessionTranscriptPanel({
   onOpenPlan,
   onApprovePlan,
   showReasoning: showReasoningOverride,
-  workRuns,
-  review,
+  reviews,
   onOpenReview,
   onOpenWorkspaceFile,
-  statusDividerLabel,
-  statusDividerAnimated,
-  statusDividerAt,
   workspaceRootPath,
 }: SessionTranscriptPanelProps) {
   void readonly;
@@ -1491,6 +1226,14 @@ export default function SessionTranscriptPanel({
         return;
       }
 
+      if (msg.type === "context_compaction:event" && !activeFlowExpertId) {
+        const timelineItem = msg.data?.timeline_item as TranscriptTimelineItem | undefined;
+        if (timelineItem?.type === "context_compaction") {
+          dispatchTranscript({ type: "upsert-timeline-item", item: timelineItem });
+        }
+        return;
+      }
+
       if (activeFlowExpertId) {
         if (extractMessageFlowExpertId(msg) !== activeFlowExpertId) return;
       } else {
@@ -1533,10 +1276,9 @@ export default function SessionTranscriptPanel({
         flushPendingEvents();
         dispatchTranscript({
           type: "load-snapshot",
-          streamEpoch: msg.data.stream_epoch || "legacy",
+          streamEpoch: msg.data.stream_epoch,
           cursor: msg.data.cursor,
-          messages: msg.data.messages,
-          historyBoundaries: msg.data.history_boundaries ?? [],
+          timelineItems: msg.data.timeline_items,
           activeTurn: msg.data.active_turn,
         });
         return;
@@ -1550,8 +1292,9 @@ export default function SessionTranscriptPanel({
         }
         const event = msg.data.event as TranscriptEvent;
         scheduleTranscriptEvent({
-          streamEpoch: msg.data.stream_epoch || "legacy",
+          streamEpoch: msg.data.stream_epoch,
           cursor: msg.data.cursor,
+          timelineItems: msg.data.timeline_items,
           event,
           ...(msg.data.removed_message_ids?.length ? { removedMessageIds: msg.data.removed_message_ids } : {}),
           ...(msg.data.active_turn ? { activeTurn: msg.data.active_turn } : {}),
@@ -1612,6 +1355,11 @@ export default function SessionTranscriptPanel({
     };
   }, [cancelPendingEventFlush]);
 
+  const presentationItems = useMemo(
+    () => projectTranscriptPresentationItems(transcript.timelineItems),
+    [transcript.timelineItems],
+  );
+
   return (
     <StickToBottom
       className={`relative h-full overflow-y-hidden ${className || ""}`}
@@ -1624,8 +1372,7 @@ export default function SessionTranscriptPanel({
         historyLoadVersion={historyLoadVersion}
       >
         <SessionTranscriptContent
-        messages={transcript.messages}
-        historyBoundaries={transcript.historyBoundaries}
+        presentationItems={presentationItems}
         isLoadingHistory={isLoadingHistory}
         emptyTitle={emptyTitle}
         emptyDescription={emptyDescription}
@@ -1643,16 +1390,12 @@ export default function SessionTranscriptPanel({
         activity={transcript.activeTurn?.activity ?? null}
         activityMessageId={transcript.activeTurn?.renderMessageId ?? null}
         activeTurnTiming={transcript.activeTurn?.timing ?? null}
-        workRuns={workRuns}
-        review={review}
+        reviews={reviews}
         onOpenReview={onOpenReview}
         onOpenWorkspaceFile={onOpenWorkspaceFile}
         expandedDecisionResultIds={transcript.expandedDecisionResultIds}
         showReasoning={showReasoning}
         bottomOverlayHeight={bottomOverlayHeight}
-        statusDividerLabel={statusDividerLabel}
-        statusDividerAnimated={statusDividerAnimated}
-        statusDividerAt={statusDividerAt}
         workspaceRootPath={workspaceRootPath}
         thinkingLabel={runtimeTransportLabel}
       />

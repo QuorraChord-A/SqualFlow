@@ -710,13 +710,13 @@ export default function Layout() {
     setIsRightPanelOpen(true);
     setRightPanelState((state) => openWorkspaceFileWorkbenchTab(state, filePath));
   };
-  const openReviewPanel = () => {
+  const openReviewPanel = (workRunId?: string) => {
     if (!isRightPanelOpen) {
       disableRightPanelWidthAnimationOnce();
       playRightPanelDrawerAnimation('enter');
     }
     setIsRightPanelOpen(true);
-    setRightPanelState((state) => openReviewWorkbenchTab(state));
+    setRightPanelState((state) => openReviewWorkbenchTab(state, workRunId));
   };
   const openOrchestrationPlan = (plan: OrchestrationPlanView) => {
     if (!isRightPanelOpen) {
@@ -823,7 +823,7 @@ export default function Layout() {
                         agentSessions={agentSessions}
                         onOpenSpecPreview={openSpecPreview}
                         onOpenPlan={openOrchestrationPlan}
-                        review={workbench.review}
+                        reviews={workbench.reviews}
                         onOpenReview={openReviewPanel}
                         onOpenWorkspaceFile={openWorkspaceFile}
                         composerValue={leaderComposerDraft}
@@ -907,7 +907,7 @@ export default function Layout() {
             agentSessions={agentSessions}
             onOpenSpecPreview={openSpecPreview}
             onOpenPlan={openOrchestrationPlan}
-            review={workbench.review}
+            reviews={workbench.reviews}
             onOpenReview={openReviewPanel}
             composerOnly
             composerVariant="compactFloating"

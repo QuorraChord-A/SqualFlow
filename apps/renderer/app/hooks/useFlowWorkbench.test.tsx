@@ -45,7 +45,7 @@ describe("useFlowWorkbench", () => {
       artifacts: { specs: [], files: [], reports: [] },
       tasks: [],
       files: { root_path: null, tree_available: false },
-      review: null,
+      reviews: [],
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));

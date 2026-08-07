@@ -1,9 +1,27 @@
-import type { Store } from "../db/store.js";
+import type { CanonicalTimelineItem, Store } from "../db/store.js";
+import type { ChatJournal } from "../ws/chatJournal.js";
 import type { EventBus } from "../ws/eventBus.js";
-import { finalizeWorkRunReview } from "./workRunReview.js";
-import { saveWorkRunDiffArtifacts } from "../runtime/workRunLifecycle.js";
+import { cleanupPreparedWorkRunReview, prepareWorkRunReview } from "./workRunReview.js";
 
 export type WorkRunRow = ReturnType<Store["listWorkRuns"]>[number];
+
+function timelineItemDto(item: CanonicalTimelineItem) {
+  return {
+    id: item.itemId,
+    position: item.position,
+    type: item.itemType,
+    lifecycle: item.lifecycle,
+    message_id: item.messageId,
+    session_id: item.sessionId,
+    agent_session_id: item.agentSessionId,
+    work_run_id: item.workRunId,
+    presentation_turn_id: item.presentationTurnId,
+    message_kind: item.messageKind,
+    payload: item.payload,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+  };
+}
 
 export function workRunDto(turn: WorkRunRow) {
   return {
@@ -91,15 +109,64 @@ export function pauseWorkRunIfAwaitingPlanFeedback(store: Store, workRunId: stri
 export async function completeWorkRunIfSettled(input: {
   store: Store;
   eventBus: EventBus;
+  chatJournal?: ChatJournal;
   workRunId: string;
+  terminalMessageId?: string | null;
   logId?: string;
 }) {
   if (!isWorkRunSettled(input.store, input.workRunId)) return undefined;
-  saveWorkRunDiffArtifacts(input.store, input.workRunId);
-  const completed = input.store.completeWorkRun(input.workRunId);
-  if (completed) {
-    finalizeWorkRunReview(input.store, completed.flowId, completed.id, completed.completedAt);
-    await publishWorkRunEvent(input.eventBus, completed, input.logId);
+  return finalizeWorkRun({ ...input, terminalStatus: "completed" });
+}
+
+export async function finalizeWorkRun(input: {
+  store: Store;
+  eventBus: EventBus;
+  chatJournal?: ChatJournal;
+  workRunId: string;
+  terminalStatus: "completed" | "failed" | "cancelled";
+  terminalMessageId?: string | null;
+  logId?: string;
+}) {
+  const existing = input.store.getWorkRun(input.workRunId);
+  if (!existing) return undefined;
+  if (["completed", "failed", "cancelled"].includes(existing.status)) return existing;
+  const completedAt = new Date().toISOString();
+  const prepared = prepareWorkRunReview(
+    input.store,
+    existing.flowId,
+    existing.id,
+    completedAt,
+  );
+  const finalized = input.store.finalizeWorkRunWithReview({
+    workRunId: existing.id,
+    expectedRevision: existing.revision,
+    terminalStatus: input.terminalStatus,
+    timestamp: completedAt,
+    reviewStatus: prepared.review.status,
+    reviewJson: JSON.stringify(prepared.review),
+    anchorMessageId: input.terminalMessageId,
+  });
+  if (!finalized) return undefined;
+  cleanupPreparedWorkRunReview(input.store, prepared);
+  const review = input.store.getWorkRunReview(existing.id);
+  if (input.chatJournal && review?.anchorMessageId) {
+    const channelId = `leader:${existing.flowId}`;
+    const terminalItem = input.chatJournal.getTimelineItems(existing.flowId, channelId)
+      .find((item) => item.itemId === review.anchorMessageId && item.messageKind === "work-run-terminal");
+    if (terminalItem) {
+      await input.eventBus.publish(existing.flowId, {
+        type: "session:transcript_event",
+        flow_id: existing.flowId,
+        session_id: channelId,
+        data: {
+          stream_epoch: input.chatJournal.getStreamEpoch(),
+          cursor: input.chatJournal.getCursor(existing.flowId, channelId),
+          timeline_items: [timelineItemDto(terminalItem)],
+          event: { type: "message-added", message: terminalItem.payload },
+        },
+      });
+    }
   }
-  return completed;
+  await publishWorkRunEvent(input.eventBus, finalized, input.logId);
+  return finalized;
 }

@@ -1,9 +1,28 @@
 import type { UiMessageChunk } from "../protocol/uiMessageChunks.js";
 import { transcriptEventFromChunk, type SessionTranscriptEvent } from "../protocol/sessionTranscript.js";
+import type { CanonicalTimelineItem } from "../db/store.js";
 import type { ChatJournal } from "./chatJournal.js";
 import type { EventBus } from "./eventBus.js";
 
 type PushedChunk = UiMessageChunk & { log_id?: string };
+
+function timelineItemDto(item: CanonicalTimelineItem) {
+  return {
+    id: item.itemId,
+    position: item.position,
+    type: item.itemType,
+    lifecycle: item.lifecycle,
+    message_id: item.messageId,
+    session_id: item.sessionId,
+    agent_session_id: item.agentSessionId,
+    work_run_id: item.workRunId,
+    presentation_turn_id: item.presentationTurnId,
+    message_kind: item.messageKind,
+    payload: item.payload,
+    created_at: item.createdAt,
+    updated_at: item.updatedAt,
+  };
+}
 
 export type InterruptedTurnTiming = {
   messageId: string;
@@ -61,6 +80,7 @@ export async function finishInterruptedTurn(input: {
     data: {
       stream_epoch: input.chatJournal.getStreamEpoch(),
       cursor: result.cursor,
+      timeline_items: result.timelineItems.map(timelineItemDto),
       event: withCanonicalMessageId(transcriptEventFromChunk(chunk), result.messageId),
       ...(result.removedMessageIds?.length ? { removed_message_ids: result.removedMessageIds } : {}),
     },
@@ -116,12 +136,13 @@ export class WsPusher {
       data: {
         stream_epoch: this.chatJournal.getStreamEpoch(),
         cursor: result.cursor,
+        timeline_items: result.timelineItems.map(timelineItemDto),
         event: transcriptEvent,
         ...(result.removedMessageIds?.length ? { removed_message_ids: result.removedMessageIds } : {}),
         ...(result.activeTurn ? {
           active_turn: {
             message_id: result.activeTurn.messageId,
-            root_message_id: result.activeTurn.rootMessageId,
+            presentation_turn_id: result.activeTurn.presentationTurnId,
             segment_index: result.activeTurn.segmentIndex,
             started_at: result.activeTurn.startedAt,
           },
@@ -155,7 +176,7 @@ export class WsPusher {
 
   async publishRunningGuide(content: string, messageId: string, createdAt?: string): Promise<void> {
     await this.publishUserMessage(content, messageId, createdAt, {
-      localMessageKind: "running-guide",
+      messageKind: "running-guide",
       guideStatusLabel: "已引导对话",
     });
   }
@@ -173,12 +194,13 @@ export class WsPusher {
       data: {
         stream_epoch: this.chatJournal.getStreamEpoch(),
         cursor: commit.cursor,
+        timeline_items: commit.timelineItems.map(timelineItemDto),
         event: { type: "message-added", message: commit.message },
         ...(commit.removedMessageIds?.length ? { removed_message_ids: commit.removedMessageIds } : {}),
         ...(commit.activeTurn ? {
           active_turn: {
             message_id: commit.activeTurn.messageId,
-            root_message_id: commit.activeTurn.rootMessageId,
+            presentation_turn_id: commit.activeTurn.presentationTurnId,
             segment_index: commit.activeTurn.segmentIndex,
             started_at: commit.activeTurn.startedAt,
           },

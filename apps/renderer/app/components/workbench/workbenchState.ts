@@ -9,7 +9,7 @@ export type DynamicWorkbenchTab =
   | { type: "artifact_preview"; artifact_id: string; title: string }
   | { type: "orchestration_plan"; plan_id?: string; plan_revision_id: string; title: string; plan?: OrchestrationPlanView }
   | { type: "workspace_file_preview"; path: string | null; title: string; tabId?: string }
-  | { type: "review"; title: string }
+  | { type: "review"; title: string; work_run_id?: string }
   | { type: "browser"; title: string };
 
 export function dynamicWorkbenchTabId(tab: DynamicWorkbenchTab) {
@@ -77,7 +77,8 @@ function isDynamicWorkbenchTab(value: unknown): value is DynamicWorkbenchTab {
     return (typeof candidate.path === "string" || candidate.path === null) && typeof candidate.title === "string";
   }
   if (candidate.type === "review") {
-    return typeof candidate.title === "string";
+    return typeof candidate.title === "string"
+      && (candidate.work_run_id === undefined || typeof candidate.work_run_id === "string");
   }
   if (candidate.type === "browser") {
     return typeof candidate.title === "string";
@@ -220,8 +221,21 @@ export function openBrowserWorkbenchTab(state: RightPanelState): RightPanelState
   return openDynamicWorkbenchTab(state, { type: "browser", title: "浏览器" });
 }
 
-export function openReviewWorkbenchTab(state: RightPanelState): RightPanelState {
-  return openDynamicWorkbenchTab(state, { type: "review", title: "审核" });
+export function openReviewWorkbenchTab(state: RightPanelState, workRunId?: string): RightPanelState {
+  const resetState = workRunId
+    ? state
+    : {
+        ...state,
+        dynamicTabs: state.dynamicTabs.map((tab): DynamicWorkbenchTab => {
+          if (tab.type !== "review") return tab;
+          return { type: "review", title: tab.title };
+        }),
+      };
+  return openDynamicWorkbenchTab(resetState, {
+    type: "review",
+    title: "审核",
+    ...(workRunId ? { work_run_id: workRunId } : {}),
+  });
 }
 
 export function openOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {

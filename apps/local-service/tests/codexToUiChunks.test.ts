@@ -105,6 +105,31 @@ describe("Codex to UI chunk adapter", () => {
     expect(completedChunks.filter((chunk) => chunk.type === "tool-output-available")).toHaveLength(1);
   });
 
+  it("closes fileChange with a tool result on the same stable ID", () => {
+    const adapter = createCodexToUiChunkAdapter("msg-file-change");
+    const changes = [{ path: "src/app.ts", kind: "update" }];
+
+    const startedChunks = adapter.adapt({
+      method: "item/started",
+      params: { item: { type: "fileChange", id: "file-change-1", changes } },
+    });
+    const completedChunks = adapter.adapt({
+      method: "item/completed",
+      params: { item: { type: "fileChange", id: "file-change-1", status: "completed", changes } },
+    });
+
+    expect(startedChunks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "tool-input-start", toolCallId: "file-change-1" }),
+      expect.objectContaining({ type: "tool-input-available", toolCallId: "file-change-1" }),
+    ]));
+    expect(completedChunks.filter((chunk) => chunk.type === "tool-input-start")).toHaveLength(0);
+    expect(completedChunks).toContainEqual(expect.objectContaining({
+      type: "tool-output-available",
+      toolCallId: "file-change-1",
+      output: expect.objectContaining({ is_error: false }),
+    }));
+  });
+
   it("preserves an explicit command decline without treating ordinary failures as denials", () => {
     const declinedAdapter = createCodexToUiChunkAdapter("msg-declined");
     const declinedChunks = declinedAdapter.adapt({

@@ -7,26 +7,30 @@
  */
 
 import { API_BASE } from './api';
-import type { UIMessage } from 'ai';
 import type { OutgoingMessageImageAttachment } from '../types/messageAttachments';
 import type { PlanFeedbackDraft } from '../types/orchestration';
 
 // ── Incoming message types ──
 
-export type HistorySessionBoundary = {
+export type TranscriptTimelineItem = {
   id: string;
-  kind: "history_session_boundary";
-  flow_expert_id: string;
-  agent_session_id: string;
-  display_name: string;
-  started_at: string;
-  status: "loaded" | "missing";
-  before_message_id?: string;
+  position: number;
+  type: "message" | "session_boundary" | "context_compaction";
+  lifecycle: "active" | "complete" | "sealed";
+  message_id: string | null;
+  session_id: string | null;
+  agent_session_id: string | null;
+  work_run_id: string | null;
+  presentation_turn_id: string | null;
+  message_kind: "user" | "assistant" | "assistant-continuation" | "running-guide" | "work-run-terminal" | null;
+  payload: unknown;
+  created_at: string;
+  updated_at: string;
 };
 
 export type TranscriptActiveTurn = {
   message_id: string;
-  root_message_id?: string;
+  presentation_turn_id: string;
   segment_index?: number;
   started_at: string;
 };
@@ -36,8 +40,8 @@ export type WsInMessage =
   | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
   | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
   | { type: "flow:queue_state"; flow_id: string; log_id?: string; data: { messages: Array<Record<string, unknown>> } }
-  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
-  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; messages: UIMessage[]; history_boundaries?: HistorySessionBoundary[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
+  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
+  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
   | { type: "flow:status"; flow_id: string; data: any }
   | { type: "flow:name_updated"; flow_id: string; data: { name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }
   | { type: "task:event"; flow_id: string; data: any }

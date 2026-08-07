@@ -17,7 +17,7 @@ import {
 } from "../runtime/expertRuntime.js";
 import { createAgentDispatcher } from "../runtime/agentDispatcher.js";
 import { createOrchestrationScheduler } from "../runtime/orchestrationScheduler.js";
-import { pauseWorkRunIfAwaitingPlanFeedback, publishWorkRunEvent } from "../domain/workRun.js";
+import { finalizeWorkRun, pauseWorkRunIfAwaitingPlanFeedback, publishWorkRunEvent } from "../domain/workRun.js";
 import { leaderTranscriptChannelId } from "../domain/transcriptChannels.js";
 import { ContextCompactionState } from "../runtime/contextCompactionState.js";
 import type { AgentRuntimeAdapterFactory } from "../runtime/adapters/factory.js";
@@ -42,6 +42,8 @@ import {
 } from "../runtime/adapters/codexAppServerPool.js";
 import { readAgentRuntimeConfigSnapshotSync } from "../config/agentRuntimeConfig.js";
 import { migrateLegacyClaudeSessions } from "../runtime/nativeContextDiscovery.js";
+import { cleanupOrphanChangeBaselines } from "../runtime/changeBaseline.js";
+import { WorkspaceMutationCoordinator } from "../runtime/workRunFileAttribution.js";
 
 type CreateAppOptions = {
   databasePath?: string;
@@ -89,6 +91,8 @@ export async function routeExpertResultToLeader(input: {
       summary: event.summary,
       error: event.error,
       artifactRefs: event.artifactRefs,
+      filesChanged: event.filesChanged,
+      metrics: event.metrics,
       completedAt: event.completedAt,
     },
     leaderAgentSessionId: leaderAgentSession.id,
@@ -129,6 +133,8 @@ export async function routeExpertMessageToLeader(input: {
       summary: event.summary,
       error: event.error,
       artifactRefs: event.artifactRefs,
+      filesChanged: event.filesChanged,
+      metrics: event.metrics,
       completedAt: event.completedAt,
     },
     leaderAgentSessionId: leaderAgentSession.id,
@@ -156,6 +162,7 @@ export function createApp(options: CreateAppOptions = {}) {
     ...staleLeaderSessions,
   }, "SquadFlow backend process started");
   const defaultProjectPath = path.join(config.defaultProjectRoot, DEFAULT_PROJECT_DIRECTORY_NAME);
+  const mutationCoordinator = new WorkspaceMutationCoordinator();
   fs.mkdirSync(defaultProjectPath, { recursive: true });
   fs.mkdirSync(config.runtimeScratchRoot, { recursive: true });
   const claudeSessionMigration = migrateLegacyClaudeSessions({
@@ -227,8 +234,7 @@ export function createApp(options: CreateAppOptions = {}) {
         }
       }
       store.cancelWorkRunPendingActions(event.workRunId);
-      const failedTurn = store.failWorkRun(event.workRunId, "failed");
-      if (failedTurn) await publishWorkRunEvent(eventBus, failedTurn);
+      await finalizeWorkRun({ store, eventBus, chatJournal, workRunId: event.workRunId, terminalStatus: "failed" });
       app.log.error({
         flowId: event.flowId,
         workRunId: event.workRunId,
@@ -248,8 +254,7 @@ export function createApp(options: CreateAppOptions = {}) {
       }, "failed to deliver taskless Expert message to Leader");
       if (event.workRunId) {
         expertRuntime?.cancelWorkRun({ flowId: event.flowId, workRunId: event.workRunId });
-        const failedTurn = store.failWorkRun(event.workRunId, "failed");
-        if (failedTurn) await publishWorkRunEvent(eventBus, failedTurn);
+        await finalizeWorkRun({ store, eventBus, chatJournal, workRunId: event.workRunId, terminalStatus: "failed" });
       }
     }
   };
@@ -261,6 +266,7 @@ export function createApp(options: CreateAppOptions = {}) {
     mcpBridgeRegistry,
     desktopBridge,
     logger: app.log,
+    mutationCoordinator,
     onTaskFinished: deliverExpertResultToLeader,
     onConversationFinished: deliverExpertMessageToLeader,
     onTaskUpdated: async ({ flowId, task }) => {
@@ -296,6 +302,7 @@ export function createApp(options: CreateAppOptions = {}) {
     mcpBridgeRegistry,
     desktopBridge,
     logger: app.log,
+    mutationCoordinator,
     orchestrationScheduler,
     permissionGate: expertRuntime.confirmPermission,
     onWorkRunFatal: ({ flowId, workRunId }) => {
@@ -351,6 +358,8 @@ export function createApp(options: CreateAppOptions = {}) {
     runId,
     ...staleExpertSessions,
   }, "stale runtime sessions interrupted");
+  const baselineCleanup = cleanupOrphanChangeBaselines(store);
+  app.log.info({ event: "change_baseline_recovery_completed", runId, ...baselineCleanup }, "change baseline recovery completed");
 
   for (const flow of store.listFlows()) {
     const openTurn = store.getOpenWorkRun(flow.id);

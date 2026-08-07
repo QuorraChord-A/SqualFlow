@@ -72,9 +72,17 @@ describe("expert snapshot uses the canonical transcript", () => {
         type: "session:transcript_snapshot",
         flow_id: flow.id,
         data: expect.objectContaining({
-          messages: expect.arrayContaining([
-            expect.objectContaining({ id: "msg-user-live-1", content: "调查这个项目" }),
-            expect.objectContaining({ id: "msg-assistant-live-1", content: "调查完成。以下是核心发现摘要。" }),
+          timeline_items: expect.arrayContaining([
+            expect.objectContaining({
+              id: "msg-user-live-1",
+              type: "message",
+              payload: expect.objectContaining({ content: "调查这个项目" }),
+            }),
+            expect.objectContaining({
+              id: "msg-assistant-live-1",
+              type: "message",
+              payload: expect.objectContaining({ content: "调查完成。以下是核心发现摘要。" }),
+            }),
           ]),
         }),
       }));

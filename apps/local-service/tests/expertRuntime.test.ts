@@ -937,6 +937,15 @@ describe("ExpertRuntime", () => {
     });
     const eventPayload = JSON.parse(store.listEventLog(flow.id)
       .find((event) => event.eventType === "agent_session.completion")!.payloadJson);
+    expect(eventPayload).toMatchObject({
+      files_changed: [],
+      metrics: {
+        duration_ms: 5678,
+        cache_input_tokens: 4_000,
+        cache_read_input_tokens: 10_000,
+        cache_creation_input_tokens: 0,
+      },
+    });
     expect(finished).toEqual([
       expect.objectContaining({
         agentSessionId: session.id,
@@ -945,6 +954,8 @@ describe("ExpertRuntime", () => {
         summary: "验证通过",
         error: null,
         artifactRefs: [],
+        filesChanged: [],
+        metrics: expect.objectContaining({ duration_ms: 5678 }),
         completedAt: eventPayload.completed_at,
       }),
     ]);
@@ -2372,18 +2383,18 @@ describe("ExpertRuntime", () => {
     expect(chatJournal.getHistory(flow.id, "sdk-expert-streaming").map((message) => ({
       role: message.role,
       content: message.content,
-      localMessageKind: message.metadata && "localMessageKind" in message.metadata
-        ? message.metadata.localMessageKind
+      messageKind: message.metadata && "messageKind" in message.metadata
+        ? message.metadata.messageKind
         : undefined,
     }))).toEqual([
       {
         role: "user",
         content: "验证 hello world",
-        localMessageKind: undefined,
+        messageKind: "user",
       },
-      { role: "assistant", content: "before-guide", localMessageKind: undefined },
-      { role: "user", content: "Also preserve backwards compatibility", localMessageKind: "running-guide" },
-      { role: "assistant", content: "done-final", localMessageKind: undefined },
+      { role: "assistant", content: "before-guide", messageKind: "assistant" },
+      { role: "user", content: "Also preserve backwards compatibility", messageKind: "running-guide" },
+      { role: "assistant", content: "done-final", messageKind: "assistant-continuation" },
     ]);
     expect(store.getTask(task.id)).toEqual(expect.objectContaining({
       status: "in_progress",

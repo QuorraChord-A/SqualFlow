@@ -1,6 +1,7 @@
 import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { UIMessage } from "ai";
+import type { TranscriptTimelineItem } from "../../../lib/ws";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SessionTranscriptPanel from "../SessionTranscriptPanel";
 import {
@@ -57,12 +58,47 @@ function emit(message: any) {
   });
 }
 
+function fixtureTimelineItems(messages: UIMessage[]): TranscriptTimelineItem[] {
+  return messages.map((source, index) => {
+    const metadata = source.metadata && typeof source.metadata === "object"
+      ? source.metadata as Record<string, unknown>
+      : {};
+    const presentationTurnId = source.role === "assistant"
+      ? typeof metadata.presentationTurnId === "string" ? metadata.presentationTurnId : source.id
+      : null;
+    const messageKind = source.role === "assistant" ? "assistant" : "user";
+    const payload = {
+      ...source,
+      metadata: { ...metadata, messageKind, ...(presentationTurnId ? { presentationTurnId } : {}) },
+    } as UIMessage;
+    return {
+      id: source.id,
+      position: index + 1,
+      type: "message",
+      lifecycle: "complete",
+      message_id: source.id,
+      session_id: parityAgentSessionId,
+      agent_session_id: parityAgentSessionId,
+      work_run_id: null,
+      presentation_turn_id: presentationTurnId,
+      message_kind: messageKind,
+      payload,
+      created_at: "2026-06-19T10:00:00.000Z",
+      updated_at: "2026-06-19T10:00:00.000Z",
+    };
+  });
+}
+
 function normalizeFixtureMessage(message: any): any[] {
   if (message.type === "session:history") {
     return [{
       ...message,
       type: "session:transcript_snapshot",
-      data: { cursor: 0, messages: message.data },
+      data: {
+        stream_epoch: "epoch-parity",
+        cursor: 0,
+        timeline_items: fixtureTimelineItems(message.data as UIMessage[]),
+      },
     }];
   }
   if (message.type !== "session:chat_event") return [message];
@@ -88,7 +124,20 @@ function normalizeFixtureMessage(message: any): any[] {
   return [{
     ...message,
     type: "session:transcript_event",
-    data: { cursor: ++transcriptCursor, event },
+    data: {
+      stream_epoch: "epoch-parity",
+      cursor: ++transcriptCursor,
+      timeline_items: [],
+      event,
+      ...(originalType !== "finish" ? {
+        active_turn: {
+          message_id: activeMessageId,
+          presentation_turn_id: activeMessageId,
+          segment_index: 0,
+          started_at: "2026-06-19T10:00:00.000Z",
+        },
+      } : {}),
+    },
   }];
 }
 

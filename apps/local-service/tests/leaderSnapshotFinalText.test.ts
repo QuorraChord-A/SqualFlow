@@ -113,9 +113,17 @@ describe("leader snapshot uses the canonical transcript", () => {
         type: "session:transcript_snapshot",
         flow_id: flow.id,
         data: expect.objectContaining({
-          messages: expect.arrayContaining([
-            expect.objectContaining({ id: "msg-user-live-1", content: "当前项目都有什么" }),
-            expect.objectContaining({ id: "msg-leader-live-1", content: "研究任务已完成，以下是项目概况。" }),
+          timeline_items: expect.arrayContaining([
+            expect.objectContaining({
+              id: "msg-user-live-1",
+              type: "message",
+              payload: expect.objectContaining({ content: "当前项目都有什么" }),
+            }),
+            expect.objectContaining({
+              id: "msg-leader-live-1",
+              type: "message",
+              payload: expect.objectContaining({ content: "研究任务已完成，以下是项目概况。" }),
+            }),
           ]),
         }),
       }));

@@ -1,13 +1,13 @@
-import fs from "node:fs";
-import path from "node:path";
-import { TextDecoder } from "node:util";
 import type { Store } from "../db/store.js";
-import type { RuntimeCapability } from "./runtimeCapabilities.js";
+import {
+  changesFromBaseline,
+  cleanupChangeBaseline,
+  type StoredChangeBaseline,
+} from "../runtime/changeBaseline.js";
 
-const MAX_REVIEW_FILE_BYTES = 1_000_000;
 const MAX_LCS_CELLS = 200_000;
-const controlledEditCapabilities = new Set<RuntimeCapability>(["write", "edit"]);
-const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+export type WorkRunReviewStatus = "ready" | "empty" | "skipped" | "failed";
 
 export type WorkRunReviewLine = {
   kind: "context" | "added" | "removed";
@@ -19,14 +19,17 @@ export type WorkRunReviewLine = {
 export type WorkRunReviewFile = {
   path: string;
   status: "modified" | "added" | "deleted";
-  additions: number;
-  deletions: number;
+  detail_status: "ready" | "binary" | "large" | "unavailable";
+  additions: number | null;
+  deletions: number | null;
   lines: WorkRunReviewLine[];
 };
 
-export type WorkRunReview = {
+type WorkRunReviewContent = {
   flow_id: string;
   work_run_id: string;
+  status: WorkRunReviewStatus;
+  reason?: string;
   completed_at: string | null;
   totals: {
     files: number;
@@ -39,242 +42,188 @@ export type WorkRunReview = {
   files: WorkRunReviewFile[];
 };
 
-type PendingControlledEdit = {
-  flowId: string;
-  workRunId: string;
-  toolUseId: string;
-  capability: RuntimeCapability;
-  absolutePath: string;
-  relativePath: string;
-  before: string | null;
+export type WorkRunReview = WorkRunReviewContent & {
+  anchor_message_id: string;
 };
 
-type DraftFile = {
-  relativePath: string;
-  before: string | null;
-  after: string | null;
+export type PreparedWorkRunReviewContent = WorkRunReviewContent;
+
+export type PreparedWorkRunReview = {
+  review: PreparedWorkRunReviewContent;
+  baseline: StoredChangeBaseline | null;
 };
 
-type DraftReview = {
-  flowId: string;
-  workRunId: string;
-  files: Map<string, DraftFile>;
-};
-
-const pendingEdits = new Map<string, PendingControlledEdit>();
-const draftReviews = new Map<string, DraftReview>();
-
-function toolPath(input: Record<string, unknown>): string | null {
-  for (const key of ["file_path", "path"]) {
-    const value = input[key];
-    if (typeof value === "string" && value.trim()) return value;
-  }
-  return null;
+function emptyTotals() {
+  return { files: 0, additions: 0, deletions: 0, modified: 0, added: 0, deleted: 0 };
 }
 
-function realpathOrResolved(resolvedPath: string): string {
-  try {
-    return fs.realpathSync.native(resolvedPath);
-  } catch {
-    const missingTail: string[] = [];
-    let cursor = resolvedPath;
-    while (true) {
-      const parent = path.dirname(cursor);
-      if (parent === cursor) return resolvedPath;
-      missingTail.unshift(path.basename(cursor));
-      cursor = parent;
-      try {
-        return path.join(fs.realpathSync.native(cursor), ...missingTail);
-      } catch {
-        // Keep walking toward an existing ancestor.
-      }
-    }
-  }
+function unavailableReview(
+  flowId: string,
+  workRunId: string,
+  completedAt: string | null,
+  status: "skipped" | "failed",
+  reason: string,
+): PreparedWorkRunReviewContent {
+  return {
+    flow_id: flowId,
+    work_run_id: workRunId,
+    status,
+    reason,
+    completed_at: completedAt,
+    totals: emptyTotals(),
+    files: [],
+  };
 }
 
-function resolveInsideRoot(rootPath: string, inputPath: string) {
-  const absolutePath = realpathOrResolved(path.resolve(rootPath, inputPath));
-  const absoluteRoot = realpathOrResolved(path.resolve(rootPath));
-  const relativePath = path.relative(absoluteRoot, absolutePath);
-  if (!relativePath || relativePath.startsWith("..") || path.isAbsolute(relativePath)) return null;
-  return { absolutePath, relativePath: relativePath.split(path.sep).join("/") };
-}
-
-function readTextSnapshot(filePath: string): { content: string | null; skipped: boolean } {
-  let stat: fs.Stats;
-  try {
-    stat = fs.statSync(filePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { content: null, skipped: false };
-    return { content: null, skipped: true };
-  }
-  if (!stat.isFile() || stat.size > MAX_REVIEW_FILE_BYTES) return { content: null, skipped: true };
-  const buffer = fs.readFileSync(filePath);
-  if (buffer.includes(0)) return { content: null, skipped: true };
-  try {
-    return { content: utf8Decoder.decode(buffer), skipped: false };
-  } catch {
-    return { content: null, skipped: true };
-  }
-}
-
-export function beginControlledEditReview(input: {
-  flowId: string;
-  workRunId: string | null | undefined;
-  rootPath: string;
-  toolName: string;
-  capability?: RuntimeCapability | null;
-  toolInput: Record<string, unknown>;
-  toolUseId: string | null | undefined;
-}) {
-  const capability = input.capability ?? null;
-  if (!input.workRunId || !input.toolUseId || !capability || !controlledEditCapabilities.has(capability)) return;
-  const inputPath = toolPath(input.toolInput);
-  if (!inputPath) return;
-  const resolved = resolveInsideRoot(input.rootPath, inputPath);
-  if (!resolved) return;
-  const before = readTextSnapshot(resolved.absolutePath);
-  if (before.skipped) return;
-
-  pendingEdits.set(input.toolUseId, {
-    flowId: input.flowId,
-    workRunId: input.workRunId,
-    toolUseId: input.toolUseId,
-    capability,
-    absolutePath: resolved.absolutePath,
-    relativePath: resolved.relativePath,
-    before: before.content,
-  });
-}
-
-export function consumeControlledEditToolResults(eventOrRaw: unknown) {
-  const raw = eventOrRaw && typeof eventOrRaw === "object" && "raw" in eventOrRaw
-    ? (eventOrRaw as { raw: unknown }).raw
-    : eventOrRaw;
-  for (const result of toolResultBlocks(raw)) {
-    const pending = pendingEdits.get(result.toolUseId);
-    if (!pending) continue;
-    pendingEdits.delete(result.toolUseId);
-    if (result.isError) continue;
-
-    const after = readTextSnapshot(pending.absolutePath);
-    if (after.skipped) continue;
-    const draft = draftReviews.get(pending.workRunId) ?? {
-      flowId: pending.flowId,
-      workRunId: pending.workRunId,
-      files: new Map<string, DraftFile>(),
-    };
-    const file = draft.files.get(pending.absolutePath) ?? {
-      relativePath: pending.relativePath,
-      before: pending.before,
-      after: pending.before,
-    };
-    file.after = after.content;
-    draft.files.set(pending.absolutePath, file);
-    draftReviews.set(pending.workRunId, draft);
-  }
-}
-
-export function finalizeWorkRunReview(
+/**
+ * Computes the authoritative Review for files owned by a WorkRun. The baseline
+ * still supplies exact before/after contents, while the execution-owned touched
+ * file manifest prevents another concurrent Flow in the same project from
+ * leaking into this Review.
+ */
+export function prepareWorkRunReview(
   store: Store,
   flowId: string,
   workRunId: string,
   completedAt: string | null,
-) {
-  for (const [toolUseId, pending] of pendingEdits) {
-    if (pending.workRunId === workRunId) pendingEdits.delete(toolUseId);
+): PreparedWorkRunReview {
+  const existing = getWorkRunReview(store, workRunId);
+  if (existing) return { review: existing, baseline: store.getChangeBaselineForWorkRun(workRunId) ?? null };
+
+  const baseline = store.getChangeBaselineForWorkRun(workRunId) ?? null;
+  if (!baseline) {
+    return {
+      review: unavailableReview(
+        flowId,
+        workRunId,
+        completedAt,
+        "failed",
+        "未找到 WorkRun baseline，无法生成完整 Diff。",
+      ),
+      baseline: null,
+    };
   }
 
-  const draft = draftReviews.get(workRunId);
-  draftReviews.delete(workRunId);
-  if (!draft) {
-    store.deleteLatestWorkRunReview(flowId);
-    return null;
+  let result: ReturnType<typeof changesFromBaseline>;
+  try {
+    result = changesFromBaseline(baseline);
+  } catch (error) {
+    return {
+      review: unavailableReview(
+        flowId,
+        workRunId,
+        completedAt,
+        "failed",
+        error instanceof Error ? error.message : String(error),
+      ),
+      baseline,
+    };
+  }
+  if (result.status !== "ready") {
+    return {
+      review: unavailableReview(
+        flowId,
+        workRunId,
+        completedAt,
+        result.status,
+        result.reason ?? "WorkRun baseline 不可用，无法生成完整 Diff。",
+      ),
+      baseline,
+    };
   }
 
-  const files = [...draft.files.values()]
-    .flatMap((file): WorkRunReviewFile[] => {
-      if (file.before === file.after) return [];
-      if (file.before === null && file.after === null) return [];
-      const status = file.before === null
-        ? "added"
-        : file.after === null
-          ? "deleted"
-          : "modified";
-      const lines = diffLines(file.before ?? "", file.after ?? "");
-      const additions = lines.filter((line) => line.kind === "added").length;
-      const deletions = lines.filter((line) => line.kind === "removed").length;
-      return [{
-        path: file.relativePath,
-        status,
-        additions,
-        deletions,
-        lines,
-      }];
-    })
-    .sort((left, right) => left.path.localeCompare(right.path));
-
-  if (files.length === 0) {
-    store.deleteLatestWorkRunReview(flowId);
-    return null;
+  const attribution = store.getWorkRunFileAttribution(workRunId);
+  const ownedPaths = new Set(attribution?.files.map((file) => file.path) ?? []);
+  const ownedChanges = result.changes.filter((change) => ownedPaths.has(change.path));
+  const unownedChanges = result.changes.filter((change) => !ownedPaths.has(change.path));
+  if (ownedChanges.length === 0 && unownedChanges.length > 0) {
+    const attributionReason = attribution?.reason ? `${attribution.reason}；` : "";
+    return {
+      review: unavailableReview(
+        flowId,
+        workRunId,
+        completedAt,
+        "skipped",
+        `${attributionReason}检测到 ${unownedChanges.length} 个无法归属到本 WorkRun 的工作区变化，已从 Diff 排除。`,
+      ),
+      baseline,
+    };
   }
 
-  const review: WorkRunReview = {
+  const files = ownedChanges.map((change): WorkRunReviewFile => {
+    if (change.detailStatus !== "ready") {
+      return {
+        path: change.path,
+        status: change.status,
+        detail_status: change.detailStatus,
+        additions: null,
+        deletions: null,
+        lines: [],
+      };
+    }
+    const lines = diffLines(change.beforeText ?? "", change.afterText ?? "");
+    return {
+      path: change.path,
+      status: change.status,
+      detail_status: "ready",
+      additions: lines.filter((line) => line.kind === "added").length,
+      deletions: lines.filter((line) => line.kind === "removed").length,
+      lines,
+    };
+  });
+
+  const review: PreparedWorkRunReviewContent = {
     flow_id: flowId,
     work_run_id: workRunId,
+    status: files.length > 0 ? "ready" : "empty",
     completed_at: completedAt,
     totals: {
       files: files.length,
-      additions: files.reduce((sum, file) => sum + file.additions, 0),
-      deletions: files.reduce((sum, file) => sum + file.deletions, 0),
+      additions: files.reduce((sum, file) => sum + (file.additions ?? 0), 0),
+      deletions: files.reduce((sum, file) => sum + (file.deletions ?? 0), 0),
       modified: files.filter((file) => file.status === "modified").length,
       added: files.filter((file) => file.status === "added").length,
       deleted: files.filter((file) => file.status === "deleted").length,
     },
     files,
   };
-  store.replaceLatestWorkRunReview({
-    flowId,
-    workRunId,
-    reviewJson: JSON.stringify(review),
-  });
-  return review;
+  const warningParts = [
+    attribution?.reason ?? "",
+    unownedChanges.length > 0
+      ? `另有 ${unownedChanges.length} 个不属于本 WorkRun 的工作区变化已排除。`
+      : "",
+  ].filter(Boolean);
+  if (warningParts.length > 0) review.reason = warningParts.join("；");
+  return { review, baseline };
 }
 
-export function latestWorkRunReview(store: Store, flowId: string): WorkRunReview | null {
-  const stored = store.getLatestWorkRunReview(flowId);
+export function cleanupPreparedWorkRunReview(store: Store, prepared: PreparedWorkRunReview) {
+  if (prepared.baseline) cleanupChangeBaseline(store, prepared.baseline);
+}
+
+export function getWorkRunReview(store: Store, workRunId: string): WorkRunReview | null {
+  const stored = store.getWorkRunReview(workRunId);
   if (!stored) return null;
   try {
     const review = JSON.parse(stored.reviewJson) as WorkRunReview;
-    return review.flow_id === flowId && review.work_run_id === stored.workRunId ? review : null;
+    return review.work_run_id === workRunId && typeof review.anchor_message_id === "string" ? review : null;
   } catch {
     return null;
   }
 }
 
-export function clearWorkRunReview(flowId: string, store?: Store) {
-  store?.deleteLatestWorkRunReview(flowId);
-  for (const [workRunId, draft] of draftReviews) {
-    if (draft.flowId === flowId) draftReviews.delete(workRunId);
-  }
-  for (const [toolUseId, pending] of pendingEdits) {
-    if (pending.flowId === flowId) pendingEdits.delete(toolUseId);
-  }
-}
-
-function toolResultBlocks(raw: unknown): Array<{ toolUseId: string; isError: boolean }> {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-  const record = raw as Record<string, unknown>;
-  const message = record.message;
-  const content = message && typeof message === "object" && !Array.isArray(message)
-    ? (message as Record<string, unknown>).content
-    : record.content;
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((block) => {
-    if (!block || typeof block !== "object" || Array.isArray(block)) return [];
-    const item = block as Record<string, unknown>;
-    if (item.type !== "tool_result" || typeof item.tool_use_id !== "string") return [];
-    return [{ toolUseId: item.tool_use_id, isError: item.is_error === true }];
+export function listWorkRunReviews(store: Store, flowId: string): WorkRunReview[] {
+  return store.listWorkRunReviews(flowId).flatMap((stored) => {
+    try {
+      const review = JSON.parse(stored.reviewJson) as WorkRunReview;
+      return review.flow_id === flowId
+        && review.work_run_id === stored.workRunId
+        && typeof review.anchor_message_id === "string"
+        ? [review]
+        : [];
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -285,7 +234,7 @@ function splitLines(value: string) {
   return lines;
 }
 
-function diffLines(before: string, after: string): WorkRunReviewLine[] {
+export function diffLines(before: string, after: string): WorkRunReviewLine[] {
   const oldLines = splitLines(before);
   const newLines = splitLines(after);
   let prefix = 0;

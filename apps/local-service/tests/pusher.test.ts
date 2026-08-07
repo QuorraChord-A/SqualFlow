@@ -49,15 +49,15 @@ describe("finishInterruptedTurn", () => {
       durationMs: 2500,
     });
 
-    expect(store.listTranscriptEntries("flow-1", "flow-expert-1")[0]?.message).toEqual(expect.objectContaining({
+    expect(store.listTimelineItems("flow-1", "flow-expert-1")[0]?.payload).toEqual(expect.objectContaining({
       id: "msg-assistant-1",
-      metadata: {
+      metadata: expect.objectContaining({
         turnTiming: {
           startedAt: "2026-07-21T08:00:00.000Z",
           finishedAt: "2026-07-21T08:00:02.500Z",
           durationMs: 2500,
         },
-      },
+      }),
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: "session:transcript_event",

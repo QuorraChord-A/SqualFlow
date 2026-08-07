@@ -238,11 +238,7 @@ function parsePlanCard(output: unknown): { planRevisionId: string } | null {
   return id ? { planRevisionId: id } : null;
 }
 
-/**
- * Preserve the normalized MCP envelope for the result renderer. Older
- * transcript records only contain the already-stringified tool output, so
- * those continue through the legacy parser.
- */
+/** Preserve the normalized MCP envelope while parsing current string payloads. */
 function timelineToolOutput(
   part: Extract<TimelineInputPart, { type: `tool-${string}` }>,
 ): unknown {

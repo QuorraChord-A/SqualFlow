@@ -79,6 +79,12 @@ function createQuery(messages: unknown[]): ClaudeQueryLike {
   };
 }
 
+function snapshotMessages(response: { data: { timeline_items: Array<{ type: string; payload: unknown }> } }) {
+  return response.data.timeline_items
+    .filter((item) => item.type === "message")
+    .map((item) => item.payload);
+}
+
 describe("EventBus", () => {
   it("accepts only structured runtime transport status messages", () => {
     expect(ServerWsMessageSchema.parse({
@@ -205,7 +211,12 @@ describe("ChatJournal", () => {
       role: "assistant",
       content: "Hello world",
       createdAt: "2026-06-24T10:00:00.000Z",
-      metadata: { turnTiming: { startedAt: "2026-06-24T10:00:00.000Z", finishedAt: null, durationMs: null } },
+      metadata: {
+        messageKind: "assistant",
+        presentationTurnId: "msg-1",
+        agentSessionId: "session-1",
+        turnTiming: { startedAt: "2026-06-24T10:00:00.000Z", finishedAt: null, durationMs: null },
+      },
       parts: [
         { type: "text", id: "text-1", text: "Hello world" },
         { type: "reasoning", id: "reason-1", text: "Thinking", state: "done" },
@@ -248,6 +259,7 @@ describe("ChatJournal", () => {
         role: "user",
         parts: [{ type: "text", text: "写个 helloworld" }],
         content: "写个 helloworld",
+        metadata: { messageKind: "user", agentSessionId: "session-1" },
       },
       {
         id: "msg-assistant-1",
@@ -256,6 +268,9 @@ describe("ChatJournal", () => {
         content: "我会先整理方案。",
         createdAt: "2026-06-24T10:00:00.000Z",
         metadata: {
+          messageKind: "assistant",
+          presentationTurnId: "msg-assistant-1",
+          agentSessionId: "session-1",
           turnTiming: {
             startedAt: "2026-06-24T10:00:00.000Z",
             finishedAt: "2026-06-18T08:36:34.898Z",
@@ -281,7 +296,7 @@ describe("ChatJournal", () => {
       "msg-guide-1",
       "2026-06-29T08:00:05.000Z",
       "session-1",
-      { localMessageKind: "running-guide" },
+      { messageKind: "running-guide" },
     );
     journal.record("flow-1", "session-1", { type: "text-start", id: "text-after" });
     journal.record("flow-1", "session-1", { type: "text-delta", id: "text-after", delta: "引导后内容。" });
@@ -314,7 +329,7 @@ describe("ChatJournal", () => {
       "msg-guide-1",
       "2026-06-29T08:00:02.000Z",
       "session-1",
-      { localMessageKind: "running-guide" },
+      { messageKind: "running-guide" },
     );
     journal.record("flow-1", "session-1", {
       type: "tool-output-available",
@@ -355,7 +370,7 @@ describe("ChatJournal", () => {
       "msg-guide-1",
       "2026-06-29T08:00:05.000Z",
       "session-1",
-      { localMessageKind: "running-guide" },
+      { messageKind: "running-guide" },
     );
 
     const reasoning = journal.record("flow-1", "session-1", { type: "reasoning-start", messageId: "msg-assistant-1", id: "reason-after-guide" });
@@ -411,7 +426,20 @@ describe("WsPusher", () => {
         agent_session_id: "agent-session-1",
         flow_expert_id: "agent-session-1",
         log_id: "log-1",
-        data: { stream_epoch: journal.getStreamEpoch(), cursor: 1, event: { type: "turn-started", messageId: "msg-1", startedAt: "2026-06-24T10:00:00.000Z" } },
+        data: {
+          stream_epoch: journal.getStreamEpoch(),
+          cursor: 1,
+          timeline_items: [expect.objectContaining({
+            id: "msg-1",
+            position: 1,
+            type: "message",
+            lifecycle: "active",
+            message_id: "msg-1",
+            presentation_turn_id: "msg-1",
+            message_kind: "assistant",
+          })],
+          event: { type: "turn-started", messageId: "msg-1", startedAt: "2026-06-24T10:00:00.000Z" },
+        },
       },
     ]);
     expect(journalDuringPublish).toEqual([
@@ -485,7 +513,7 @@ describe("WsPusher", () => {
       "msg-guide-1",
       "2026-06-29T08:00:05.000Z",
       "agent-session-1",
-      { localMessageKind: "running-guide" },
+      { messageKind: "running-guide" },
     );
     await pusher.consume({ type: "reasoning-start", messageId: "msg-assistant-1", id: "reason-after-guide" });
     await pusher.consume({
@@ -784,7 +812,7 @@ describe("Fastify app and websocket gateway", () => {
       const response = await nextWsMessage(ws) as { type: string; data: Record<string, unknown> };
       expect(response.type).toBe("session:transcript_snapshot");
       expect(response.data).not.toHaveProperty("active_turn");
-      expect(response.data.messages).toEqual([
+      expect(snapshotMessages(response)).toEqual([
         expect.objectContaining({ id: "msg-assistant-interrupted", role: "assistant" }),
       ]);
       ws.terminate();
@@ -851,41 +879,31 @@ describe("Fastify app and websocket gateway", () => {
         },
       }));
 
-      expect(await nextWsMessage(ws)).toEqual({
+      const response = await nextWsMessage(ws) as {
+        type: string;
+        flow_id: string;
+        session_id: string;
+        agent_session_id: string;
+        data: { stream_epoch: string; cursor: number; timeline_items: Array<{ type: string; payload: unknown }> };
+        pending_cards: unknown[];
+        decision_cards: unknown[];
+      };
+      expect(response).toEqual(expect.objectContaining({
         type: "session:transcript_snapshot",
         flow_id: flow.id,
         session_id: leaderChannel,
         agent_session_id: leader.id,
-        data: {
+        data: expect.objectContaining({
           stream_epoch: chatJournal.getStreamEpoch(),
           cursor: expect.any(Number),
-          messages: [
-            {
-              id: "msg-user-snapshot",
-              role: "user",
-              parts: [{ type: "text", text: "写个 helloworld" }],
-              content: "写个 helloworld",
-              createdAt: "2026-06-24T09:59:59.000Z",
-            },
-            {
-              id: "msg-assistant-current",
-              role: "assistant",
-              parts: [{ type: "text", id: "text-current", text: "正在继续执行" }],
-              content: "正在继续执行",
-              createdAt: "2026-06-24T10:00:00.000Z",
-              metadata: {
-                turnTiming: {
-                  startedAt: "2026-06-24T10:00:00.000Z",
-                  finishedAt: null,
-                  durationMs: null,
-                },
-              },
-            },
-          ],
-        },
+        }),
         pending_cards: [],
         decision_cards: [],
-      });
+      }));
+      expect(snapshotMessages(response)).toEqual([
+        expect.objectContaining({ id: "msg-user-snapshot", role: "user", content: "写个 helloworld" }),
+        expect.objectContaining({ id: "msg-assistant-current", role: "assistant", content: "正在继续执行" }),
+      ]);
 
       ws.terminate();
     } finally {
@@ -960,15 +978,17 @@ describe("Fastify app and websocket gateway", () => {
         },
       }));
 
-      expect(await nextWsMessage(ws)).toEqual(expect.objectContaining({
+      const response = await nextWsMessage(ws) as {
+        type: string;
+        data: { timeline_items: Array<{ type: string; payload: unknown }> };
+      };
+      expect(response).toEqual(expect.objectContaining({
         type: "session:transcript_snapshot",
-        data: expect.objectContaining({
-          messages: [
-            expect.objectContaining({ id: "msg-user-overlap", role: "user" }),
-            expect.objectContaining({ id: "msg-assistant-current", role: "assistant" }),
-          ],
-        }),
       }));
+      expect(snapshotMessages(response)).toEqual([
+        expect.objectContaining({ id: "msg-user-overlap", role: "user" }),
+        expect.objectContaining({ id: "msg-assistant-current", role: "assistant" }),
+      ]);
 
       ws.terminate();
     } finally {
@@ -1048,7 +1068,7 @@ describe("Fastify app and websocket gateway", () => {
           data: { messages: { role: string; content: string }[] };
         };
         expect(response.type).toBe("session:transcript_snapshot");
-        expect(response.data.messages).toEqual([]);
+        expect(snapshotMessages(response)).toEqual([]);
       }
 
       ws.terminate();
@@ -1118,7 +1138,7 @@ describe("Fastify app and websocket gateway", () => {
         data: { messages: { role: string; content: string }[] };
       };
       expect(response.type).toBe("session:transcript_snapshot");
-      expect(response.data.messages).toEqual([]);
+      expect(snapshotMessages(response)).toEqual([]);
 
       ws.terminate();
     } finally {
@@ -1185,7 +1205,7 @@ describe("Fastify app and websocket gateway", () => {
       expect.objectContaining({ id: "client-msg-42", role: "user", content }),
     ]);
     const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
-    expect(store.listTranscriptEntries(flow.id, leaderTranscriptChannelId(flow.id))[0]?.message).toEqual(expect.objectContaining({
+    expect(store.listTimelineItems(flow.id, leaderTranscriptChannelId(flow.id))[0]?.payload).toEqual(expect.objectContaining({
       id: "client-msg-42",
       role: "user",
       content,
@@ -1263,7 +1283,7 @@ describe("Fastify app and websocket gateway", () => {
       payload: {},
     }));
     const leader = store.listAgentSessions(flow.id).find((session) => session.expertId === "exp-leader")!;
-    expect(chatJournal.getTranscriptMessages(flow.id, leaderTranscriptChannelId(flow.id)).filter((item) => item.id === "msg-queue-2")).toHaveLength(1);
+    expect(chatJournal.getTimelineMessages(flow.id, leaderTranscriptChannelId(flow.id)).filter((item) => item.id === "msg-queue-2")).toHaveLength(1);
 
     await handleWsClientMessage(JSON.stringify({ data: {
       type: "flow:queue_dispatch",
@@ -1517,7 +1537,7 @@ describe("Fastify app and websocket gateway", () => {
       data: { messages: Array<{ id: string; role: string; parts: Array<{ type: string; text?: string }> }> };
     };
     expect(response.type).toBe("session:transcript_snapshot");
-    expect(response.data.messages).toEqual([
+    expect(snapshotMessages(response)).toEqual([
       expect.objectContaining({ id: "msg-user-current", role: "user" }),
       expect.objectContaining({
         id: "msg-assistant-current",
@@ -1953,7 +1973,7 @@ describe("Fastify app and websocket gateway", () => {
         id: "client-guide-1",
         role: "user",
         content: "补充当前 turn",
-        metadata: expect.objectContaining({ localMessageKind: "running-guide" }),
+        metadata: expect.objectContaining({ messageKind: "running-guide" }),
       }),
     ]);
     expect(store.listWorkRuns(flow.id).map((turn) => turn.id)).toEqual([workRun.id]);
@@ -2385,11 +2405,8 @@ describe("Fastify app and websocket gateway", () => {
       const startedTurn = store.getWorkRun(workRun.id)!;
       const inputSnapshot = JSON.parse(startedTurn.inputSnapshotJson!) as Record<string, unknown>;
       expect(inputSnapshot.type).toBe("spec");
-      expect(inputSnapshot.diff_baseline).toEqual(expect.objectContaining({
-        kind: expect.stringMatching(/git|hash/),
-        root_path: expect.any(String),
-      }));
-      expect(startedTurn.workRootPath).toBe((inputSnapshot.diff_baseline as { root_path: string }).root_path);
+      expect(inputSnapshot).not.toHaveProperty("diff_baseline");
+      expect(startedTurn.workRootPath).toBe(store.getProject(startedTurn.targetProjectId!)?.localPath);
       expect(store.getSpecRevision(specPlan.spec.id)?.status).toBe("executed");
       expect(store.getSpecApproval(specPlan.approval.id)?.status).toBe("approved");
 
@@ -2862,11 +2879,11 @@ describe("Fastify app and websocket gateway", () => {
     expect(store.getAgentSession(expertSession.id)?.status).toBe("interrupted");
     expect(store.getFlowExpert(flowExpert.id)?.status).toBe("idle");
     expect(store.getPlanRun(planRun.id)?.status).toBe("running");
-    expect(store.listTranscriptEntries(flow.id, leaderTranscriptChannelId(flow.id))[0]?.message).toEqual(expect.objectContaining({
-      metadata: { turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) },
+    expect(store.listTimelineItems(flow.id, leaderTranscriptChannelId(flow.id))[0]?.payload).toEqual(expect.objectContaining({
+      metadata: expect.objectContaining({ turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) }),
     }));
-    expect(store.listTranscriptEntries(flow.id, flowExpert.id)[0]?.message).toEqual(expect.objectContaining({
-      metadata: { turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) },
+    expect(store.listTimelineItems(flow.id, flowExpert.id)[0]?.payload).toEqual(expect.objectContaining({
+      metadata: expect.objectContaining({ turnTiming: expect.objectContaining({ finishedAt: expect.any(String), durationMs: expect.any(Number) }) }),
     }));
     expect(store.listEventLog(flow.id).filter((event) => {
       if (event.eventType !== "agent_session.turn_completed") return false;

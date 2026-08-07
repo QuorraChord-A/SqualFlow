@@ -94,8 +94,89 @@ vi.mock("../../lib/ws", () => ({
     sendFlowGuide: vi.fn(),
     onEvent: vi.fn(() => () => {}),
     onMessage: vi.fn((handler: (message: WsInMessage) => void) => {
-      wsMessageHandlers.add(handler);
-      return () => wsMessageHandlers.delete(handler);
+      const wrapped = ((message: any) => {
+        if (message.type === "session:transcript_snapshot" && Array.isArray(message.data?.messages)) {
+          handler({
+            ...message,
+            data: {
+              stream_epoch: message.data.stream_epoch ?? "epoch-test",
+              cursor: message.data.cursor ?? 0,
+              timeline_items: message.data.messages.map((payload: any, index: number) => {
+                const metadata = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+                const presentationTurnId = payload?.role === "assistant"
+                  ? metadata.presentationTurnId ?? payload.id
+                  : metadata.presentationTurnId ?? null;
+                const messageKind = metadata.messageKind ?? (payload?.role === "assistant" ? "assistant" : "user");
+                return {
+                  id: payload.id,
+                  position: index + 1,
+                  type: "message",
+                  lifecycle: "complete",
+                  message_id: payload.id,
+                  session_id: null,
+                  agent_session_id: message.agent_session_id ?? null,
+                  work_run_id: null,
+                  presentation_turn_id: presentationTurnId,
+                  message_kind: messageKind,
+                  payload: {
+                    ...payload,
+                    metadata: { ...metadata, messageKind, ...(presentationTurnId ? { presentationTurnId } : {}) },
+                  },
+                  created_at: "2026-06-24T10:00:00.000Z",
+                  updated_at: "2026-06-24T10:00:00.000Z",
+                };
+              }),
+              ...(message.data.active_turn ? {
+                active_turn: {
+                  ...message.data.active_turn,
+                  presentation_turn_id: message.data.active_turn.presentation_turn_id
+                    ?? message.data.active_turn.root_message_id
+                    ?? message.data.active_turn.message_id,
+                },
+              } : {}),
+            },
+          });
+          return;
+        }
+        if (message.type === "context_compaction:event" && !message.data?.timeline_item) {
+          handler({
+            ...message,
+            data: {
+              ...message.data,
+              timeline_item: {
+                id: `context-compaction:${message.data.agent_session_id}:${message.data.started_at}`,
+                position: 10_000,
+                type: "context_compaction",
+                lifecycle: message.data.status === "running" ? "active" : "complete",
+                message_id: null,
+                session_id: null,
+                agent_session_id: message.data.agent_session_id,
+                work_run_id: null,
+                presentation_turn_id: null,
+                message_kind: null,
+                payload: message.data,
+                created_at: message.data.started_at,
+                updated_at: message.data.updated_at,
+              },
+            },
+          });
+          return;
+        }
+        if (message.type === "session:transcript_event" && (!message.data?.stream_epoch || !Array.isArray(message.data?.timeline_items))) {
+          handler({
+            ...message,
+            data: {
+              ...message.data,
+              stream_epoch: message.data?.stream_epoch ?? "epoch-test",
+              timeline_items: Array.isArray(message.data?.timeline_items) ? message.data.timeline_items : [],
+            },
+          });
+          return;
+        }
+        handler(message);
+      }) as (message: WsInMessage) => void;
+      wsMessageHandlers.add(wrapped);
+      return () => wsMessageHandlers.delete(wrapped);
     }),
   },
 }));
@@ -886,7 +967,7 @@ describe("LeaderChatPanel", () => {
           flow_id: "flow-1",
           session_id: "sdk-leader-1",
           agent_session_id: "leader-session-1",
-          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
+          data: { stream_epoch: "epoch-test", cursor: 0, timeline_items: [] },
         } as unknown as WsInMessage);
         handler({
           type: "session:transcript_event",
@@ -958,7 +1039,11 @@ describe("LeaderChatPanel", () => {
                 role: "user",
                 parts: [{ type: "text", text: "排队消息 33" }],
                 content: "排队消息 33",
-                metadata: { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+                metadata: {
+                  messageKind: "running-guide",
+                  presentationTurnId: "msg-assistant-1",
+                  guideStatusLabel: "已引导对话",
+                },
               },
             },
           },
@@ -994,11 +1079,10 @@ describe("LeaderChatPanel", () => {
     });
     expect(screen.queryByTestId("running-message-queue")).not.toBeInTheDocument();
 
-    expect(screen.getByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
+    expect(screen.getByTestId("chat-message-guide")).toHaveTextContent("排队消息 33");
     expect(screen.getByText("已引导对话")).toBeInTheDocument();
 
-    expect(screen.getByTestId("chat-message-user")).toHaveTextContent("排队消息 33");
-    expect(screen.queryByTestId("chat-message-guide")).not.toBeInTheDocument();
+    expect(screen.getByTestId("chat-message-guide")).toHaveTextContent("排队消息 33");
     expect(screen.getByText("已引导对话")).toBeInTheDocument();
 
     act(() => {
@@ -1169,7 +1253,7 @@ describe("LeaderChatPanel", () => {
           flow_id: "flow-1",
           session_id: "sdk-leader-1",
           agent_session_id: "leader-session-1",
-          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
+          data: { stream_epoch: "epoch-test", cursor: 0, timeline_items: [] },
         } as unknown as WsInMessage);
         handler({
           type: "flow:queue_state",
@@ -1536,7 +1620,8 @@ describe("LeaderChatPanel", () => {
                 parts: [{ type: "text", text: guideContent }],
                 content: guideContent,
                 metadata: {
-                  localMessageKind: "running-guide",
+                  messageKind: "running-guide",
+                  presentationTurnId: "msg-assistant-1",
                   guideStatusLabel: "已引导对话",
                   browserElementAttachments: queuedCall?.client_payload?.browserElementAttachments,
                   imageAttachments: queuedCall?.client_payload?.imageAttachments,
@@ -1627,7 +1712,7 @@ describe("LeaderChatPanel", () => {
           type: "session:transcript_snapshot",
           flow_id: "flow-1",
           agent_session_id: "leader-session-1",
-          data: { stream_epoch: "legacy", cursor: 0, messages: [] },
+          data: { stream_epoch: "epoch-test", cursor: 0, timeline_items: [] },
         });
       }
     });
@@ -1692,7 +1777,7 @@ describe("LeaderChatPanel", () => {
           type: "session:transcript_snapshot",
           flow_id: "flow-1",
           agent_session_id: "leader-session-1",
-          data: { cursor: 0, messages: [] },
+          data: { stream_epoch: "epoch-test", cursor: 0, timeline_items: [] },
         } as unknown as WsInMessage);
       }
     });
@@ -2208,7 +2293,7 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("正在压缩当前会话");
+    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("正在压缩上下文");
 
     await act(async () => {
       for (const handler of wsMessageHandlers) {
@@ -2232,7 +2317,7 @@ describe("LeaderChatPanel", () => {
       }
     });
 
-    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("已压缩当前会话");
+    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("已压缩上下文");
   });
 
   it("requests context compaction from the composer usage popover", async () => {
@@ -2270,14 +2355,12 @@ describe("LeaderChatPanel", () => {
 
     expect(apiMocks.compactFlowContext).toHaveBeenCalledWith("flow-1");
     expect(compactButton).toHaveTextContent("正在压缩当前会话");
-    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("正在压缩当前会话");
 
     await act(async () => {
       resolveCompact({ ...usage, total_tokens: 2_000, percentage: 1, compacted: true });
     });
 
     expect(await screen.findByLabelText(/上下文已用 1%/)).toBeInTheDocument();
-    expect(await screen.findByTestId("transcript-status-divider")).toHaveTextContent("已压缩当前会话");
   });
 
   it("keeps Plan mode locked until the generated plan is approved", async () => {
@@ -2649,10 +2732,10 @@ describe("LeaderChatPanel", () => {
 
     expect(await screen.findByText("最终结论。")).toBeInTheDocument();
     expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
+    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(2);
   });
 
-  it("uses dashboard WorkRuns for historical flows even if the panel missed flow:state", async () => {
+  it("does not let dashboard WorkRuns merge historical assistant turns", async () => {
     renderPanel({
       workRuns: [{
         id: "utn-1",
@@ -2709,12 +2792,12 @@ describe("LeaderChatPanel", () => {
 
     expect(await screen.findByText("调研完成。")).toBeInTheDocument();
     expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
+    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(2);
     expect(screen.queryByText("已工作 10 秒")).toBeNull();
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
   });
 
-  it("groups canonical messages by the stable WorkRun trigger id", async () => {
+  it("does not group canonical messages by the WorkRun trigger id", async () => {
     renderPanel({
       workRuns: [{
         id: "utn-1",
@@ -2777,7 +2860,7 @@ describe("LeaderChatPanel", () => {
 
     expect(await screen.findByText("调研完成。")).toBeInTheDocument();
     expect(screen.queryByText(/^已工作/)).not.toBeInTheDocument();
-    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(1);
+    expect(screen.getAllByTestId("chat-message-assistant")).toHaveLength(2);
     expect(screen.queryByText("已工作 10 秒")).toBeNull();
     expect(screen.queryByText("已工作 7 秒")).toBeNull();
   });

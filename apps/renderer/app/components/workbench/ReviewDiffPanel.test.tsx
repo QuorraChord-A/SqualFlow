@@ -7,11 +7,14 @@ import ReviewDiffPanel from "./ReviewDiffPanel";
 const review: WorkRunReview = {
   flow_id: "flow-review",
   work_run_id: "turn-review",
+  anchor_message_id: "msg-review-anchor",
+  status: "ready",
   completed_at: "2026-07-21T00:00:00.000Z",
   totals: { files: 1, additions: 1, deletions: 1, modified: 1, added: 0, deleted: 0 },
   files: [{
     path: "src/example.ts",
     status: "modified",
+    detail_status: "ready",
     additions: 1,
     deletions: 1,
     lines: [
@@ -44,5 +47,19 @@ describe("ReviewDiffPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "显示文件列表" }));
     expect(screen.getByTestId("review-file-list")).toBeInTheDocument();
+  });
+
+  it("distinguishes an empty Review from a failed Review", () => {
+    const { rerender } = render(<ReviewDiffPanel review={{
+      ...review,
+      status: "empty",
+      totals: { files: 0, additions: 0, deletions: 0, modified: 0, added: 0, deleted: 0 },
+      files: [],
+    }} />);
+    expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("本次 WorkRun 无文件变化");
+
+    rerender(<ReviewDiffPanel review={{ ...review, status: "failed", reason: "baseline capture failed", files: [] }} />);
+    expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("Diff 生成失败");
+    expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("baseline capture failed");
   });
 });

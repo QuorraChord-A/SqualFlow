@@ -614,11 +614,8 @@ describe("REST API", () => {
           created_at: spec.createdAt,
         }),
       ]);
-      expect(workbench.artifacts.files).toEqual([{
-        path: "app/page.tsx",
-        status: "modified",
-        source_artifact_id: changedFiles.id,
-      }]);
+      expect(workbench.artifacts.files).toEqual([]);
+      expect(workbench.reviews).toEqual([]);
       expect(workbench.artifacts.reports).toEqual([
         expect.objectContaining({
           id: reportArtifact.id,

@@ -1,6 +1,5 @@
 import type { UIMessage } from "ai";
-import type { HistorySessionBoundary } from "../../../lib/ws";
-import type { TranscriptActiveTurn } from "../../../lib/ws";
+import type { TranscriptActiveTurn, TranscriptTimelineItem } from "../../../lib/ws";
 import {
   computeFinishedTiming,
   deriveActivityFromMessage,
@@ -29,6 +28,7 @@ export type TranscriptEvent =
 export type TranscriptCommittedEvent = {
   streamEpoch: string;
   cursor: number;
+  timelineItems: TranscriptTimelineItem[];
   event: TranscriptEvent;
   removedMessageIds?: string[];
   activeTurn?: TranscriptActiveTurn;
@@ -37,7 +37,7 @@ export type TranscriptCommittedEvent = {
 type PendingTranscriptEvent = Omit<TranscriptCommittedEvent, "streamEpoch" | "cursor">;
 
 type ActiveTurn = {
-  messageId: string;
+  presentationTurnId: string;
   renderMessageId: string;
   segmentIndex: number;
   activity: TranscriptActivity;
@@ -47,7 +47,7 @@ type ActiveTurn = {
 
 export type TranscriptState = {
   messages: UIMessage[];
-  historyBoundaries: HistorySessionBoundary[];
+  timelineItems: TranscriptTimelineItem[];
   streamEpoch: string | null;
   cursor: number | null;
   pendingEvents: Map<number, PendingTranscriptEvent>;
@@ -65,11 +65,11 @@ export type TranscriptAction =
       type: "load-snapshot";
       streamEpoch: string;
       cursor: number;
-      messages: UIMessage[];
-      historyBoundaries: HistorySessionBoundary[];
+      timelineItems: TranscriptTimelineItem[];
       activeTurn?: TranscriptActiveTurn;
     }
   | { type: "apply-events"; events: TranscriptCommittedEvent[] }
+  | { type: "upsert-timeline-item"; item: TranscriptTimelineItem }
   | {
       type: "decision-card-resolved";
       cardId: string;
@@ -82,7 +82,7 @@ export type TranscriptAction =
 
 export const emptyTranscriptState: TranscriptState = {
   messages: [],
-  historyBoundaries: [],
+  timelineItems: [],
   streamEpoch: null,
   cursor: null,
   pendingEvents: new Map(),
@@ -108,6 +108,119 @@ function cloneUiMessage(message: UIMessage): UIMessage {
   } as UIMessage;
 }
 
+function itemMessage(item: TranscriptTimelineItem): UIMessage | null {
+  if (item.type !== "message" || !item.payload || typeof item.payload !== "object" || Array.isArray(item.payload)) return null;
+  const message = item.payload as UIMessage;
+  return typeof message.id === "string" && (message.role === "user" || message.role === "assistant")
+    ? message
+    : null;
+}
+
+function messageMetadata(message: UIMessage): Record<string, unknown> {
+  return message.metadata && typeof message.metadata === "object"
+    ? message.metadata as Record<string, unknown>
+    : {};
+}
+
+function messagePresentationTurnId(message: UIMessage): string | null {
+  const value = messageMetadata(message).presentationTurnId;
+  return typeof value === "string" && value ? value : null;
+}
+
+function messageKind(message: UIMessage): TranscriptTimelineItem["message_kind"] {
+  const value = messageMetadata(message).messageKind;
+  if (value === "assistant-continuation" || value === "running-guide" || value === "work-run-terminal"
+    || value === "assistant" || value === "user") return value;
+  return message.role === "assistant" ? "assistant" : "user";
+}
+
+function syntheticMessageItem(message: UIMessage, position: number): TranscriptTimelineItem {
+  const createdAtValue = (message as { createdAt?: unknown }).createdAt;
+  const createdAt = createdAtValue instanceof Date
+    ? createdAtValue.toISOString()
+    : typeof createdAtValue === "string" ? createdAtValue : new Date().toISOString();
+  return {
+    id: message.id,
+    position,
+    type: "message",
+    lifecycle: "complete",
+    message_id: message.id,
+    session_id: null,
+    agent_session_id: typeof messageMetadata(message).agentSessionId === "string"
+      ? messageMetadata(message).agentSessionId as string
+      : null,
+    work_run_id: null,
+    presentation_turn_id: messagePresentationTurnId(message),
+    message_kind: messageKind(message),
+    payload: cloneUiMessage(message),
+    created_at: createdAt,
+    updated_at: createdAt,
+  };
+}
+
+function syncTimelineMessages(items: TranscriptTimelineItem[], messages: UIMessage[]): TranscriptTimelineItem[] {
+  const byId = new Map(messages.map((message) => [message.id, message]));
+  const existingMessageIds = new Set<string>();
+  const synced = items.flatMap((item) => {
+    if (item.type !== "message" || !item.message_id) return [item];
+    const message = byId.get(item.message_id);
+    if (!message) return [];
+    existingMessageIds.add(message.id);
+    return [{
+      ...item,
+      presentation_turn_id: item.presentation_turn_id ?? messagePresentationTurnId(message),
+      message_kind: item.message_kind ?? messageKind(message),
+      payload: cloneUiMessage(message),
+    }];
+  });
+  let position = synced.reduce((max, item) => Math.max(max, item.position), 0);
+  for (const message of messages) {
+    if (existingMessageIds.has(message.id)) continue;
+    synced.push(syntheticMessageItem(message, ++position));
+  }
+  return synced.sort((left, right) => left.position - right.position);
+}
+
+export type TranscriptPresentationItem =
+  | { type: "user-message"; id: string; message: UIMessage }
+  | { type: "assistant-turn"; id: string; presentationTurnId: string; messages: UIMessage[] }
+  | { type: "session-boundary"; id: string; item: TranscriptTimelineItem }
+  | { type: "context-compaction"; id: string; item: TranscriptTimelineItem };
+
+export function projectTranscriptPresentationItems(items: TranscriptTimelineItem[]): TranscriptPresentationItem[] {
+  const result: TranscriptPresentationItem[] = [];
+  for (const item of [...items].sort((left, right) => left.position - right.position)) {
+    if (item.type === "session_boundary") {
+      result.push({ type: "session-boundary", id: item.id, item });
+      continue;
+    }
+    if (item.type === "context_compaction") {
+      result.push({ type: "context-compaction", id: item.id, item });
+      continue;
+    }
+    const message = itemMessage(item);
+    if (!message) continue;
+    const presentationTurnId = item.presentation_turn_id ?? messagePresentationTurnId(message);
+    const kind = item.message_kind ?? messageKind(message);
+    if (presentationTurnId && (message.role === "assistant" || kind === "running-guide")) {
+      const previous = result.at(-1);
+      if (previous?.type === "assistant-turn" && previous.presentationTurnId === presentationTurnId) {
+        previous.messages.push(cloneUiMessage(message));
+      } else {
+        result.push({
+          type: "assistant-turn",
+          id: `presentation-turn:${presentationTurnId}`,
+          presentationTurnId,
+          messages: [cloneUiMessage(message)],
+        });
+      }
+      continue;
+    }
+    result.push({ type: "user-message", id: item.id, message: cloneUiMessage(message) });
+  }
+  return result;
+}
+
 function textContent(message: UIMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -115,8 +228,11 @@ function textContent(message: UIMessage): string {
     .join("");
 }
 
-function cloneMessagesWithOptimistic(state: TranscriptState, messages: UIMessage[]): UIMessage[] {
-  const snapshot = messages.map(cloneUiMessage);
+function cloneMessagesWithOptimistic(state: TranscriptState, timelineItems: TranscriptTimelineItem[]): UIMessage[] {
+  const snapshot = timelineItems.flatMap((item) => {
+    const message = itemMessage(item);
+    return message ? [cloneUiMessage(message)] : [];
+  });
   const snapshotIds = new Set(snapshot.map((message) => message.id));
   const optimistic = state.messages.filter((message) =>
     state.optimisticMessageIds.has(message.id)
@@ -140,7 +256,7 @@ function activeTurnFromSnapshot(
   if (!message) return null;
   const timing = readHistoryTurnTiming(message);
   return {
-    messageId: activeTurn.root_message_id ?? message.id,
+    presentationTurnId: activeTurn.presentation_turn_id,
     renderMessageId: message.id,
     segmentIndex: activeTurn.segment_index ?? 0,
     activity: deriveActivityFromMessage(message),
@@ -153,14 +269,18 @@ function activeTurnFromSnapshot(
   };
 }
 
-function createAssistantMessage(messageId: string, startedAt: string): UIMessage {
+function createAssistantMessage(messageId: string, startedAt: string, presentationTurnId = messageId): UIMessage {
   return {
     id: messageId,
     role: "assistant",
     parts: [],
     content: "",
     createdAt: startedAt,
-    metadata: { turnTiming: { startedAt, finishedAt: null, durationMs: null } },
+    metadata: {
+      messageKind: presentationTurnId === messageId ? "assistant" : "assistant-continuation",
+      presentationTurnId,
+      turnTiming: { startedAt, finishedAt: null, durationMs: null },
+    },
   } as UIMessage;
 }
 
@@ -175,7 +295,7 @@ function withTiming(message: UIMessage, timing: TurnTiming) {
 
 function activeMessage(state: TranscriptState, messageId: string): { messages: UIMessage[]; message: UIMessage } | null {
   if (!state.activeTurn) return null;
-  if (state.activeTurn.messageId !== messageId && state.activeTurn.renderMessageId !== messageId) return null;
+  if (state.activeTurn.presentationTurnId !== messageId && state.activeTurn.renderMessageId !== messageId) return null;
   const index = state.messages.findIndex((message) => message.id === state.activeTurn?.renderMessageId);
   if (index < 0) return null;
   const messages = [...state.messages];
@@ -248,7 +368,7 @@ function appendServerMessage(messages: UIMessage[], message: UIMessage): UIMessa
 
 function isRunningGuideMessage(message: UIMessage): boolean {
   return message.role === "user"
-    && (message as { metadata?: { localMessageKind?: unknown } }).metadata?.localMessageKind === "running-guide";
+    && (message as { metadata?: { messageKind?: unknown } }).metadata?.messageKind === "running-guide";
 }
 
 function isGuideApplyingAssistantEvent(event: TranscriptEvent): boolean {
@@ -259,30 +379,20 @@ function isGuideApplyingAssistantEvent(event: TranscriptEvent): boolean {
     || event.type === "tool-input-available";
 }
 
-function transcriptEventMessageId(event: TranscriptEvent): string | null {
-  return "messageId" in event ? event.messageId : null;
-}
-
-function segmentIndexFromMessageId(rootMessageId: string, messageId: string): number | null {
-  const prefix = `${rootMessageId}:guide-`;
-  if (!messageId.startsWith(prefix)) return null;
-  const value = Number(messageId.slice(prefix.length));
-  return Number.isInteger(value) && value > 0 ? value : null;
-}
-
-function useCanonicalAssistantSegment(state: TranscriptState, event: TranscriptEvent): TranscriptState | null {
-  const messageId = transcriptEventMessageId(event);
-  if (!messageId || !state.activeTurn) return null;
-  if (messageId === state.activeTurn.renderMessageId) return state;
-  const segmentIndex = segmentIndexFromMessageId(state.activeTurn.messageId, messageId);
-  if (segmentIndex === null) return null;
-
+function alignCanonicalAssistantSegment(state: TranscriptState, activeTurn: TranscriptActiveTurn): TranscriptState {
+  if (!state.activeTurn || activeTurn.message_id === state.activeTurn.renderMessageId) return state;
+  if (activeTurn.presentation_turn_id !== state.activeTurn.presentationTurnId) return { ...state, needsResync: true };
+  const messageId = activeTurn.message_id;
   const messages = [...state.messages];
   const existingIndex = messages.findIndex((message) => message.id === messageId);
   if (existingIndex >= 0) {
     messages[existingIndex] = cloneUiMessage(messages[existingIndex]);
   } else {
-    messages.push(createAssistantMessage(messageId, state.activeTurn.timing.startedAt ?? new Date().toISOString()));
+    messages.push(createAssistantMessage(
+      messageId,
+      activeTurn.started_at,
+      activeTurn.presentation_turn_id,
+    ));
   }
   return {
     ...state,
@@ -290,7 +400,7 @@ function useCanonicalAssistantSegment(state: TranscriptState, event: TranscriptE
     activeTurn: {
       ...state.activeTurn,
       renderMessageId: messageId,
-      segmentIndex,
+      segmentIndex: activeTurn.segment_index ?? state.activeTurn.segmentIndex + 1,
       activity: "waiting",
     },
   };
@@ -342,7 +452,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
   }
 
   if (event.type === "turn-started") {
-    if (state.activeTurn && state.activeTurn.messageId !== event.messageId) {
+    if (state.activeTurn && state.activeTurn.presentationTurnId !== event.messageId) {
       return { ...state, needsResync: true };
     }
     const startedAt = event.startedAt && !Number.isNaN(Date.parse(event.startedAt))
@@ -363,7 +473,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
       messages,
       status: "streaming",
       activeTurn: {
-        messageId: event.messageId,
+        presentationTurnId: event.messageId,
         renderMessageId: event.messageId,
         segmentIndex: 0,
         activity: "waiting",
@@ -373,7 +483,7 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
     };
   }
 
-  let workingState = useCanonicalAssistantSegment(state, event) ?? state;
+  const workingState = state;
   const active = activeMessage(workingState, event.messageId);
   if (!active || !workingState.activeTurn) return { ...workingState, needsResync: true };
   let { messages, message } = active;
@@ -507,14 +617,40 @@ function reconcileCommittedEvent(state: TranscriptState, mutation: PendingTransc
   let next = mutation.removedMessageIds?.length
     ? { ...state, messages: state.messages.filter((message) => !mutation.removedMessageIds!.includes(message.id)) }
     : state;
+  const eventMessageId = mutation.event.type === "message-added"
+    ? mutation.event.message.id
+    : mutation.event.messageId;
+  const alignBeforeEvent = mutation.activeTurn?.message_id === eventMessageId;
+  if (mutation.activeTurn && alignBeforeEvent) next = alignCanonicalAssistantSegment(next, mutation.activeTurn);
   next = applyEvent(next, mutation.event);
+  if (mutation.activeTurn && !alignBeforeEvent) next = alignCanonicalAssistantSegment(next, mutation.activeTurn);
+  if (mutation.timelineItems.length > 0) {
+    const committedById = new Map(mutation.timelineItems.map((item) => [item.id, item]));
+    const timelineItems = [
+      ...next.timelineItems.filter((item) => !committedById.has(item.id)),
+      ...mutation.timelineItems,
+    ].sort((left, right) => left.position - right.position);
+    const committedMessages = new Map(mutation.timelineItems.flatMap((item) => {
+      const message = itemMessage(item);
+      return message ? [[message.id, cloneUiMessage(message)] as const] : [];
+    }));
+    const messages = next.messages.map((message) => committedMessages.get(message.id) ?? message);
+    for (const [messageId, message] of committedMessages) {
+      if (!messages.some((candidate) => candidate.id === messageId)) messages.push(message);
+    }
+    next = { ...next, messages, timelineItems: syncTimelineMessages(timelineItems, messages) };
+  }
   if (!mutation.activeTurn) return next;
 
   const renderMessageId = mutation.activeTurn.message_id;
   let messages = next.messages;
   let message = messages.find((item) => item.id === renderMessageId && item.role === "assistant");
   if (!message) {
-    message = createAssistantMessage(renderMessageId, mutation.activeTurn.started_at);
+    message = createAssistantMessage(
+      renderMessageId,
+      mutation.activeTurn.started_at,
+      mutation.activeTurn.presentation_turn_id,
+    );
     messages = [...messages, message];
   }
   const sameActiveMessage = next.activeTurn?.renderMessageId === renderMessageId;
@@ -523,7 +659,7 @@ function reconcileCommittedEvent(state: TranscriptState, mutation: PendingTransc
     messages,
     status: "streaming",
     activeTurn: {
-      messageId: mutation.activeTurn.root_message_id ?? renderMessageId,
+      presentationTurnId: mutation.activeTurn.presentation_turn_id,
       renderMessageId,
       segmentIndex: mutation.activeTurn.segment_index ?? 0,
       activity: sameActiveMessage
@@ -573,6 +709,7 @@ function applyEvents(state: TranscriptState, events: TranscriptCommittedEvent[])
     if (item.streamEpoch !== streamEpoch) continue;
     if (state.cursor !== null && item.cursor <= state.cursor) continue;
     pendingEvents.set(item.cursor, {
+      timelineItems: item.timelineItems,
       event: item.event,
       ...(item.removedMessageIds?.length ? { removedMessageIds: item.removedMessageIds } : {}),
       ...(item.activeTurn ? { activeTurn: item.activeTurn } : {}),
@@ -585,22 +722,21 @@ function loadSnapshot(
   state: TranscriptState,
   streamEpoch: string,
   cursor: number,
-  messages: UIMessage[],
-  historyBoundaries: HistorySessionBoundary[],
+  timelineItems: TranscriptTimelineItem[],
   activeTurnSnapshot: TranscriptActiveTurn | undefined,
 ): TranscriptState {
   const sameEpoch = state.streamEpoch === null || state.streamEpoch === streamEpoch;
   if (sameEpoch && state.cursor !== null && cursor < state.cursor) return state;
-  const sessionMessages = cloneMessagesWithOptimistic(state, messages);
+  const sessionMessages = cloneMessagesWithOptimistic(state, timelineItems);
   const pendingEvents = sameEpoch
     ? new Map([...state.pendingEvents].filter(([eventCursor]) => eventCursor > cursor))
     : new Map<number, PendingTranscriptEvent>();
   const activeTurn = activeTurnFromSnapshot(sessionMessages, activeTurnSnapshot);
-  const snapshotIds = new Set(messages.map((message) => message.id));
+  const snapshotIds = new Set(timelineItems.flatMap((item) => item.message_id ? [item.message_id] : []));
   return replayPending({
     ...state,
     messages: sessionMessages,
-    historyBoundaries,
+    timelineItems,
     streamEpoch,
     cursor,
     pendingEvents,
@@ -613,7 +749,7 @@ function loadSnapshot(
   });
 }
 
-export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
+function reduceTranscriptState(state: TranscriptState, action: TranscriptAction): TranscriptState {
   switch (action.type) {
     case "reset":
       return emptyTranscriptState;
@@ -630,14 +766,21 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
       return { ...state, messages, optimisticMessageIds };
     }
     case "load-snapshot":
-      return loadSnapshot(state, action.streamEpoch, action.cursor, action.messages, action.historyBoundaries, action.activeTurn);
+      return loadSnapshot(state, action.streamEpoch, action.cursor, action.timelineItems, action.activeTurn);
     case "apply-events":
       return applyEvents(state, action.events);
+    case "upsert-timeline-item": {
+      const existingIndex = state.timelineItems.findIndex((item) => item.id === action.item.id);
+      const timelineItems = [...state.timelineItems];
+      if (existingIndex >= 0) timelineItems[existingIndex] = action.item;
+      else timelineItems.push(action.item);
+      return { ...state, timelineItems: timelineItems.sort((left, right) => left.position - right.position) };
+    }
     case "finish-active":
       return state.activeTurn
         ? applyEvent(state, {
           type: "turn-finished",
-          messageId: state.activeTurn.messageId,
+          messageId: state.activeTurn.renderMessageId,
           durationMs: null,
           finishedAt: action.finishedAt,
         })
@@ -662,4 +805,13 @@ export function transcriptReducer(state: TranscriptState, action: TranscriptActi
     case "resync-requested":
       return { ...state, needsResync: false };
   }
+}
+
+export function transcriptReducer(state: TranscriptState, action: TranscriptAction): TranscriptState {
+  const next = reduceTranscriptState(state, action);
+  if (next === state) return state;
+  return {
+    ...next,
+    timelineItems: syncTimelineMessages(next.timelineItems, next.messages),
+  };
 }

@@ -173,10 +173,19 @@ export class CodexToUiChunkAdapter {
     if (type === "fileChange") {
       const id = stringValue(item.id, "codex-file-change");
       const input = { changes: item.changes ?? [] };
-      return this.builder.toolCall("codex_file_change", id, input, {
-        capability: "edit",
-        providerToolName: "fileChange",
-      });
+      if (isStart) {
+        return this.builder.toolCall("codex_file_change", id, input, {
+          capability: "edit",
+          providerToolName: "fileChange",
+        });
+      }
+      const status = stringValue(item.status, "completed");
+      const error = asRecord(item.error);
+      return [this.builder.toolResult(id, JSON.stringify({
+        status,
+        changes: item.changes ?? [],
+        ...(error ? { error: stringValue(error.message, JSON.stringify(error)) } : {}),
+      }), status === "failed" || Boolean(error))];
     }
     if (type === "mcpToolCall") {
       const server = stringValue(item.server);

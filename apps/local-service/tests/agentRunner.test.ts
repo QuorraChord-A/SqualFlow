@@ -62,13 +62,16 @@ describe("runClaudeAgent", () => {
         parts: [expect.objectContaining({ type: "text", text: "收到" })],
         content: "收到",
         createdAt: startedAt,
-        metadata: {
+        metadata: expect.objectContaining({
+          messageKind: "assistant",
+          presentationTurnId: "msg-1",
+          agentSessionId: "ags-1",
           turnTiming: {
             startedAt,
             finishedAt: expect.any(String),
             durationMs: 4321,
           },
-        },
+        }),
       }),
     ]);
     expect(published.map((message) => (message as { data: { event: { type: string } } }).data.event.type)).toEqual([

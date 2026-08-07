@@ -1,5 +1,5 @@
 import type { Store } from "../db/store.js";
-import { latestWorkRunReview } from "./workRunReview.js";
+import { listWorkRunReviews } from "./workRunReview.js";
 import { currentPlanView } from "./orchestrationView.js";
 
 function roleTitle(store: Store, expertId: string | null | undefined) {
@@ -20,31 +20,6 @@ function memberStatus(status: string) {
     : "idle";
 }
 
-function artifactFiles(content: string): Array<{
-  path: string;
-  status?: string;
-  additions?: number;
-  deletions?: number;
-}> {
-  try {
-    const parsed = JSON.parse(content) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((item) => {
-      if (typeof item !== "object" || item === null) return [];
-      const row = item as Record<string, unknown>;
-      if (typeof row.path !== "string") return [];
-      return [{
-        path: row.path,
-        ...(typeof row.status === "string" ? { status: row.status } : {}),
-        ...(typeof row.additions === "number" ? { additions: row.additions } : {}),
-        ...(typeof row.deletions === "number" ? { deletions: row.deletions } : {}),
-      }];
-    });
-  } catch {
-    return [];
-  }
-}
-
 export function buildFlowWorkbench(store: Store, flowId: string) {
   store.projectLegacyFlowExperts(flowId);
   const flow = store.getFlow(flowId);
@@ -53,6 +28,8 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
   const openWorkRun = store.getOpenWorkRun(flowId);
   const sessions = store.listAgentSessions(flowId);
   const artifacts = store.listArtifacts(flowId);
+  const reviews = listWorkRunReviews(store, flowId);
+  const latestReview = reviews.at(-1) ?? null;
   const project = flow.projectId ? store.getProject(flow.projectId) : null;
 
   const leaderSession = sessions.filter((session) =>
@@ -112,14 +89,12 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
         status: spec.status,
         created_at: spec.createdAt,
       })),
-      files: artifacts.flatMap((artifact) =>
-        artifact.type === "changed_files"
-          ? artifactFiles(artifact.content).map((file) => ({
-              ...file,
-              source_artifact_id: artifact.id,
-            }))
-          : []
-      ),
+      files: latestReview?.files.map((file) => ({
+        path: file.path,
+        status: file.status,
+        ...(file.additions !== null ? { additions: file.additions } : {}),
+        ...(file.deletions !== null ? { deletions: file.deletions } : {}),
+      })) ?? [],
       reports: artifacts
         .filter((artifact) =>
           artifact.type.endsWith("_report")
@@ -156,6 +131,6 @@ export function buildFlowWorkbench(store: Store, flowId: string) {
       root_path: openWorkRun?.workRootPath || project?.localPath || null,
       tree_available: Boolean(openWorkRun?.workRootPath || project?.localPath),
     },
-    review: latestWorkRunReview(store, flowId),
+    reviews,
   };
 }

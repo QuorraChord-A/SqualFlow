@@ -30,6 +30,8 @@ export type LeaderTurnInput = {
     summary: string;
     error: string | null;
     artifactRefs: string[];
+    filesChanged: string[];
+    metrics: Record<string, unknown>;
     completedAt: string;
   };
   expertMessage?: {
@@ -40,6 +42,8 @@ export type LeaderTurnInput = {
     summary: string;
     error: string | null;
     artifactRefs: string[];
+    filesChanged: string[];
+    metrics: Record<string, unknown>;
     completedAt: string;
   };
   decisionAnswers?: Record<string, string | string[]>;
@@ -67,6 +71,8 @@ function joinSegments(segments: Array<string | null | undefined>): string {
 }
 
 function expertResultBody(input: NonNullable<LeaderTurnInput["expertResult"]>): string {
+  const filesChanged = input.filesChanged;
+  const metrics = input.metrics;
   const taskStatus = input.taskStatus ?? "unknown";
   const cancelled = input.status === "cancelled" || input.turnOutcome === "cancelled";
   const failed = !cancelled && (input.status === "failed" || input.turnOutcome !== "completed");
@@ -83,6 +89,8 @@ function expertResultBody(input: NonNullable<LeaderTurnInput["expertResult"]>): 
     ...(failed && input.error ? [`错误：${input.error}`] : []),
     `当前 Task 状态：${taskStatus}`,
     ...(input.artifactRefs.length > 0 ? [`产物：${input.artifactRefs.join("、")}`] : []),
+    `本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：${filesChanged.length > 0 ? filesChanged.join("、") : "无"}`,
+    `本 AgentSession metrics：${JSON.stringify(metrics)}`,
   ].join("\n");
 }
 
@@ -256,6 +264,8 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
   }
   if (input.kind === "expert_message" && input.expertMessage) {
     const failed = input.expertMessage.status === "failed" || input.expertMessage.turnOutcome !== "completed";
+    const filesChanged = input.expertMessage.filesChanged;
+    const metrics = input.expertMessage.metrics;
     return buildPlatformEvent({
       flowId: input.flowId,
       type: "expert_message",
@@ -266,6 +276,8 @@ export function buildLeaderPrompt(input: LeaderTurnInput): string {
       body: [
         failed ? `Expert 普通对话失败：${input.expertMessage.summary}` : input.expertMessage.summary,
         ...(failed && input.expertMessage.error ? [`错误：${input.expertMessage.error}`] : []),
+        `本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：${filesChanged.length > 0 ? filesChanged.join("、") : "无"}`,
+        `本 AgentSession metrics：${JSON.stringify(metrics)}`,
       ].join("\n"),
     });
   }

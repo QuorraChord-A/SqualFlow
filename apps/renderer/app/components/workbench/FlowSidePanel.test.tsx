@@ -83,7 +83,7 @@ const workbench: FlowWorkbench = {
     root_path: "/tmp/project",
     tree_available: true,
   },
-  review: null,
+  reviews: [],
 };
 
 function renderPanel(
@@ -195,19 +195,22 @@ describe("FlowSidePanel", () => {
         ...createInitialRightPanelState(),
         tab: "dynamic",
         activeDynamicTabId: "review",
-        dynamicTabs: [{ type: "review", title: "审核" }],
+        dynamicTabs: [{ type: "review", title: "审核", work_run_id: "utn-1" }],
       },
       vi.fn(),
       {
         ...workbench,
-        review: {
+        reviews: [{
           flow_id: "flow-1",
           work_run_id: "utn-1",
+          anchor_message_id: "msg-review-utn-1",
+          status: "ready",
           completed_at: "2026-06-14T01:03:00.000Z",
           totals: { files: 1, additions: 1, deletions: 1, modified: 1, added: 0, deleted: 0 },
           files: [{
             path: "apps/local-service/src/runtime/leaderRuntime.ts",
             status: "modified",
+            detail_status: "ready",
             additions: 1,
             deletions: 1,
             lines: [
@@ -215,13 +218,29 @@ describe("FlowSidePanel", () => {
               { kind: "added", old_line: null, new_line: 10, text: "new" },
             ],
           }],
-        },
+        }, {
+          flow_id: "flow-1",
+          work_run_id: "utn-2",
+          anchor_message_id: "msg-review-utn-2",
+          status: "ready",
+          completed_at: "2026-06-14T02:03:00.000Z",
+          totals: { files: 1, additions: 1, deletions: 0, modified: 0, added: 1, deleted: 0 },
+          files: [{
+            path: "apps/renderer/app/latest.tsx",
+            status: "added",
+            detail_status: "ready",
+            additions: 1,
+            deletions: 0,
+            lines: [{ kind: "added", old_line: null, new_line: 1, text: "latest" }],
+          }],
+        }],
       },
     );
 
     expect(screen.getByRole("tab", { name: "审核" })).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("本轮对话");
+    expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("WorkRun Review");
     expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("leaderRuntime.ts");
+    expect(screen.getByTestId("review-diff-panel")).not.toHaveTextContent("latest.tsx");
     expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("+1");
     expect(screen.getByTestId("review-diff-panel")).toHaveTextContent("-1");
   });

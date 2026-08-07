@@ -22,18 +22,9 @@ export function createWorkingWorkRun(
     inputSnapshotJson: input.inputSnapshotJson ?? "{}",
   });
   if (!started) throw new Error(`Unable to start WorkRun work: ${turn.id}`);
-  // This legacy fixture represents a WorkRun whose collaboration phase has
-  // already begun. Production enters this state atomically with the first
-  // Task-backed Expert dispatch; tests that need a prepared-only WorkRun call
-  // createWorkRun/startWorkRunWork directly.
-  const executionStartedAt = new Date().toISOString();
-  store.sqlite.prepare(`
-    UPDATE work_runs
-    SET status = 'executing', revision = revision + 1,
-        execution_started_at = ?, active_started_at = ?, updated_at = ?
-    WHERE id = ?
-  `).run(executionStartedAt, executionStartedAt, executionStartedAt, turn.id);
-  return store.getWorkRun(turn.id)!;
+  const executing = store.startWorkRunExecution(turn.id);
+  if (!executing) throw new Error(`Unable to begin WorkRun execution: ${turn.id}`);
+  return executing;
 }
 
 export function beginWorkRun(store: Store, input: Record<string, unknown> & { flowId: string }) {

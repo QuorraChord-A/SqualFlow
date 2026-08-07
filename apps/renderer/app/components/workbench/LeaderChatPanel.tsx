@@ -77,8 +77,8 @@ export interface LeaderChatPanelProps {
   agentSessions?: AgentSession[];
   onOpenSpecPreview?: (specRevisionId: string, title: string) => void;
   onOpenPlan?: (plan: OrchestrationPlanView) => void;
-  review?: WorkRunReview | null;
-  onOpenReview?: () => void;
+  reviews?: WorkRunReview[];
+  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
   composerOnly?: boolean;
   composerVariant?: "default" | "compactFloating";
@@ -199,7 +199,7 @@ function runningGuideUiMessage(
     content: displayText,
     createdAt: new Date().toISOString(),
     metadata: {
-      localMessageKind: "running-guide",
+      messageKind: "running-guide",
       guideStatusLabel: "已引导对话",
       ...(options.browserElementAttachments?.length
         ? { browserElementAttachments: options.browserElementAttachments }
@@ -246,7 +246,7 @@ function normalizeWorkRun(value: unknown): WorkRunDisplay | null {
     const snapshot = JSON.parse(turn.input_snapshot_json ?? "{}") as { spec_requested?: unknown };
     specRequested = snapshot.spec_requested === true;
   } catch {
-    // Invalid legacy snapshots must not prevent the turn from rendering.
+    // A malformed input snapshot must not prevent the operational WorkRun from rendering.
   }
   return {
     id,
@@ -527,7 +527,7 @@ export default function LeaderChatPanel({
   agentSessions = EMPTY_AGENT_SESSIONS,
   onOpenSpecPreview,
   onOpenPlan = () => {},
-  review,
+  reviews,
   onOpenReview,
   onOpenWorkspaceFile,
   composerOnly = false,
@@ -1060,12 +1060,6 @@ export default function LeaderChatPanel({
   const shouldQueueNewMessage = Boolean(activeLeaderAgentSessionId);
   const pendingDecisionCards = decisionCards.filter((card) => decisionCardStatuses[card.card_id] === "pending" || card.status === "pending");
   const hasPendingDecisionCards = pendingDecisionCards.length > 0;
-  const compactionDividerLabel = contextCompaction?.status === "running"
-    ? "正在压缩当前会话"
-    : contextCompaction?.status === "completed"
-      ? "已压缩当前会话"
-      : null;
-
   useEffect(() => {
     let cancelled = false;
 
@@ -1672,8 +1666,7 @@ export default function LeaderChatPanel({
           optimisticMessages={transcriptOptimisticMessages}
           followRequestKey={followRequestKey}
           isAwaitingResponse={isWaiting}
-          workRuns={mergedWorkRuns}
-          review={review}
+          reviews={reviews}
           onOpenReview={onOpenReview}
           onOpenWorkspaceFile={onOpenWorkspaceFile}
           allowInferredAgentSessionId
@@ -1685,9 +1678,6 @@ export default function LeaderChatPanel({
           bottomOverlayHeight={hasPendingDecisionCards ? 0 : queuedMessages.length > 0 ? 296 : 132}
           emptyTitle="开始对话"
           emptyDescription="发送消息开始与 AI 助手对话"
-          statusDividerLabel={compactionDividerLabel}
-          statusDividerAnimated={contextCompaction?.status === "running"}
-          statusDividerAt={contextCompaction?.started_at ?? null}
           workspaceRootPath={workspaceRootPath}
         />
       </div>

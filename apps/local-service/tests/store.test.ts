@@ -303,7 +303,7 @@ describe("store", () => {
 
     expect(store.getFlow("flow-pre-canonical")).toBeUndefined();
     expect(store.sqlite.prepare("SELECT value FROM app_metadata WHERE key = 'canonical_transcript_version'").get())
-      .toEqual({ value: "2" });
+      .toEqual({ value: "3" });
   });
 
   it("requires decision cards to belong to an active WorkRun", () => {
@@ -945,12 +945,28 @@ describe("store", () => {
       ).toEqual([]);
     }
     expect(tableNames(store)).toContain("flow_experts");
-    expect(columnNames(store, "chat_messages")).toEqual(expect.arrayContaining([
+    expect(columnNames(store, "chat_timeline_items")).toEqual(expect.arrayContaining([
       "flow_id",
       "channel_id",
+      "item_id",
+      "item_type",
       "message_id",
       "position",
+      "presentation_turn_id",
       "payload_json",
+    ]));
+    expect(tableNames(store)).not.toContain("chat_messages");
+    expect(columnNames(store, "work_run_file_attributions")).toEqual(expect.arrayContaining([
+      "work_run_id",
+      "flow_id",
+      "status",
+      "reason",
+    ]));
+    expect(columnNames(store, "work_run_touched_files")).toEqual(expect.arrayContaining([
+      "work_run_id",
+      "relative_path",
+      "sources_json",
+      "agent_session_ids_json",
     ]));
     expect(columnNames(store, "flow_experts")).toEqual(expect.arrayContaining([
       "flow_id",

@@ -8,7 +8,7 @@ import type {
   ExpertTaskFinishedEvent,
 } from "./expertRuntime.js";
 import { publishWorkRunEvent } from "../domain/workRun.js";
-import { captureWorkRunBaseline } from "./workRunDiff.js";
+import { capturePersistentChangeBaseline } from "./changeBaseline.js";
 
 export type AgentDispatcher = {
   dispatchAgent: (input: {
@@ -191,21 +191,6 @@ export function createAgentDispatcher(input: {
         flowId: dispatch.flowId,
         expertId: dispatch.expertId,
       });
-      if (workRun.status === "ready" && workRun.workRootPath) {
-        let snapshot: Record<string, unknown> = {};
-        try {
-          const parsed = JSON.parse(workRun.inputSnapshotJson) as unknown;
-          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) snapshot = parsed as Record<string, unknown>;
-        } catch {
-          snapshot = {};
-        }
-        if (!("diff_baseline" in snapshot)) {
-          input.store.updateWorkRunInputSnapshot(workRun.id, JSON.stringify({
-            ...snapshot,
-            diff_baseline: captureWorkRunBaseline(workRun.workRootPath),
-          }));
-        }
-      }
       const started = input.store.startAgentDispatch({
         flowId: dispatch.flowId,
         taskId: task.id,
@@ -219,6 +204,13 @@ export function createAgentDispatcher(input: {
       }
 
       const { agentSession, task: startedTask, flowExpert: updatedFlowExpert } = started;
+      capturePersistentChangeBaseline({
+        store: input.store,
+        flowId: dispatch.flowId,
+        sourceAgentSessionId: agentSession.id,
+        workRunId: startedTask.workRunId,
+        rootPath: workRun.workRootPath,
+      });
       const executingWorkRun = input.store.getWorkRun(startedTask.workRunId);
       if (executingWorkRun) await publishWorkRunEvent(input.eventBus, executingWorkRun);
       await input.eventBus.publish(dispatch.flowId, {
@@ -302,6 +294,8 @@ export function createAgentDispatcher(input: {
           summary: message,
           error: message,
           artifactRefs: [],
+          filesChanged: [],
+          metrics: {},
           completedAt: new Date().toISOString(),
         });
       });
@@ -458,6 +452,8 @@ export function createAgentDispatcher(input: {
           summary: errorMessage,
           error: errorMessage,
           artifactRefs: [],
+          filesChanged: [],
+          metrics: {},
           completedAt: new Date().toISOString(),
         });
       });

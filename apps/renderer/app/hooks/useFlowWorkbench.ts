@@ -62,7 +62,7 @@ export interface FlowWorkbench {
     root_path: string | null;
     tree_available: boolean;
   };
-  review: WorkRunReview | null;
+  reviews: WorkRunReview[];
 }
 
 export type WorkbenchTeamMember = FlowWorkbench["team"][number];
@@ -77,14 +77,18 @@ export type WorkRunReviewLine = {
 export type WorkRunReviewFile = {
   path: string;
   status: "modified" | "added" | "deleted";
-  additions: number;
-  deletions: number;
+  detail_status: "ready" | "binary" | "large" | "unavailable";
+  additions: number | null;
+  deletions: number | null;
   lines: WorkRunReviewLine[];
 };
 
 export type WorkRunReview = {
   flow_id: string;
   work_run_id: string;
+  anchor_message_id: string;
+  status: "ready" | "empty" | "skipped" | "failed";
+  reason?: string;
   completed_at: string | null;
   totals: {
     files: number;
@@ -103,7 +107,7 @@ export const emptyWorkbench: FlowWorkbench = {
   artifacts: { specs: [], files: [], reports: [] },
   tasks: [],
   files: { root_path: null, tree_available: false },
-  review: null,
+  reviews: [],
 };
 
 export function hasWorkbenchContent(workbench: FlowWorkbench) {
@@ -112,7 +116,7 @@ export function hasWorkbenchContent(workbench: FlowWorkbench) {
     || workbench.artifacts.specs.length > 0
     || workbench.artifacts.files.length > 0
     || workbench.artifacts.reports.length > 0
-    || Boolean(workbench.review);
+    || workbench.reviews.length > 0;
 }
 
 export function useFlowWorkbench(flowId: string | null) {

@@ -32,6 +32,8 @@ function expertResultInput(summary: string) {
       summary,
       error: null,
       artifactRefs: [],
+      filesChanged: ["src/example.ts"],
+      metrics: { duration_ms: 123 },
       completedAt: "2026-07-03T00:00:00.000Z",
     },
     leaderAgentSessionId: "leader-ags",
@@ -48,7 +50,7 @@ describe("buildLeaderPrompt", () => {
       kind: "event",
       type: "expert_result",
       attrs: { task: "task-1" },
-      body: "Expert 本次回复（Task 仍为 in_progress）：done\n当前 Task 状态：in_progress",
+      body: "Expert 本次回复（Task 仍为 in_progress）：done\n当前 Task 状态：in_progress\n本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：src/example.ts\n本 AgentSession metrics：{\"duration_ms\":123}",
     })]);
     expect(prompt).not.toContain("agentSessionId");
     expect(prompt).not.toContain("expertId");
@@ -60,7 +62,7 @@ describe("buildLeaderPrompt", () => {
 
     expect(segment).toMatchObject({ kind: "event", type: "expert_result" });
     expect(segment?.kind === "event" ? segment.body : "").toBe(
-      `Expert 本次回复（Task 仍为 in_progress）：${"x".repeat(2500)}\n当前 Task 状态：in_progress`,
+      `Expert 本次回复（Task 仍为 in_progress）：${"x".repeat(2500)}\n当前 Task 状态：in_progress\n本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：src/example.ts\n本 AgentSession metrics：{\"duration_ms\":123}`,
     );
   });
 
@@ -77,6 +79,8 @@ describe("buildLeaderPrompt", () => {
         summary,
         error: null,
         artifactRefs: [],
+        filesChanged: ["src/taskless.ts"],
+        metrics: { duration_ms: 456 },
         completedAt: "2026-07-03T00:00:00.000Z",
       },
       leaderAgentSessionId: "leader-ags",
@@ -85,7 +89,9 @@ describe("buildLeaderPrompt", () => {
     const segment = parseMessageSegments(prompt, "flow-1")[0];
 
     expect(segment).toMatchObject({ kind: "event", type: "expert_message" });
-    expect(segment?.kind === "event" ? segment.body : "").toBe(summary);
+    expect(segment?.kind === "event" ? segment.body : "").toBe(
+      `${summary}\n本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：src/taskless.ts\n本 AgentSession metrics：{\"duration_ms\":456}`,
+    );
   });
 
   it("reports Task completion only when an actor explicitly marked the Task completed", () => {
@@ -98,7 +104,7 @@ describe("buildLeaderPrompt", () => {
     });
     const segment = parseMessageSegments(prompt, "flow-1")[0];
     expect(segment?.kind === "event" ? segment.body : "").toBe(
-      "Task 已标记完成：done\n当前 Task 状态：completed",
+      "Task 已标记完成：done\n当前 Task 状态：completed\n本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：src/example.ts\n本 AgentSession metrics：{\"duration_ms\":123}",
     );
   });
 

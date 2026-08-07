@@ -7,6 +7,7 @@ import { DeclarativeOrchestrationRuleSchema, diffPlanNodes, evaluateDeclarativeR
 import type { PlanLintIssue, SubmitOrchestrationPlanInput } from "../domain/orchestration.js";
 import { normalizeFlowName } from "../domain/flowName.js";
 import { workRunDto } from "../domain/workRun.js";
+import { cleanupPreparedWorkRunReview, prepareWorkRunReview } from "../domain/workRunReview.js";
 
 type AgentDispatchResult = {
   agent_session_id: string;
@@ -103,6 +104,7 @@ function taskToPlatform(
 export type StorePortOptions = {
   /** Template expert ids whose runtime role is enabled. Injectable for tests; the default reads the runtime config synchronously. */
   getEnabledExpertIds?: () => Set<string>;
+  onWorkRunEnsured?: (input: { flowId: string; workRunId: string }) => void;
 };
 
 export function createStorePort(
@@ -121,7 +123,9 @@ export function createStorePort(
   function activeCurrentTurn(flowId: string, currentTurnInput: { work_run_id?: string } | undefined) {
     const workRunId = currentTurnInput?.work_run_id;
     const turn = workRunId ? store.getWorkRun(workRunId) : undefined;
-    return turn && turn.flowId === flowId && ["ready", "executing"].includes(turn.status) ? turn : null;
+    if (!turn || turn.flowId !== flowId || !["ready", "executing"].includes(turn.status)) return null;
+    options?.onWorkRunEnsured?.({ flowId, workRunId: turn.id });
+    return turn;
   }
 
   function ensureCurrentWorkRun(flowId: string, currentTurnInput: CurrentTurnInput | undefined) {
@@ -132,6 +136,7 @@ export function createStorePort(
     if (open) {
       if (open.status === "interrupted" || open.status === "waiting_user") return null;
       currentTurnInput.work_run_id = open.id;
+      options?.onWorkRunEnsured?.({ flowId, workRunId: open.id });
       return open;
     }
     const created = store.createWorkRun({
@@ -141,6 +146,7 @@ export function createStorePort(
     });
     if (!created) return null;
     currentTurnInput.work_run_id = created.id;
+    options?.onWorkRunEnsured?.({ flowId, workRunId: created.id });
     return created;
   }
 
@@ -187,7 +193,10 @@ export function createStorePort(
     const open = store.getOpenWorkRun(flowId);
     if (open) {
       const resolved = resolveStatus(open);
-      if ("turn" in resolved) currentTurnInput.work_run_id = resolved.turn.id;
+      if ("turn" in resolved) {
+        currentTurnInput.work_run_id = resolved.turn.id;
+        options?.onWorkRunEnsured?.({ flowId, workRunId: resolved.turn.id });
+      }
       return resolved;
     }
 
@@ -203,6 +212,7 @@ export function createStorePort(
       );
     }
     currentTurnInput.work_run_id = created.id;
+    options?.onWorkRunEnsured?.({ flowId, workRunId: created.id });
     return { turn: created };
   }
 
@@ -796,7 +806,17 @@ export function createStorePort(
       }
       for (const task of store.listWorkRunTasks(turn.id)) store.cancelTask(task.id);
       store.cancelWorkRunPendingActions(turn.id);
-      const cancelled = store.failWorkRun(turn.id, "cancelled");
+      const completedAt = new Date().toISOString();
+      const prepared = prepareWorkRunReview(store, turn.flowId, turn.id, completedAt);
+      const cancelled = store.finalizeWorkRunWithReview({
+        workRunId: turn.id,
+        expectedRevision: turn.revision,
+        terminalStatus: "cancelled",
+        timestamp: completedAt,
+        reviewStatus: prepared.review.status,
+        reviewJson: JSON.stringify(prepared.review),
+      });
+      if (cancelled) cleanupPreparedWorkRunReview(store, prepared);
       return cancelled
         ? { ok: true as const, work_run: workRunDto(cancelled) }
         : { ok: false as const, error: { code: "WORK_RUN_CANCEL_FAILED", message: "WorkRun could not be cancelled." } };

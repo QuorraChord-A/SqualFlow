@@ -2,8 +2,9 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import type { UIMessage } from "ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { WsInMessage } from "../../lib/ws";
-import SessionTranscriptPanel, { formatMessageTimestamp, interleaveStatusDivider, reconcileDurablePlanCard, shouldBatchTranscriptEvent, type WorkRunDisplay } from "./SessionTranscriptPanel";
+import type { TranscriptTimelineItem, WsInMessage } from "../../lib/ws";
+import SessionTranscriptPanel, { formatMessageTimestamp, reconcileDurablePlanCard, shouldBatchTranscriptEvent } from "./SessionTranscriptPanel";
+import { projectTranscriptPresentationItems } from "./transcript/transcriptState";
 import { orchestrationPlanFixture } from "../orchestration/orchestrationTestFixture";
 import { resetCollapseStoreForTests } from "./transcript/useCollapse";
 
@@ -16,11 +17,74 @@ const stickToBottomMock = vi.hoisted(() => ({
 let transcriptCursor = 0;
 let hasTranscriptSnapshot = false;
 let activeMessageId = "";
+let activePresentationTurnId = "";
 let activeTextBlockId = "";
 let activeReasoningBlockId = "";
 let textBlockSequence = 0;
 let reasoningBlockSequence = 0;
 const cursorsByLegacySequence = new Map<string, number>();
+
+function timelineItems(messages: UIMessage[], boundaries: Array<Record<string, unknown>> = []): TranscriptTimelineItem[] {
+  let position = 0;
+  let activePresentationTurnId: string | null = null;
+  const result: TranscriptTimelineItem[] = [];
+  for (const boundary of boundaries) {
+    result.push({
+      id: String(boundary.id ?? `boundary-${position + 1}`),
+      position: ++position,
+      type: "session_boundary",
+      lifecycle: "complete",
+      message_id: null,
+      session_id: null,
+      agent_session_id: typeof boundary.agent_session_id === "string" ? boundary.agent_session_id : null,
+      work_run_id: null,
+      presentation_turn_id: null,
+      message_kind: null,
+      payload: boundary,
+      created_at: String(boundary.started_at ?? "2026-06-24T10:00:00.000Z"),
+      updated_at: String(boundary.started_at ?? "2026-06-24T10:00:00.000Z"),
+    });
+  }
+  for (const source of messages) {
+    const metadata = source.metadata && typeof source.metadata === "object"
+      ? source.metadata as Record<string, unknown>
+      : {};
+    const runningGuide = metadata.messageKind === "running-guide";
+    const inferredRoot = source.id.includes(":guide-") ? source.id.slice(0, source.id.indexOf(":guide-")) : null;
+    const presentationTurnId: string | null = typeof metadata.presentationTurnId === "string"
+      ? metadata.presentationTurnId
+      : runningGuide ? activePresentationTurnId : source.role === "assistant" ? inferredRoot ?? source.id : null;
+    if (source.role === "assistant") activePresentationTurnId = presentationTurnId;
+    else if (!runningGuide) activePresentationTurnId = null;
+    const messageKind = runningGuide
+      ? "running-guide"
+      : source.role === "assistant" ? inferredRoot ? "assistant-continuation" : "assistant" : "user";
+    const message = {
+      ...source,
+      metadata: {
+        ...metadata,
+        messageKind,
+        ...(presentationTurnId ? { presentationTurnId } : {}),
+      },
+    } as UIMessage;
+    result.push({
+      id: source.id,
+      position: ++position,
+      type: "message",
+      lifecycle: "complete",
+      message_id: source.id,
+      session_id: null,
+      agent_session_id: null,
+      work_run_id: null,
+      presentation_turn_id: presentationTurnId,
+      message_kind: messageKind,
+      payload: message,
+      created_at: "2026-06-24T10:00:00.000Z",
+      updated_at: "2026-06-24T10:00:00.000Z",
+    });
+  }
+  return result;
+}
 
 class ResizeObserverMock {
   observe() {}
@@ -34,13 +98,31 @@ Object.defineProperty(globalThis, "ResizeObserver", {
   value: ResizeObserverMock,
 });
 
-it("keeps a completed compaction divider before the first later prompt", () => {
-  const before = { id: "before", role: "assistant", createdAt: "2026-07-09T23:49:00.000Z", parts: [{ type: "text", text: "压缩前" }] } as UIMessage;
-  const after = { id: "after", role: "user", createdAt: "2026-07-09T23:51:00.000Z", parts: [{ type: "text", text: "新 prompt" }] } as UIMessage;
-
-  expect(interleaveStatusDivider([before, after], "已压缩当前会话", false, "2026-07-09T23:50:00.000Z").map((item) => item.id)).toEqual([
-    "before",
-    "status-divider:2026-07-09T23:50:00.000Z",
+it("keeps a persisted compaction item in canonical position", () => {
+  const items = timelineItems([
+    { id: "before", role: "assistant", parts: [{ type: "text", text: "压缩前" }] } as UIMessage,
+  ]);
+  items.push({
+    ...items[0]!,
+    id: "compact-1",
+    position: 2,
+    type: "context_compaction",
+    message_id: null,
+    message_kind: null,
+    presentation_turn_id: null,
+    payload: { status: "completed" },
+  }, {
+    ...items[0]!,
+    id: "after",
+    position: 3,
+    message_id: "after",
+    message_kind: "user",
+    presentation_turn_id: null,
+    payload: { id: "after", role: "user", parts: [{ type: "text", text: "新 prompt" }] },
+  });
+  expect(projectTranscriptPresentationItems(items).map((item) => item.id)).toEqual([
+    "presentation-turn:before",
+    "compact-1",
     "after",
   ]);
 });
@@ -55,7 +137,7 @@ it("batches every tool state update with text and reasoning deltas", () => {
 
 it("does not synthesize a plan card without its transcript tool anchor", () => {
   const blocks = [{ id: "text-1", type: "text" as const, text: "计划已提交", streaming: false }];
-  expect(reconcileDurablePlanCard(blocks, [orchestrationPlanFixture], orchestrationPlanFixture)).toEqual(blocks);
+  expect(reconcileDurablePlanCard(blocks, [orchestrationPlanFixture])).toEqual(blocks);
 });
 
 it("reconciles a persisted plan with a stale submit-plan tool state", () => {
@@ -67,7 +149,10 @@ it("reconciles a persisted plan with a stale submit-plan tool state", () => {
       toolName: "mcp__squadflow-leader__submit_orchestration_plan",
       state: "running",
       input: { flow_id: "flow-1", title: "成员邀请编排计划" },
-      output: null,
+      output: {
+        content: JSON.stringify({ revision: { id: orchestrationPlanFixture.revision.plan_revision_id } }),
+        is_error: false,
+      },
     }],
     finalized: false,
     defaultCollapsed: true,
@@ -121,6 +206,10 @@ it("shows a persisted pending plan when the reloaded SDK transcript keeps a stal
           toolName: "mcp__squadflow-leader__submit_orchestration_plan",
           state: "input-available",
           input: { flow_id: "flow-1", title: "成员邀请编排计划" },
+          output: {
+            content: JSON.stringify({ revision: { id: orchestrationPlanFixture.revision.plan_revision_id } }),
+            is_error: false,
+          },
         }],
       }],
     },
@@ -214,7 +303,7 @@ it("reloads the canonical transcript when a completed Leader turn is missing its
   await waitFor(() => expect(stickToBottomMock.scrollToBottom).toHaveBeenCalledWith({ animation: "instant" }));
 });
 
-it("shows the durable plan instead of thinking when persisted session history is empty", async () => {
+it("shows explicit recovery when persisted plan state has no transcript anchor", async () => {
   render(
     <SessionTranscriptPanel
       flowId="flow-1"
@@ -222,15 +311,6 @@ it("shows the durable plan instead of thinking when persisted session history is
       readonly
       isAwaitingResponse
       orchestrationPlans={[orchestrationPlanFixture]}
-      workRuns={[{
-        id: "turn-1",
-        triggerMessageId: "msg-user-plan",
-        status: "waiting_user",
-        startedAt: "2026-07-11T00:00:00.000Z",
-        activeStartedAt: null,
-        activeDurationMs: 37_000,
-        completedAt: null,
-      }]}
     />,
   );
 
@@ -241,9 +321,9 @@ it("shows the durable plan instead of thinking when persisted session history is
     data: { cursor: 0, messages: [] },
   });
 
-  expect(await screen.findByTestId(`orchestration-plan-card-${orchestrationPlanFixture.revision.plan_revision_id}`)).toBeVisible();
-  expect(screen.getByText("等待你确认 · 已工作 37 秒")).toBeVisible();
-  expect(screen.queryByText("正在思考")).not.toBeInTheDocument();
+  expect(await screen.findByText("编排计划缺少 Transcript 锚点，请在右侧查看")).toBeVisible();
+  expect(screen.queryByTestId(`orchestration-plan-card-${orchestrationPlanFixture.revision.plan_revision_id}`)).not.toBeInTheDocument();
+  expect(screen.getByText("正在思考")).toBeVisible();
 });
 
 vi.mock("use-stick-to-bottom", () => ({
@@ -299,15 +379,77 @@ function normalizeLegacyMessage(message: any): any[] {
       ...message,
       type: "session:transcript_snapshot",
       data: {
+        stream_epoch: "epoch-test",
         cursor: 0,
-        messages,
-        ...(message.history_boundaries ? { history_boundaries: message.history_boundaries } : {}),
+        timeline_items: timelineItems(messages, message.history_boundaries ?? []),
         ...(current ? {
           active_turn: {
             message_id: current.id,
+            presentation_turn_id: current.id.includes(":guide-")
+              ? current.id.slice(0, current.id.indexOf(":guide-"))
+              : current.id,
             started_at: current.metadata?.turnTiming?.startedAt ?? current.createdAt ?? "2026-06-24T10:00:00.000Z",
           },
         } : {}),
+      },
+    }];
+  }
+
+  if (message.type === "session:transcript_snapshot" && Array.isArray(message.data?.messages)) {
+    const messages = message.data.messages as UIMessage[];
+    const activeTurn = message.data.active_turn as Record<string, unknown> | undefined;
+    return [{
+      ...message,
+      data: {
+        stream_epoch: message.data.stream_epoch ?? "epoch-test",
+        cursor: message.data.cursor ?? 0,
+        timeline_items: timelineItems(messages, message.data.history_boundaries ?? []),
+        ...(activeTurn ? {
+          active_turn: {
+            ...activeTurn,
+            presentation_turn_id: typeof activeTurn.presentation_turn_id === "string"
+              ? activeTurn.presentation_turn_id
+              : typeof activeTurn.root_message_id === "string"
+                ? activeTurn.root_message_id
+                : String(activeTurn.message_id ?? ""),
+          },
+        } : {}),
+      },
+    }];
+  }
+
+  if (message.type === "session:transcript_event") {
+    const event = message.data?.event as Record<string, unknown> | undefined;
+    const eventType = typeof event?.type === "string" ? event.type : "";
+    const eventMessageId = typeof event?.messageId === "string" ? event.messageId : "";
+    if (eventType === "turn-started" && eventMessageId) {
+      activeMessageId = eventMessageId;
+      activePresentationTurnId = eventMessageId;
+    } else if (eventType === "message-added") {
+      const metadata = typeof (event?.message as { metadata?: unknown } | undefined)?.metadata === "object"
+        ? (event?.message as { metadata: Record<string, unknown> }).metadata
+        : {};
+      if (typeof metadata.presentationTurnId === "string") activePresentationTurnId = metadata.presentationTurnId;
+    } else if (eventMessageId) {
+      activeMessageId = eventMessageId;
+      if (!activePresentationTurnId) activePresentationTurnId = eventMessageId;
+    }
+    const activeTurn = message.data?.active_turn ?? (
+      eventType !== "turn-finished" && activeMessageId
+        ? {
+            message_id: activeMessageId,
+            presentation_turn_id: activePresentationTurnId || activeMessageId,
+            started_at: "2026-06-24T10:00:00.000Z",
+          }
+        : undefined
+    );
+    return [{
+      ...message,
+      data: {
+        ...message.data,
+        stream_epoch: message.data?.stream_epoch ?? "epoch-test",
+        timeline_items: Array.isArray(message.data?.timeline_items) ? message.data.timeline_items : [],
+        ...(activeTurn ? { active_turn: activeTurn } : {}),
       },
     }];
   }
@@ -346,13 +488,13 @@ function normalizeLegacyMessage(message: any): any[] {
       flow_id: message.flow_id,
       ...(message.agent_session_id ? { agent_session_id: message.agent_session_id } : {}),
       ...(message.flow_expert_id ? { flow_expert_id: message.flow_expert_id } : {}),
-      data: { cursor: 0, messages: [] },
+      data: { stream_epoch: "epoch-test", cursor: 0, timeline_items: [] },
     });
   }
   result.push({
     ...message,
     type: "session:transcript_event",
-    data: { cursor, event },
+    data: { stream_epoch: "epoch-test", cursor, timeline_items: [], event },
   });
   return result;
 }
@@ -365,21 +507,23 @@ function emit(message: any) {
   });
 }
 
-function message(id: string, text: string): UIMessage {
+function message(id: string, text: string, metadata?: Record<string, unknown>): UIMessage {
   return {
     id,
     role: "assistant",
     parts: [{ type: "text", text }],
     content: text,
+    ...(metadata ? { metadata } : {}),
   } as UIMessage;
 }
 
-function userMessage(id: string, text: string): UIMessage {
+function userMessage(id: string, text: string, metadata?: Record<string, unknown>): UIMessage {
   return {
     id,
     role: "user",
     parts: [{ type: "text", text }],
     content: text,
+    ...(metadata ? { metadata } : {}),
   } as UIMessage;
 }
 
@@ -409,6 +553,7 @@ describe("SessionTranscriptPanel", () => {
     transcriptCursor = 0;
     hasTranscriptSnapshot = false;
     activeMessageId = "";
+    activePresentationTurnId = "";
     activeTextBlockId = "";
     activeReasoningBlockId = "";
     textBlockSequence = 0;
@@ -606,7 +751,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.queryByText("已执行")).not.toBeInTheDocument();
   });
 
-  it("renders legacy history boundaries as dividers rather than chat messages", () => {
+  it("renders canonical session-boundary items as dividers rather than chat messages", () => {
     render(
       <SessionTranscriptPanel
         flowId="flow-1"
@@ -616,21 +761,35 @@ describe("SessionTranscriptPanel", () => {
       />,
     );
 
-    emit({
-      type: "session:history",
-      flow_id: "flow-1",
-      flow_expert_id: "fexp-frontend",
-      data: [message("legacy-1", "first"), message("legacy-2", "second")],
-      history_boundaries: [{
-        id: "boundary-2",
-        kind: "history_session_boundary",
+    const items = timelineItems([message("session-1", "first"), message("session-2", "second")]);
+    items[1] = { ...items[1]!, position: 3 };
+    items.splice(1, 0, {
+      id: "boundary-2",
+      position: 2,
+      type: "session_boundary",
+      lifecycle: "complete",
+      message_id: null,
+      session_id: "sdk-2",
+      agent_session_id: "ags-2",
+      work_run_id: null,
+      presentation_turn_id: null,
+      message_kind: null,
+      payload: {
         flow_expert_id: "fexp-frontend",
         agent_session_id: "ags-2",
         display_name: "Frontend 5924",
         started_at: "2026-06-22T00:01:00.000Z",
         status: "loaded",
-        before_message_id: "legacy-2",
-      }],
+      },
+      created_at: "2026-06-22T00:01:00.000Z",
+      updated_at: "2026-06-22T00:01:00.000Z",
+    });
+
+    emit({
+      type: "session:transcript_snapshot",
+      flow_id: "flow-1",
+      flow_expert_id: "fexp-frontend",
+      data: { stream_epoch: "epoch-boundary", cursor: 3, timeline_items: items },
     });
 
     expect(screen.getByTestId("history-session-boundary")).toHaveTextContent("历史会话：Frontend 5924");
@@ -644,26 +803,6 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        workRuns={[
-          {
-            id: "turn-hello",
-            triggerMessageId: "msg-user-hello",
-            status: "completed",
-            startedAt: "2026-07-10T11:18:16.000Z",
-            activeStartedAt: "2026-07-10T11:18:16.000Z",
-            activeDurationMs: 8_000,
-            completedAt: "2026-07-10T11:18:26.000Z",
-          },
-          {
-            id: "turn-capabilities",
-            triggerMessageId: "msg-user-capabilities",
-            status: "completed",
-            startedAt: "2026-07-10T11:18:27.000Z",
-            activeStartedAt: "2026-07-10T11:18:27.000Z",
-            activeDurationMs: 9_000,
-            completedAt: "2026-07-10T11:18:39.000Z",
-          },
-        ]}
       />,
     );
 
@@ -695,15 +834,6 @@ describe("SessionTranscriptPanel", () => {
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        workRuns={[{
-          id: "turn-1",
-          triggerMessageId: "msg-user-1",
-          status: "completed",
-          startedAt: "2026-06-29T06:00:00.000Z",
-          activeStartedAt: "2026-06-29T06:00:00.000Z",
-          activeDurationMs: 41_000,
-          completedAt: "2026-06-29T06:00:41.000Z",
-        }]}
       />,
     );
 
@@ -715,11 +845,12 @@ describe("SessionTranscriptPanel", () => {
         cursor: 1,
         messages: [
           userMessage("msg-user-1", "开始调研"),
-          message("assistant-before", "调研中间过程"),
+          message("assistant-before", "调研中间过程", { presentationTurnId: "runtime-1", messageKind: "assistant" }),
           {
             ...userMessage("msg-guide-1", "15遍吧"),
             metadata: {
-              localMessageKind: "running-guide",
+              messageKind: "running-guide",
+              presentationTurnId: "runtime-1",
               guideStatusLabel: "已引导对话",
               browserElementAttachments: [{
                 id: "browser-comment-1",
@@ -737,10 +868,10 @@ describe("SessionTranscriptPanel", () => {
               }],
             },
           } as UIMessage,
-          message("assistant-between-guides", "收到，改成15遍"),
-          userMessage("msg-guide-2", "18遍吧"),
-          message("assistant-after-guide-2", "收到，改成18遍"),
-          userMessage("msg-guide-3", "注意必须要求你没满足"),
+          message("assistant-between-guides", "收到，改成15遍", { presentationTurnId: "runtime-1", messageKind: "assistant-continuation" }),
+          userMessage("msg-guide-2", "18遍吧", { presentationTurnId: "runtime-1", messageKind: "running-guide" }),
+          message("assistant-after-guide-2", "收到，改成18遍", { presentationTurnId: "runtime-1", messageKind: "assistant-continuation" }),
+          userMessage("msg-guide-3", "注意必须要求你没满足", { presentationTurnId: "runtime-1", messageKind: "running-guide" }),
           {
             id: "assistant-final",
             role: "assistant",
@@ -749,6 +880,7 @@ describe("SessionTranscriptPanel", () => {
               { type: "text", text: "最终回答内容" },
             ],
             content: "最终段过程文本最终回答内容",
+            metadata: { presentationTurnId: "runtime-1", messageKind: "assistant-continuation" },
           } as UIMessage,
         ],
       },
@@ -791,24 +923,19 @@ describe("SessionTranscriptPanel", () => {
           flowId="flow-1"
           agentSessionId="leader-1"
           readonly
-          workRuns={[{
-            id: "turn-review",
-            triggerMessageId: "msg-user-review",
-            status: "completed",
-            startedAt: "2026-06-29T06:00:00.000Z",
-            activeStartedAt: "2026-06-29T06:00:00.000Z",
-            activeDurationMs: 3_000,
-            completedAt: "2026-06-29T06:00:03.000Z",
-          }]}
-          review={{
+          reviews={[{
             flow_id: "flow-1",
             work_run_id: "turn-review",
+            anchor_message_id: "assistant-review",
+            status: "ready",
+            reason: "另有 1 个不属于本 WorkRun 的工作区变化已排除。",
             completed_at: "2026-06-29T06:00:03.000Z",
             totals: { files: 2, additions: 3, deletions: 1, modified: 2, added: 0, deleted: 0 },
             files: [
               {
                 path: "apps/renderer/app/page.tsx",
                 status: "modified",
+                detail_status: "ready",
                 additions: 2,
                 deletions: 1,
                 lines: [
@@ -819,6 +946,7 @@ describe("SessionTranscriptPanel", () => {
               {
                 path: "apps/renderer/app/other.tsx",
                 status: "modified",
+                detail_status: "ready",
                 additions: 1,
                 deletions: 0,
                 lines: [
@@ -827,7 +955,7 @@ describe("SessionTranscriptPanel", () => {
                 ],
               },
             ],
-          }}
+          }]}
           onOpenReview={onOpenReview}
         />,
       );
@@ -850,6 +978,7 @@ describe("SessionTranscriptPanel", () => {
       expect(reviewSummary).toHaveClass("w-full");
       expect(reviewSummary).toHaveClass("max-w-[820px]");
       expect(reviewSummary).toHaveTextContent("已编辑 2 个文件");
+      expect(reviewSummary).toHaveTextContent("另有 1 个不属于本 WorkRun");
       expect(reviewSummary).toHaveTextContent("apps/renderer/app/page.tsx");
       const assistantCopyButton = within(assistantMessage).getByRole("button", { name: "复制消息" });
       expect(reviewSummary.compareDocumentPosition(assistantCopyButton) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -919,19 +1048,27 @@ describe("SessionTranscriptPanel", () => {
         cursor: 1,
         active_turn: {
           message_id: "assistant-active",
+          presentation_turn_id: "runtime-guided-1",
           started_at: "2026-06-29T06:00:00.000Z",
         },
         messages: [
           userMessage("msg-user-1", "开始调研"),
-          message("assistant-before-guide", "引导前内容"),
+          message("assistant-before-guide", "引导前内容", {
+            messageKind: "assistant",
+            presentationTurnId: "runtime-guided-1",
+          }),
           {
             ...userMessage("msg-guide-1", "总共改为18次吧"),
             metadata: {
-              localMessageKind: "running-guide",
+              messageKind: "running-guide",
+              presentationTurnId: "runtime-guided-1",
               guideStatusLabel: "已引导对话",
             },
           } as UIMessage,
-          message("assistant-active", "引导后继续执行"),
+          message("assistant-active", "引导后继续执行", {
+            messageKind: "assistant-continuation",
+            presentationTurnId: "runtime-guided-1",
+          }),
         ],
       },
     });
@@ -944,21 +1081,11 @@ describe("SessionTranscriptPanel", () => {
   });
 
   it("keeps a tool-free live completed guided turn expanded without waiting for a refreshed history snapshot", () => {
-    const activeTurn = {
-      id: "turn-live-guided",
-      triggerMessageId: "msg-user-live",
-      status: "executing",
-      startedAt: "2026-06-29T08:58:56.000Z",
-      activeStartedAt: "2026-06-29T08:58:56.000Z",
-      activeDurationMs: 0,
-      completedAt: null,
-    };
-    const { rerender } = render(
+    render(
       <SessionTranscriptPanel
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        workRuns={[activeTurn]}
       />,
     );
 
@@ -1002,7 +1129,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-1", "19次吧"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1017,7 +1144,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-2", "改成18次吧"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1032,7 +1159,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-3", "12次就行"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1063,21 +1190,6 @@ describe("SessionTranscriptPanel", () => {
         },
       },
     });
-
-    rerender(
-      <SessionTranscriptPanel
-        flowId="flow-1"
-        agentSessionId="leader-1"
-        readonly
-        workRuns={[{
-          ...activeTurn,
-          status: "completed",
-          activeStartedAt: null,
-          activeDurationMs: 36_000,
-          completedAt: "2026-06-29T08:59:32.000Z",
-        }]}
-      />,
-    );
 
     expect(screen.getByText("19次吧")).toBeInTheDocument();
     expect(screen.getByText("改成18次吧")).toBeInTheDocument();
@@ -1135,7 +1247,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-1", "22次就行。"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1162,7 +1274,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-2", "25次就可以。"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1232,7 +1344,7 @@ describe("SessionTranscriptPanel", () => {
           type: "message-added",
           message: {
             ...userMessage("msg-guide-live-1", "25次就可以。"),
-            metadata: { localMessageKind: "running-guide" },
+            metadata: { messageKind: "running-guide", presentationTurnId: "msg-assistant-live" },
           } as UIMessage,
         },
       },
@@ -1278,7 +1390,11 @@ describe("SessionTranscriptPanel", () => {
           } as UIMessage,
           {
             ...userMessage("msg-guide-live-1", "25次就可以。"),
-            metadata: { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+            metadata: {
+              messageKind: "running-guide",
+              presentationTurnId: "msg-assistant-live",
+              guideStatusLabel: "已引导对话",
+            },
           } as UIMessage,
           {
             ...message("msg-5", "当前工具第25次调用\n\n完整目录调研总结"),
@@ -1459,15 +1575,6 @@ describe("SessionTranscriptPanel", () => {
           status: "cancelled",
           questions: [{ header: "类型", question: "选择任务类型", multiSelect: false, options: [] }],
           answers: {},
-        }]}
-        workRuns={[{
-          id: "turn-1",
-          triggerMessageId: "msg-user-1",
-          status: "completed",
-          startedAt: "2026-06-29T06:00:00.000Z",
-          activeStartedAt: "2026-06-29T06:00:00.000Z",
-          activeDurationMs: 12_000,
-          completedAt: "2026-06-29T06:00:12.000Z",
         }]}
       />,
     );
@@ -2314,7 +2421,7 @@ describe("SessionTranscriptPanel", () => {
     expect(screen.getAllByTestId("spec-card-sca-1")).toHaveLength(1);
   });
 
-  it("restores a pending spec card when Codex history omits MCP tool calls", async () => {
+  it("shows explicit recovery when a pending spec has no transcript tool anchor", async () => {
     render(
       <SessionTranscriptPanel
         flowId="flow-1"
@@ -2345,9 +2452,9 @@ describe("SessionTranscriptPanel", () => {
       } as unknown as UIMessage],
     });
 
-    expect(await screen.findByText("Spec Cold_Load.md")).toBeInTheDocument();
-    expect(screen.getByText("Restore the durable Spec approval.")).toBeInTheDocument();
-    expect(screen.getAllByTestId("spec-card-sca-cold")).toHaveLength(1);
+    expect(await screen.findByText("Spec 审批缺少 Transcript 锚点，请在右侧查看")).toBeInTheDocument();
+    expect(screen.queryByText("Spec Cold_Load.md")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("spec-card-sca-cold")).not.toBeInTheDocument();
   });
 
   it("collapses completed tool attachments and expands on click", async () => {
@@ -2402,35 +2509,15 @@ describe("SessionTranscriptPanel", () => {
         },
       },
     } as UIMessage;
-    const previousTurn: WorkRunDisplay = {
-      id: "turn-previous",
-      triggerMessageId: previousUser.id,
-      status: "completed",
-      startedAt: "2026-07-18T06:10:45.876Z",
-      activeStartedAt: null,
-      activeDurationMs: 4392,
-      completedAt: "2026-07-18T06:10:50.291Z",
-    };
     const nextUser = {
       ...userMessage("msg-user-next", "下一轮立即发送"),
       createdAt: "2026-07-18T06:10:50.314Z",
     } as UIMessage;
-    const nextTurn: WorkRunDisplay = {
-      id: "turn-next",
-      triggerMessageId: nextUser.id,
-      status: "executing",
-      startedAt: "2026-07-18T06:10:50.314Z",
-      activeStartedAt: "2026-07-18T06:10:50.314Z",
-      activeDurationMs: 0,
-      completedAt: null,
-    };
-
     const { container, rerender } = render(
       <SessionTranscriptPanel
         flowId="flow-1"
         agentSessionId="leader-1"
         readonly
-        workRuns={[previousTurn]}
       />,
     );
 
@@ -2448,7 +2535,6 @@ describe("SessionTranscriptPanel", () => {
         agentSessionId="leader-1"
         readonly
         optimisticMessages={[nextUser]}
-        workRuns={[previousTurn, nextTurn]}
         isAwaitingResponse
       />,
     );

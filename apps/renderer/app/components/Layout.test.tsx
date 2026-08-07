@@ -61,7 +61,7 @@ vi.mock("../hooks/useDashboardData", () => ({
 vi.mock("../hooks/useFlowWorkbench", () => ({
   useFlowWorkbench: () => ({
     workbench: {
-      review: null,
+      reviews: [],
       files: { root_path: null, tree_available: false },
     },
   }),

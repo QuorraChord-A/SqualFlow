@@ -566,7 +566,10 @@ function DynamicTabContent({
     return <DesktopBrowserPanel flowId={flowId} visible={browserVisible} />;
   }
   if (tab.type === "review") {
-    return <ReviewDiffPanel review={workbench.review} />;
+    const review = tab.work_run_id
+      ? workbench.reviews.find((item) => item.work_run_id === tab.work_run_id) ?? null
+      : workbench.reviews.at(-1) ?? null;
+    return <ReviewDiffPanel review={review} />;
   }
   return null;
 }

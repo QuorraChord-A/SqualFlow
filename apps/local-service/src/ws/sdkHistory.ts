@@ -277,7 +277,7 @@ export function platformMessageToUiProjection(text: string, flowId: string): Pla
   return {
     text: visibleText,
     metadata: guide
-      ? { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" }
+      ? { messageKind: "running-guide", guideStatusLabel: "已引导对话" }
       : {},
     browserComments: browserCommentsFromSegments(segments),
     attachments: attachmentProjections(segments),

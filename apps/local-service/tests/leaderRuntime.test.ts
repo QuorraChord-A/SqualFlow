@@ -12,7 +12,8 @@ import { parseMessageSegments } from "../src/protocol/platformEvent.js";
 import { createStore } from "../src/db/store.js";
 import { beginWorkRun } from "./helpers/workRunTestHelpers.js";
 import { leaderTranscriptChannelId } from "../src/domain/transcriptChannels.js";
-import { captureWorkRunBaseline } from "../src/runtime/workRunDiff.js";
+import { capturePersistentChangeBaseline } from "../src/runtime/changeBaseline.js";
+import { getWorkRunReview } from "../src/domain/workRunReview.js";
 import { createExpertRuntime } from "../src/runtime/expertRuntime.js";
 import { createLeaderRuntime, leaderRuntimeTestExports } from "../src/runtime/leaderRuntime.js";
 import { createStorePort } from "../src/mcp/storePort.js";
@@ -24,6 +25,7 @@ import { createClaudeTestAdapterFactory } from "./helpers/claudeTestAdapterFacto
 const dirs: string[] = [];
 const stores: Array<ReturnType<typeof createStore>> = [];
 const originalAgentRuntimeConfigRoot = config.agentRuntimeConfigRoot;
+const originalRuntimeScratchRoot = config.runtimeScratchRoot;
 
 function tempStore() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-ts-leader-runtime-"));
@@ -179,6 +181,7 @@ function createFlowLeader(
 
 afterEach(() => {
   config.agentRuntimeConfigRoot = originalAgentRuntimeConfigRoot;
+  config.runtimeScratchRoot = originalRuntimeScratchRoot;
   for (const store of stores.splice(0)) store.sqlite.close();
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -1156,6 +1159,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: error ?? "done",
         error,
         artifactRefs: [],
+        filesChanged: [],
+        metrics: {},
         completedAt: "2026-07-09T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -1262,6 +1267,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: "Cannot verify because the external prerequisite is unavailable.",
         error: "external prerequisite unavailable",
         artifactRefs: [],
+        filesChanged: [],
+        metrics: {},
         completedAt: "2026-07-09T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -1321,6 +1328,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: error ?? "done",
         error,
         artifactRefs: [],
+        filesChanged: [],
+        metrics: {},
         completedAt: "2026-07-09T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -1377,6 +1386,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: "late",
         error: null,
         artifactRefs: [],
+        filesChanged: [],
+        metrics: {},
         completedAt: "2026-07-09T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -1695,6 +1706,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: "built",
         error: null,
         artifactRefs: [],
+        filesChanged: [],
+        metrics: {},
         completedAt: "2026-06-15T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -1707,7 +1720,7 @@ describe("LeaderRuntime platform event protocol", () => {
         kind: "event",
         type: "expert_result",
         attrs: { task: "task-1" },
-        body: "Expert 本次回复（Task 仍为 in_progress）：built\n当前 Task 状态：in_progress",
+        body: "Expert 本次回复（Task 仍为 in_progress）：built\n当前 Task 状态：in_progress\n本 AgentSession 观察到的文件变化（仅辅助证据，可能与并行 AgentSession 重复，不能覆盖 WorkRun Review）：无\n本 AgentSession metrics：{}",
       }),
     ]);
     expect(prompt).not.toContain(workRun.id);
@@ -1810,21 +1823,23 @@ describe("LeaderRuntime platform event protocol", () => {
 
     expect(store.getAgentSession(leader.id)?.status).toBe("failed");
     expect(store.getWorkRun(workRun!.id)?.status).toBe("failed");
-    expect(chatJournal.getTranscriptMessages(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
+    expect(chatJournal.getTimelineMessages(flow.id, leaderTranscriptChannelId(flow.id))).toEqual([
       expect.objectContaining({
         role: "assistant",
         content: providerError,
         parts: [expect.objectContaining({ type: "text", text: providerError })],
       }),
     ]);
-    expect(published).toContainEqual(expect.objectContaining({
-      type: "session:event",
-      data: expect.objectContaining({
-        agent_session_id: leader.id,
-        status: "failed",
-        error_message: providerError,
-      }),
-    }));
+    await vi.waitFor(() => {
+      expect(published).toContainEqual(expect.objectContaining({
+        type: "session:event",
+        data: expect.objectContaining({
+          agent_session_id: leader.id,
+          status: "failed",
+          error_message: providerError,
+        }),
+      }));
+    });
   });
 
   it("marks the Leader session failed when SDK query creation throws", async () => {
@@ -1999,20 +2014,29 @@ describe("LeaderRuntime platform event protocol", () => {
     ).resolves.toEqual({ behavior: "deny", message: "tool not allowed by expert: Bash" });
   });
 
-  it("captures platform diff artifacts before completing a quiescent WorkRun", async () => {
+  it("persists the authoritative review before completing a quiescent WorkRun", async () => {
     const store = tempStore();
     const { flow, leader } = createFlowLeader(store);
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-work-run-root-"));
     dirs.push(root);
+    const scratchRoot = fs.mkdtempSync(path.join(os.tmpdir(), "squadflow-work-run-scratch-"));
+    dirs.push(scratchRoot);
+    config.runtimeScratchRoot = scratchRoot;
     store.updateProject(flow.projectId!, { localPath: root });
     fs.writeFileSync(path.join(root, "hello.txt"), "before");
-    const baseline = captureWorkRunBaseline(root);
     const workRun = beginWorkRun(store, {
       flowId: flow.id,
       sandboxPath: root,
-      inputSnapshotJson: JSON.stringify({ diff_baseline: baseline }),
+      inputSnapshotJson: JSON.stringify({ type: "direct_message" }),
       createdBy: "user",
     })!;
+    capturePersistentChangeBaseline({
+      store,
+      flowId: flow.id,
+      sourceAgentSessionId: "ags-task",
+      workRunId: workRun.id,
+      rootPath: root,
+    });
     const task = store.createTask({
       flowId: flow.id,
       workRunId: workRun.id,
@@ -2025,6 +2049,12 @@ describe("LeaderRuntime platform event protocol", () => {
     store.startTask(task.id, "ags-task");
     store.completeTask(task.id);
     fs.writeFileSync(path.join(root, "hello.txt"), "after");
+    store.recordWorkRunFileAttribution({
+      flowId: flow.id,
+      workRunId: workRun.id,
+      agentSessionId: "ags-task",
+      files: [{ path: "hello.txt", source: "write" }],
+    });
 
     const runtime = createLeaderRuntime({
       store,
@@ -2050,6 +2080,8 @@ describe("LeaderRuntime platform event protocol", () => {
         summary: "done",
         error: null,
         artifactRefs: [],
+        filesChanged: ["hello.txt"],
+        metrics: {},
         completedAt: "2026-06-15T10:00:00.000Z",
       },
       leaderAgentSessionId: leader.id,
@@ -2057,10 +2089,13 @@ describe("LeaderRuntime platform event protocol", () => {
     });
 
     expect(store.getWorkRun(workRun.id)?.status).toBe("completed");
-    expect(store.listArtifacts(flow.id)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ workRunId: workRun.id, type: "changed_files" }),
-      expect.objectContaining({ workRunId: workRun.id, type: "diff_summary", content: expect.stringContaining("hello.txt") }),
-    ]));
+    expect(getWorkRunReview(store, workRun.id)).toMatchObject({
+      status: "ready",
+      files: [expect.objectContaining({ path: "hello.txt", status: "modified" })],
+    });
+    expect(store.listArtifacts(flow.id).filter((artifact) =>
+      artifact.type === "changed_files" || artifact.type === "diff_summary"
+    )).toEqual([]);
   });
 
   it("rejects a normal Leader message execution while a clarification card is pending", async () => {

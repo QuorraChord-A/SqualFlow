@@ -114,7 +114,7 @@ describe("sdk session history conversion", () => {
     expect(messages[0]).toMatchObject({
       role: "user",
       content: "请优先检查登录页",
-      metadata: { localMessageKind: "running-guide", guideStatusLabel: "已引导对话" },
+      metadata: { messageKind: "running-guide", guideStatusLabel: "已引导对话" },
     });
   });
 

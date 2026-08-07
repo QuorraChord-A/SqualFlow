@@ -249,7 +249,8 @@ describe("workbenchState", () => {
   });
 
   it("opens one review dynamic tab and reuses it", () => {
-    let state = openReviewWorkbenchTab(createInitialRightPanelState());
+    let state = openReviewWorkbenchTab(createInitialRightPanelState(), "wrun-history");
+    expect(state.dynamicTabs).toEqual([{ type: "review", title: "审核", work_run_id: "wrun-history" }]);
     state = openReviewWorkbenchTab(state);
 
     expect(state.tab).toBe("dynamic");
