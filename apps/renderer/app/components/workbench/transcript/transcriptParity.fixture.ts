@@ -1,13 +1,13 @@
 import type { UIMessage } from "ai";
-import type { SpecCardState } from "../../../hooks/useDashboardData";
+import type { PlanCardState } from "../../../hooks/useDashboardData";
 
 const flowId = "flow-parity";
-const agentSessionId = "session-parity";
+const agentRunId = "session-parity";
 const assistantMessageId = "msg-assistant-parity";
 const userMessageId = "msg-user-parity";
 
 export const parityFlowId = flowId;
-export const parityAgentSessionId = agentSessionId;
+export const parityAgentRunId = agentRunId;
 
 function toolPart(
   toolCallId: string,
@@ -72,15 +72,15 @@ export const parityAssistantMessage: UIMessage = {
     toolPart("tc-askuser-1", "mcp__squadflow-leader__ask_user", {
       questions: [{ question: "你更喜欢哪种界面主题？" }],
     }, {
-      decision_card_id: "card-theme",
+      decision_request_id: "decision-theme",
       answer: "浅色模式",
     }),
     toolPart("tc-createplan-1", "mcp__squadflow-leader__create_plan", {
       name: "Web_Calculator.md",
       overview: "开发一个支持加减乘除四则运算的 Web 界面计算器",
     }, {
-      spec_approval_id: "spec-calc",
-      spec_revision: { file_name: "Web_Calculator.md" },
+      plan_approval_id: "plan-calc",
+      plan_revision: { file_name: "Web_Calculator.md" },
     }),
     toolPart("tc-createtask-1", "mcp__squadflow-leader__create_task", {
       subject: "实现 Web 计算器",
@@ -107,7 +107,7 @@ export const parityAssistantMessage: UIMessage = {
       expert_id: "Frontend Expert",
       task_id: "task-101",
     }, {
-      agent_session: { agent_session_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" },
+      agent_run: { agent_run_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" },
     }),
     toolPart("tc-sendmessage-1", "mcp__squadflow-leader__send_message", {
       expert_id: "Frontend Expert",
@@ -128,11 +128,10 @@ export const parityAssistantMessage: UIMessage = {
 
 export const parityHistoryMessages: UIMessage[] = [parityUserMessage, parityAssistantMessage];
 
-export const parityDecisionCards = [
+export const parityDecisionRequests = [
   {
-    card_id: "card-theme",
-    flow_id: flowId,
-    card_type: "clarification",
+    decision_request_id: "decision-theme",
+    request_type: "clarification" as const,
     questions: [
       {
         header: "主题",
@@ -144,18 +143,20 @@ export const parityDecisionCards = [
         ],
       },
     ],
-    status: "resolved" as const,
+    status: "approved" as const,
     answers: { 主题: "浅色模式" },
   },
 ];
 
-export const paritySpecCards: Record<string, SpecCardState> = {
-  "spec-calc": {
-    spec_approval_id: "spec-calc",
-    spec_revision_id: "spec-revision-calc",
+export const parityPlanCards: Record<string, PlanCardState> = {
+  "plan-calc": {
+    plan_approval_id: "plan-calc",
+    plan_revision_id: "plan-revision-calc",
+    revision_number: 1,
     status: "pending",
-    file_name: "Web_Calculator.md",
+    title: "Web Calculator",
     overview: "开发一个支持加减乘除四则运算的 Web 界面计算器",
-    actions: ["approve", "cancel"],
+    content: "# Web Calculator\n\n实现四则运算界面。",
+    created_at: "2026-07-11T00:00:00Z",
   },
 };

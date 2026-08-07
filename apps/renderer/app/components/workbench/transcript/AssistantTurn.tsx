@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { CheckIcon, ChevronDown, CopyIcon, MessageSquareIcon } from "lucide-react";
 import { MessageResponse } from "@/components/ai-elements-official/message";
 import { PromptInlineContent } from "@/components/ai-elements-official/prompt-inline-entity";
-import type { DecisionCardData, SpecCardState } from "../../../hooks/useDashboardData";
-import PendingSpecCard from "../PendingSpecCard";
+import type { DecisionRequestCardData, PlanCardState } from "../../../hooks/useDashboardData";
+import PendingPlanCard from "../PendingPlanCard";
 import OrchestrationPlanCard from "../../orchestration/OrchestrationPlanCard";
 import type { OrchestrationPlanView } from "../../../types/orchestration";
 import type { TranscriptBlock } from "./types";
@@ -21,12 +21,12 @@ type AssistantTurnProps = {
   blocks: TranscriptBlock[];
   turnId?: string;
   flowId: string;
-  decisionCardsById: Map<string, DecisionCardData>;
-  specCardsById: Map<string, SpecCardState>;
+  decisionRequestsById: Map<string, DecisionRequestCardData>;
+  planCardsById: Map<string, PlanCardState>;
   plansByRevisionId: Map<string, OrchestrationPlanView>;
-  onSpecOpen: (specRevisionId: string, title: string) => void;
-  onPlanOpen: (plan: OrchestrationPlanView) => void;
-  onPlanApprove: (plan: OrchestrationPlanView) => void;
+  onPlanOpen: (planRevisionId: string, title: string) => void;
+  onOrchestrationOpen: (plan: OrchestrationPlanView) => void;
+  onOrchestrationApprove: (plan: OrchestrationPlanView) => void;
   activity?: TranscriptActivity;
   turnTiming?: TurnTiming | null;
   showReasoning?: boolean;
@@ -146,13 +146,13 @@ function formatTurnTimestamp(value: string | null | undefined): string | null {
 
 function isPinnedTurnBlock(block: TranscriptBlock): boolean {
   return block.type === "guide-message"
-    || block.type === "decision-card-result"
-    || block.type === "spec-card"
-    || block.type === "plan-card";
+    || block.type === "decision-request-result"
+    || block.type === "plan-card"
+    || block.type === "orchestration-card";
 }
 
 /**
- * A turn-level "finished" signal (derived from the containing WorkRun) can lag
+ * A turn-level "finished" signal can lag
  * behind the message that is still actually streaming inside that same turn.
  * Treat the turn as still live whenever any rendered block is itself
  * mid-flight, regardless of what the turn-level signal claims.
@@ -169,9 +169,9 @@ function hasLiveBlock(blocks: TranscriptBlock[]): boolean {
 function hasToolWork(blocks: TranscriptBlock[]): boolean {
   return blocks.some((block) => (
     (block.type === "tool-group" && block.tools.length > 0)
-    || block.type === "decision-card"
-    || block.type === "spec-card"
+    || block.type === "decision-request"
     || block.type === "plan-card"
+    || block.type === "orchestration-card"
   ));
 }
 
@@ -259,12 +259,12 @@ function WorkHeader({
   );
 }
 
-function DecisionCardResult({
+function DecisionRequestCardResult({
   block,
   card,
 }: {
-  block: Extract<TranscriptBlock, { type: "decision-card-result" }>;
-  card?: DecisionCardData;
+  block: Extract<TranscriptBlock, { type: "decision-request-result" }>;
+  card?: DecisionRequestCardData;
 }) {
   const [expanded, setExpanded] = useState(block.collapseState === "expanded");
   const { toggle } = useTranscriptScroll();
@@ -278,7 +278,7 @@ function DecisionCardResult({
     question: card?.questions.find((question) => question.header === header)?.question ?? header,
     value: Array.isArray(answer) ? answer.join("、") : answer,
   }));
-  const isExplicitPermissionDenial = card?.card_type === "permission_confirmation"
+  const isExplicitPermissionDenial = card?.request_type === "tool_permission"
     && rows.some((row) => row.value === "拒绝当前命令" || row.value === "拒绝");
   const summary = block.status === "cancelled"
     ? isExplicitPermissionDenial ? "已拒绝当前命令" : "已取消"
@@ -287,10 +287,10 @@ function DecisionCardResult({
       : "已提交澄清结果";
 
   return (
-    <div data-testid="decision-card-result" className={styles.cardResult}>
+    <div data-testid="decision-request-result" className={styles.cardResult}>
       <button
         type="button"
-        data-testid="decision-card-result-summary"
+        data-testid="decision-request-result-summary"
         className={styles.cardResultSummary}
         aria-expanded={expanded}
         onClick={(event) => toggle(event, () => setExpanded((value) => !value))}
@@ -299,7 +299,7 @@ function DecisionCardResult({
         <ChevronDown className={`${styles.chevron} ${expanded ? "" : styles.collapsed}`} size={16} />
       </button>
       {expanded ? (
-        <div data-testid="decision-card-result-details" className={styles.cardResultDetails}>
+        <div data-testid="decision-request-result-details" className={styles.cardResultDetails}>
           {block.status === "cancelled" ? (
             <p>{isExplicitPermissionDenial ? "用户已拒绝当前风险命令，本轮可继续执行其他工作。" : "用户取消了本次澄清卡片。"}</p>
           ) : rows.length > 0 ? (
@@ -436,22 +436,22 @@ function renderTranscriptBlock(
   block: TranscriptBlock,
   {
     flowId,
-    decisionCardsById,
-    specCardsById,
+    decisionRequestsById,
+    planCardsById,
     plansByRevisionId,
-    onSpecOpen,
     onPlanOpen,
-    onPlanApprove,
+    onOrchestrationOpen,
+    onOrchestrationApprove,
     showReasoning,
     thinkingLabel,
   }: {
     flowId: string;
-    decisionCardsById: Map<string, DecisionCardData>;
-    specCardsById: Map<string, SpecCardState>;
+    decisionRequestsById: Map<string, DecisionRequestCardData>;
+    planCardsById: Map<string, PlanCardState>;
     plansByRevisionId: Map<string, OrchestrationPlanView>;
-    onSpecOpen: (specRevisionId: string, title: string) => void;
-    onPlanOpen: (plan: OrchestrationPlanView) => void;
-    onPlanApprove: (plan: OrchestrationPlanView) => void;
+    onPlanOpen: (planRevisionId: string, title: string) => void;
+    onOrchestrationOpen: (plan: OrchestrationPlanView) => void;
+    onOrchestrationApprove: (plan: OrchestrationPlanView) => void;
     showReasoning: boolean;
     thinkingLabel?: string;
   },
@@ -471,31 +471,31 @@ function renderTranscriptBlock(
       return <ThinkingIndicator key={block.id} label={thinkingLabel} />;
     case "tool-group":
       return <ToolGroup key={block.id} group={block} />;
-    case "decision-card-result":
+    case "decision-request-result":
       return (
-        <DecisionCardResult
+        <DecisionRequestCardResult
           key={block.id}
           block={block}
-          card={decisionCardsById.get(block.cardId)}
+          card={decisionRequestsById.get(block.requestId)}
         />
       );
-    case "decision-card":
+    case "decision-request":
       return null;
-    case "spec-card": {
-      const card = specCardsById.get(block.specApprovalId);
+    case "plan-card": {
+      const card = planCardsById.get(block.planApprovalId);
       if (!card) return null;
       return (
-        <PendingSpecCard
+        <PendingPlanCard
           key={block.id}
           flowId={flowId}
           card={card}
-          onOpenSpec={onSpecOpen}
+          onOpenPlan={onPlanOpen}
         />
       );
     }
-    case "plan-card": {
-      const plan = plansByRevisionId.get(block.planRevisionId);
-      return plan ? <OrchestrationPlanCard key={block.id} plan={plan} onOpenPlan={onPlanOpen} onApprove={onPlanApprove} /> : null;
+    case "orchestration-card": {
+      const plan = plansByRevisionId.get(block.orchestrationRevisionId);
+      return plan ? <OrchestrationPlanCard key={block.id} plan={plan} onOpenPlan={onOrchestrationOpen} onApprove={onOrchestrationApprove} /> : null;
     }
     default:
       return null;
@@ -506,12 +506,12 @@ export default function AssistantTurn({
   blocks,
   turnId,
   flowId,
-  decisionCardsById,
-  specCardsById,
+  decisionRequestsById,
+  planCardsById,
   plansByRevisionId,
-  onSpecOpen,
   onPlanOpen,
-  onPlanApprove,
+  onOrchestrationOpen,
+  onOrchestrationApprove,
   activity,
   turnTiming,
   showReasoning = true,
@@ -592,12 +592,12 @@ export default function AssistantTurn({
       ) : null}
       {blocksToRender.map((block) => renderTranscriptBlock(block, {
         flowId,
-        decisionCardsById,
-        specCardsById,
+        decisionRequestsById,
+        planCardsById,
         plansByRevisionId,
-        onSpecOpen,
         onPlanOpen,
-        onPlanApprove,
+        onOrchestrationOpen,
+        onOrchestrationApprove,
         showReasoning,
         thinkingLabel,
       }))}

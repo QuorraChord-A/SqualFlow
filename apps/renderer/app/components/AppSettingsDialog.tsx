@@ -50,14 +50,14 @@ import {
   createAgentRuntimeConfig,
   deleteAgentRuntimeConfig,
   fetchAgentRuntimeConfig,
-  fetchExperts,
+  fetchAgentDefinitions,
   refreshAgentRuntimeModels,
   testAgentRuntimeConnection,
   updateAgentRuntimeConfig,
   updateAgentRuntimeRole,
   type AgentRuntimeConfigDto as RuntimeConfig,
   type AgentRuntimeRole as AgentRole,
-  type ExpertDto,
+  type AgentDefinitionDto,
   type RuntimeModelDto as RuntimeModel,
   type RuntimeAuthMode,
   type RuntimeSdk,
@@ -584,7 +584,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const [roleModels, setRoleModels] = useState<Record<AgentRole, string>>(INITIAL_ROLE_MODELS);
   const [roleEnabled, setRoleEnabled] = useState<Record<AgentRole, boolean>>(INITIAL_ROLE_ENABLED);
   const [roleReasoningEfforts, setRoleReasoningEfforts] = useState<Record<AgentRole, string>>(INITIAL_ROLE_REASONING_EFFORTS);
-  const [experts, setExperts] = useState<ExpertDto[]>([]);
+  const [agentDefinitions, setAgentDefinitions] = useState<AgentDefinitionDto[]>([]);
   const [promptDialogOpen, setPromptDialogOpen] = useState(false);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [runtimeFeedback, setRuntimeFeedback] = useState<string | null>(null);
@@ -609,9 +609,9 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   const [copyConfigPathState, setCopyConfigPathState] = useState<"idle" | "copied" | "failed">("idle");
   const failedAutoSaveVersionsRef = useRef(new Map<string, string>());
   const roleDefinitions = useMemo(() => ROLE_DEFINITIONS.map((role) => {
-    const expert = experts.find((item) => item.role === role.role);
-    return expert ? { ...role, systemPrompt: expert.system_prompt } : role;
-  }), [experts]);
+    const definition = agentDefinitions.find((item) => item.role === role.role);
+    return definition ? { ...role, systemPrompt: definition.system_prompt } : role;
+  }), [agentDefinitions]);
   const selectedRole = roleDefinitions.find((role) => role.role === selectedRoleId) ?? roleDefinitions[0];
   const savedRuntimeConfigs = runtimeConfigs.filter((config) => !isDraftRuntimeConfig(config));
   const selectedRoleConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[selectedRole.role]) ?? savedRuntimeConfigs[0];
@@ -638,11 +638,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
-    Promise.all([fetchAgentRuntimeConfig(), fetchExperts()])
-      .then(([snapshot, expertRows]) => {
+    Promise.all([fetchAgentRuntimeConfig(), fetchAgentDefinitions()])
+      .then(([snapshot, definitionRows]) => {
         if (cancelled) return;
         applySnapshot(snapshot);
-        setExperts(expertRows);
+        setAgentDefinitions(definitionRows);
         setSelectedConfigId((current) => current || snapshot.configs[0]?.id || "");
         setLoadError(null);
       })

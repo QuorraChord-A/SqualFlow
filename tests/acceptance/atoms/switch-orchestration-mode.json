@@ -1,0 +1,1 @@
+{"id":"switch-orchestration-mode","description":"切换编排审批设置","params":["mode"],"steps":["打开编排审批设置","选择 {mode}","确认并重新读取无障碍树"],"verify":["编排审批设置显示 {mode}","已经创建的编排卡审批形态没有被追溯改变"]}

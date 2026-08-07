@@ -43,7 +43,7 @@ export default function AppUpdateButton() {
   const [confirmationMode, setConfirmationMode] = useState<ConfirmationMode>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
   const flows = useFlowStore((s) => s.flows);
-  const runningFlowCount = flows.filter((flow) => flow.has_active_execution === true || flow.is_streaming === true).length;
+  const runningFlowCount = flows.filter((flow) => flow.has_active_agent_run === true).length;
   const autoInstallVersion = useRef<string | null>(null);
 
   useEffect(() => {

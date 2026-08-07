@@ -16,17 +16,11 @@ export const flows = sqliteTable("flows", {
   name: text("name").notNull(),
   description: text("description"),
   nameGenerationStatus: text("name_generation_status").notNull().default("generated"),
-  status: text("status").notNull().default("ready"),
-  legacySpecFlow: integer("legacy_spec_flow").notNull().default(0),
+  behaviorMode: text("behavior_mode").notNull().default("execute"),
   riskMode: text("risk_mode").notNull().default("auto_edit"),
-  planApproval: text("plan_approval").notNull().default("on"),
+  orchestrationMode: text("orchestration_mode").notNull().default("approval_required"),
   isPinned: integer("is_pinned").notNull().default(0),
   lastOutputCompletedAt: text("last_output_completed_at"),
-  leaderSessionId: text("leader_session_id"),
-  leaderRuntimeSdk: text("leader_runtime_sdk"),
-  leaderRuntimeConfigId: text("leader_runtime_config_id"),
-  leaderRuntimeModelId: text("leader_runtime_model_id"),
-  leaderRuntimeReasoningEffort: text("leader_runtime_reasoning_effort"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 });
@@ -36,170 +30,174 @@ export const flowReadStates = sqliteTable("flow_read_states", {
   viewerId: text("viewer_id").notNull().default("local-default"),
   lastReadAt: text("last_read_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.flowId, table.viewerId] })]);
+
+export const agentDefinitions = sqliteTable("agent_definitions", {
+  id: text("id").primaryKey(),
+  role: text("role").notNull(),
+  name: text("name").notNull(),
+  personNameCandidates: text("person_name_candidates").notNull().default("[]"),
+  systemPrompt: text("system_prompt").notNull(),
+  builtinTools: text("builtin_tools").notNull().default("[]"),
+  mcpTools: text("mcp_tools").notNull().default("[]"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
 });
 
-export const workRuns = sqliteTable("work_runs", {
+export const agentSessions = sqliteTable("agent_sessions", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  triggerMessageId: text("trigger_message_id").notNull(),
-  status: text("status").notNull().default("ready"),
-  revision: integer("revision").notNull().default(1),
-  startedAt: text("started_at").notNull(),
-  executionStartedAt: text("execution_started_at"),
-  activeStartedAt: text("active_started_at"),
-  activeDurationMs: integer("active_duration_ms").notNull().default(0),
-  waitingStartedAt: text("waiting_started_at"),
-  completedAt: text("completed_at"),
-  workSource: text("work_source"),
-  specRevisionId: text("spec_revision_id"),
-  targetProjectId: text("target_project_id"),
-  workRootPath: text("work_root_path").notNull().default(""),
-  inputSnapshotJson: text("input_snapshot_json").notNull().default("{}"),
+  agentDefinitionId: text("agent_definition_id").notNull(),
+  role: text("role").notNull(),
+  displayName: text("display_name").notNull().default(""),
+  providerSessionId: text("provider_session_id"),
+  runtimeSdk: text("runtime_sdk"),
+  runtimeConfigId: text("runtime_config_id"),
+  runtimeModelId: text("runtime_model_id"),
+  runtimeReasoningEffort: text("runtime_reasoning_effort"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
-  uniqueIndex("work_runs_one_open_per_flow")
+  uniqueIndex("agent_sessions_one_leader_per_flow")
     .on(table.flowId)
-    .where(sql`${table.status} IN ('ready', 'executing', 'waiting_user', 'interrupted')`),
+    .where(sql`${table.role} = 'leader'`),
 ]);
 
-export const tasks = sqliteTable("tasks", {
+export const agentRuns = sqliteTable("agent_runs", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id").notNull(),
-  title: text("title").notNull(),
-  description: text("description").notNull(),
-  expertId: text("expert_id"),
-  flowExpertId: text("flow_expert_id"),
-  status: text("status").notNull().default("pending"),
-  revision: integer("revision").notNull().default(1),
-  activeForm: text("active_form").notNull().default(""),
-  /** Human-authored current progress; not inferred from provider turn outcomes. */
-  progress: text("progress"),
-  agentSessionId: text("agent_session_id"),
-  metadataJson: text("metadata_json").notNull().default("{}"),
-  acceptanceCriteriaJson: text("acceptance_criteria_json").notNull().default("[]"),
-  resultArtifactIdsJson: text("result_artifact_ids_json").notNull().default("[]"),
-  resultJson: text("result_json"),
+  agentSessionId: text("agent_session_id").notNull(),
+  taskId: text("task_id"),
+  triggerKind: text("trigger_kind").notNull().default("user_message"),
+  triggerMessageId: text("trigger_message_id"),
+  status: text("status").notNull().default("queued"),
+  modelInputJson: text("model_input_json").notNull().default("{}"),
   errorMessage: text("error_message"),
-  createdByAgentSessionId: text("created_by_agent_session_id").notNull().default(""),
   createdAt: text("created_at").notNull(),
   startedAt: text("started_at"),
   finishedAt: text("finished_at"),
   updatedAt: text("updated_at").notNull(),
-});
-
-export const specRevisions = sqliteTable("spec_revisions", {
-  id: text("id").primaryKey(),
-  flowId: text("flow_id").notNull(),
-  revisionNumber: integer("revision_number").notNull(),
-  status: text("status").notNull().default("draft"),
-  title: text("title").notNull(),
-  overview: text("overview").notNull().default(""),
-  fileName: text("file_name").notNull().default(""),
-  content: text("content").notNull(),
-  sourceAgentSessionId: text("source_agent_session_id").notNull().default(""),
-  createdAt: text("created_at").notNull(),
-  approvedAt: text("approved_at"),
-  executedAt: text("executed_at"),
-});
-
-export const specApprovals = sqliteTable("spec_approvals", {
-  id: text("id").primaryKey(),
-  flowId: text("flow_id").notNull(),
-  specRevisionId: text("spec_revision_id").notNull(),
-  workRunId: text("work_run_id"),
-  status: text("status").notNull().default("pending"),
-  fileName: text("file_name").notNull(),
-  overview: text("overview").notNull().default(""),
-  createdAt: text("created_at").notNull(),
-  resolvedAt: text("resolved_at"),
-});
-
-export const taskDependencies = sqliteTable("task_dependencies", {
-  taskId: text("task_id").notNull(),
-  dependsOnTaskId: text("depends_on_task_id").notNull(),
-  createdAt: text("created_at").notNull(),
 }, (table) => [
-  primaryKey({ columns: [table.taskId, table.dependsOnTaskId] }),
+  uniqueIndex("agent_runs_one_active_per_session")
+    .on(table.agentSessionId)
+    .where(sql`${table.status} IN ('queued', 'running', 'waiting_tool_approval')`),
 ]);
 
-export const orchestrationPlans = sqliteTable("orchestration_plans", {
+export const toolCalls = sqliteTable("tool_calls", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id").notNull(),
-  specRevisionId: text("spec_revision_id"),
+  agentRunId: text("agent_run_id").notNull(),
+  taskId: text("task_id"),
+  name: text("name").notNull(),
+  functionCallType: text("function_call_type"),
+  status: text("status").notNull().default("started"),
+  idempotencyKey: text("idempotency_key"),
+  argumentsJson: text("arguments_json").notNull().default("{}"),
+  resultJson: text("result_json"),
+  errorMessage: text("error_message"),
+  decisionRequestId: text("decision_request_id"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+  completedAt: text("completed_at"),
 }, (table) => [
-  uniqueIndex("orchestration_plans_work_run_unique").on(table.workRunId),
+  uniqueIndex("tool_calls_run_idempotency_unique")
+    .on(table.agentRunId, table.idempotencyKey)
+    .where(sql`${table.idempotencyKey} IS NOT NULL`),
 ]);
+
+export const planDocuments = sqliteTable("plan_documents", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  title: text("title").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("plan_documents_flow_unique").on(table.flowId)]);
 
 export const planRevisions = sqliteTable("plan_revisions", {
   id: text("id").primaryKey(),
-  planId: text("plan_id").notNull(),
+  planDocumentId: text("plan_document_id").notNull(),
+  flowId: text("flow_id").notNull(),
   revisionNumber: integer("revision_number").notNull(),
-  parentRevisionId: text("parent_revision_id"),
-  sourceFeedbackMessageId: text("source_feedback_message_id"),
-  status: text("status").notNull().default("generating"),
   title: text("title").notNull(),
-  objective: text("objective").notNull().default(""),
-  workKind: text("work_kind").notNull().default("change"),
-  riskLevel: text("risk_level").notNull().default("medium"),
-  lintJson: text("lint_json").notNull().default("[]"),
-  diffJson: text("diff_json").notNull().default("{}"),
-  sourceAgentSessionId: text("source_agent_session_id").notNull().default(""),
+  overview: text("overview").notNull().default(""),
+  content: text("content").notNull(),
+  sourceAgentRunId: text("source_agent_run_id").notNull(),
   createdAt: text("created_at").notNull(),
-  approvedAt: text("approved_at"),
-  supersededAt: text("superseded_at"),
-}, (table) => [
-  uniqueIndex("plan_revisions_plan_number_unique").on(table.planId, table.revisionNumber),
-]);
-
-export const planNodes = sqliteTable("plan_nodes", {
-  id: text("id").primaryKey(),
-  planRevisionId: text("plan_revision_id").notNull(),
-  stableKey: text("stable_key").notNull(),
-  expertId: text("expert_id").notNull(),
-  title: text("title").notNull(),
-  description: text("description").notNull(),
-  acceptanceCriteriaJson: text("acceptance_criteria_json").notNull().default("[]"),
-  riskTagsJson: text("risk_tags_json").notNull().default("[]"),
-  sideEffectsJson: text("side_effects_json").notNull().default("[]"),
-  resourceKeysJson: text("resource_keys_json").notNull().default("[]"),
-  createdAt: text("created_at").notNull(),
-}, (table) => [
-  uniqueIndex("plan_nodes_revision_key_unique").on(table.planRevisionId, table.stableKey),
-]);
-
-export const planDependencies = sqliteTable("plan_dependencies", {
-  planRevisionId: text("plan_revision_id").notNull(),
-  nodeId: text("node_id").notNull(),
-  dependsOnNodeId: text("depends_on_node_id").notNull(),
-  createdAt: text("created_at").notNull(),
-}, (table) => [
-  primaryKey({ columns: [table.planRevisionId, table.nodeId, table.dependsOnNodeId] }),
-]);
+}, (table) => [uniqueIndex("plan_revisions_document_number_unique").on(table.planDocumentId, table.revisionNumber)]);
 
 export const planApprovals = sqliteTable("plan_approvals", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id").notNull(),
   planRevisionId: text("plan_revision_id").notNull(),
   status: text("status").notNull().default("pending"),
   resolutionActionId: text("resolution_action_id"),
+  feedback: text("feedback"),
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
-}, (table) => [
-  uniqueIndex("plan_approvals_revision_unique").on(table.planRevisionId),
-]);
+}, (table) => [uniqueIndex("plan_approvals_revision_unique").on(table.planRevisionId)]);
 
-export const planFeedback = sqliteTable("plan_feedback", {
+export const orchestrationPlans = sqliteTable("orchestration_plans", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id").notNull(),
-  planRevisionId: text("plan_revision_id").notNull(),
-  planNodeId: text("plan_node_id"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("orchestration_plans_flow_unique").on(table.flowId)]);
+
+export const orchestrationRevisions = sqliteTable("orchestration_revisions", {
+  id: text("id").primaryKey(),
+  orchestrationPlanId: text("orchestration_plan_id").notNull(),
+  flowId: text("flow_id").notNull(),
+  revisionNumber: integer("revision_number").notNull(),
+  parentRevisionId: text("parent_revision_id"),
+  status: text("status").notNull().default("active"),
+  approvalModeSnapshot: text("approval_mode_snapshot").notNull(),
+  title: text("title").notNull(),
+  objective: text("objective").notNull().default(""),
+  sourceAgentRunId: text("source_agent_run_id").notNull(),
+  createdAt: text("created_at").notNull(),
+  activatedAt: text("activated_at"),
+}, (table) => [
+  uniqueIndex("orchestration_revisions_plan_number_unique")
+    .on(table.orchestrationPlanId, table.revisionNumber),
+]);
+
+export const orchestrationNodes = sqliteTable("orchestration_nodes", {
+  id: text("id").primaryKey(),
+  orchestrationRevisionId: text("orchestration_revision_id").notNull(),
+  stableKey: text("stable_key").notNull(),
+  recommendedAgentDefinitionId: text("recommended_agent_definition_id").notNull(),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  acceptanceCriteriaJson: text("acceptance_criteria_json").notNull().default("[]"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  uniqueIndex("orchestration_nodes_revision_key_unique").on(table.orchestrationRevisionId, table.stableKey),
+]);
+
+export const orchestrationNodeDependencies = sqliteTable("orchestration_node_dependencies", {
+  orchestrationRevisionId: text("orchestration_revision_id").notNull(),
+  nodeId: text("node_id").notNull(),
+  dependsOnNodeId: text("depends_on_node_id").notNull(),
+  createdAt: text("created_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.orchestrationRevisionId, table.nodeId, table.dependsOnNodeId] })]);
+
+export const orchestrationApprovals = sqliteTable("orchestration_approvals", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  orchestrationRevisionId: text("orchestration_revision_id").notNull(),
+  status: text("status").notNull().default("pending"),
+  resolutionActionId: text("resolution_action_id"),
+  feedback: text("feedback"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
+}, (table) => [uniqueIndex("orchestration_approvals_revision_unique").on(table.orchestrationRevisionId)]);
+
+export const orchestrationFeedback = sqliteTable("orchestration_feedback", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  orchestrationRevisionId: text("orchestration_revision_id").notNull(),
+  orchestrationNodeId: text("orchestration_node_id"),
   sourceMessageId: text("source_message_id").notNull(),
   markerNumber: integer("marker_number").notNull(),
   comment: text("comment").notNull(),
@@ -209,186 +207,169 @@ export const planFeedback = sqliteTable("plan_feedback", {
   resolvedAt: text("resolved_at"),
 });
 
-export const planRuns = sqliteTable("plan_runs", {
+export const tasks = sqliteTable("tasks", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id").notNull(),
-  planRevisionId: text("plan_revision_id").notNull(),
+  orchestrationRevisionId: text("orchestration_revision_id"),
+  orchestrationNodeId: text("orchestration_node_id"),
+  title: text("title").notNull(),
+  description: text("description").notNull(),
+  recommendedAgentDefinitionId: text("recommended_agent_definition_id"),
+  agentSessionId: text("agent_session_id"),
   status: text("status").notNull().default("pending"),
+  revision: integer("revision").notNull().default(1),
+  activeForm: text("active_form").notNull().default(""),
+  progress: text("progress"),
+  metadataJson: text("metadata_json").notNull().default("{}"),
+  acceptanceCriteriaJson: text("acceptance_criteria_json").notNull().default("[]"),
+  resultArtifactIdsJson: text("result_artifact_ids_json").notNull().default("[]"),
+  resultJson: text("result_json"),
+  errorMessage: text("error_message"),
+  createdByAgentRunId: text("created_by_agent_run_id").notNull(),
   createdAt: text("created_at").notNull(),
   startedAt: text("started_at"),
-  completedAt: text("completed_at"),
+  finishedAt: text("finished_at"),
   updatedAt: text("updated_at").notNull(),
 }, (table) => [
-  uniqueIndex("plan_runs_revision_unique").on(table.planRevisionId),
+  uniqueIndex("tasks_orchestration_node_unique")
+    .on(table.orchestrationRevisionId, table.orchestrationNodeId)
+    .where(sql`${table.orchestrationRevisionId} IS NOT NULL AND ${table.orchestrationNodeId} IS NOT NULL`),
 ]);
 
-export const planNodeTasks = sqliteTable("plan_node_tasks", {
-  planRunId: text("plan_run_id").notNull(),
-  planNodeId: text("plan_node_id").notNull(),
+export const taskDependencies = sqliteTable("task_dependencies", {
   taskId: text("task_id").notNull(),
-  disposition: text("disposition").notNull().default("created"),
+  dependsOnTaskId: text("depends_on_task_id").notNull(),
   createdAt: text("created_at").notNull(),
-}, (table) => [
-  primaryKey({ columns: [table.planRunId, table.planNodeId] }),
-]);
+}, (table) => [primaryKey({ columns: [table.taskId, table.dependsOnTaskId] })]);
 
-export const orchestrationRules = sqliteTable("orchestration_rules", {
-  id: text("id").primaryKey(),
-  scopeType: text("scope_type").notNull(),
-  scopeId: text("scope_id").notNull().default(""),
-  name: text("name").notNull(),
-  severity: text("severity").notNull().default("warn"),
-  enabled: integer("enabled").notNull().default(1),
-  ruleJson: text("rule_json").notNull(),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
-
-export const eventLog = sqliteTable("event_log", {
+export const decisionRequests = sqliteTable("decision_requests", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id"),
-  taskId: text("task_id"),
-  agentSessionId: text("agent_session_id"),
-  eventType: text("event_type").notNull(),
+  agentRunId: text("agent_run_id").notNull(),
+  toolCallId: text("tool_call_id"),
+  requestType: text("request_type").notNull(),
   payloadJson: text("payload_json").notNull().default("{}"),
-  sequence: integer("sequence").notNull(),
-  createdAt: text("created_at").notNull(),
-});
-
-export const experts = sqliteTable("experts", {
-  id: text("id").primaryKey(),
-  role: text("role").notNull(),
-  /** Fixed Chinese role title shown under the person name in UI, e.g. 全栈开发专家. */
-  name: text("name").notNull(),
-  /** Candidate person names for FlowExpert display_name; one is chosen per Flow. */
-  personNameCandidates: text("person_name_candidates").notNull().default("[]"),
-  systemPrompt: text("system_prompt").notNull(),
-  builtinTools: text("builtin_tools").notNull().default("[]"),
-  mcpTools: text("mcp_tools").notNull().default("[]"),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
-
-export const flowExperts = sqliteTable(
-  "flow_experts",
-  {
-    id: text("id").primaryKey(),
-    flowId: text("flow_id").notNull(),
-    expertId: text("expert_id").notNull(),
-    displayName: text("display_name").notNull().default(""),
-    status: text("status").notNull().default("idle"),
-    sdkSessionId: text("sdk_session_id"),
-    runtimeSdk: text("runtime_sdk"),
-    runtimeConfigId: text("runtime_config_id"),
-    runtimeModelId: text("runtime_model_id"),
-    runtimeReasoningEffort: text("runtime_reasoning_effort"),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-  },
-  (table) => [
-    uniqueIndex("flow_experts_flow_id_expert_id_unique").on(table.flowId, table.expertId),
-  ],
-);
-
-export const agentSessions = sqliteTable("agent_sessions", {
-  id: text("id").primaryKey(),
-  flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id"),
-  taskId: text("task_id"),
-  expertId: text("expert_id").notNull(),
-  flowExpertId: text("flow_expert_id"),
-  sessionId: text("session_id"),
-  runtimeSdk: text("runtime_sdk"),
-  runtimeConfigId: text("runtime_config_id"),
-  runtimeModelId: text("runtime_model_id"),
-  runtimeReasoningEffort: text("runtime_reasoning_effort"),
-  displayName: text("display_name").notNull().default(""),
-  resumeFromAgentSessionId: text("resume_from_agent_session_id").notNull().default(""),
-  status: text("status").notNull().default("queued"),
-  createdAt: text("created_at").notNull(),
-  updatedAt: text("updated_at").notNull(),
-});
-
-export const agentContextUsageSnapshots = sqliteTable(
-  "agent_context_usage_snapshots",
-  {
-    id: text("id").primaryKey(),
-    flowId: text("flow_id").notNull(),
-    agentSessionId: text("agent_session_id").notNull(),
-    sdkSessionId: text("sdk_session_id"),
-    role: text("role").notNull(),
-    expertId: text("expert_id"),
-    flowExpertId: text("flow_expert_id"),
-    totalTokens: integer("total_tokens"),
-    maxTokens: integer("max_tokens"),
-    rawMaxTokens: integer("raw_max_tokens"),
-    percentage: real("percentage"),
-    model: text("model"),
-    categoriesJson: text("categories_json").notNull().default("[]"),
-    cacheInputTokens: integer("cache_input_tokens"),
-    cacheReadInputTokens: integer("cache_read_input_tokens"),
-    cacheCreationInputTokens: integer("cache_creation_input_tokens"),
-    cacheHitRate: real("cache_hit_rate"),
-    compacted: integer("compacted").notNull().default(0),
-    observedAt: text("observed_at").notNull(),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-  },
-  (table) => [
-    uniqueIndex("agent_context_usage_snapshots_agent_session_unique").on(table.agentSessionId),
-  ],
-);
-
-export const decisionCards = sqliteTable("decision_cards", {
-  id: text("id").primaryKey(),
-  flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id"),
-  sessionId: text("session_id").notNull().default(""),
-  cardType: text("card_type").notNull().default("generic"),
-  questions: text("questions").notNull(),
-  answers: text("answers"),
+  responseJson: text("response_json"),
   status: text("status").notNull().default("pending"),
-  resolutionKind: text("resolution_kind").notNull().default(""),
   resolutionActionId: text("resolution_action_id"),
-  resolvedMessageId: text("resolved_message_id"),
   createdAt: text("created_at").notNull(),
   resolvedAt: text("resolved_at"),
+  updatedAt: text("updated_at").notNull(),
 });
 
-export const decisionCardLeaderInputs = sqliteTable(
-  "decision_card_leader_inputs",
-  {
-    id: text("id").primaryKey(),
-    flowId: text("flow_id").notNull(),
-    cardId: text("card_id").notNull(),
-    clientActionId: text("client_action_id").notNull(),
-    messageId: text("message_id").notNull(),
-    kind: text("kind").notNull(),
-    content: text("content").notNull(),
-    status: text("status").notNull().default("pending"),
-    attempts: integer("attempts").notNull().default(0),
-    lastError: text("last_error"),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-    sentAt: text("sent_at"),
-  },
-  (table) => [
-    uniqueIndex("decision_card_leader_inputs_action_unique")
-      .on(table.flowId, table.cardId, table.clientActionId),
-  ],
-);
+export const leaderRunTriggers = sqliteTable("leader_run_triggers", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  kind: text("kind").notNull(),
+  sourceId: text("source_id").notNull(),
+  payloadJson: text("payload_json").notNull().default("{}"),
+  status: text("status").notNull().default("pending"),
+  attempts: integer("attempts").notNull().default(0),
+  lastError: text("last_error"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  sentAt: text("sent_at"),
+}, (table) => [
+  uniqueIndex("leader_run_triggers_source_unique")
+    .on(table.flowId, table.kind, table.sourceId),
+]);
+
+export const changeSets = sqliteTable("change_sets", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  title: text("title").notNull().default("代码变更"),
+  status: text("status").notNull().default("open"),
+  rootPath: text("root_path").notNull(),
+  baselineSnapshotPath: text("baseline_snapshot_path").notNull(),
+  baselineJson: text("baseline_json").notNull(),
+  baselineKind: text("baseline_kind").notNull(),
+  baselineRef: text("baseline_ref"),
+  partialReason: text("partial_reason"),
+  reviewJson: text("review_json"),
+  createdAt: text("created_at").notNull(),
+  finalizedAt: text("finalized_at"),
+  abandonedAt: text("abandoned_at"),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const changeSetContributions = sqliteTable("change_set_contributions", {
+  changeSetId: text("change_set_id").notNull(),
+  agentRunId: text("agent_run_id").notNull(),
+  taskId: text("task_id"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.changeSetId, table.agentRunId] })]);
+
+export const changeSetFiles = sqliteTable("change_set_files", {
+  changeSetId: text("change_set_id").notNull(),
+  path: text("path").notNull(),
+  status: text("status").notNull(),
+  patch: text("patch"),
+  additions: integer("additions"),
+  deletions: integer("deletions"),
+  attributionKind: text("attribution_kind").notNull().default("direct"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.changeSetId, table.path] })]);
+
+export const changeBaselineCandidates = sqliteTable("change_baseline_candidates", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  agentRunId: text("agent_run_id").notNull(),
+  taskId: text("task_id"),
+  rootPath: text("root_path").notNull(),
+  snapshotPath: text("snapshot_path").notNull(),
+  baselineJson: text("baseline_json").notNull(),
+  baselineKind: text("baseline_kind").notNull(),
+  baselineRef: text("baseline_ref"),
+  status: text("status").notNull().default("ready"),
+  errorMessage: text("error_message"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [uniqueIndex("change_baseline_candidates_run_unique").on(table.agentRunId)]);
 
 export const artifacts = sqliteTable("artifacts", {
   id: text("id").primaryKey(),
   flowId: text("flow_id").notNull(),
-  workRunId: text("work_run_id"),
   taskId: text("task_id"),
+  changeSetId: text("change_set_id"),
   type: text("type").notNull(),
   title: text("title").notNull(),
   content: text("content").notNull(),
-  sourceAgentSessionId: text("source_agent_session_id").notNull().default(""),
+  sourceAgentRunId: text("source_agent_run_id").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
+});
+
+export const agentContextUsageSnapshots = sqliteTable("agent_context_usage_snapshots", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  agentRunId: text("agent_run_id").notNull(),
+  providerSessionId: text("provider_session_id"),
+  role: text("role").notNull(),
+  agentDefinitionId: text("agent_definition_id"),
+  agentSessionId: text("agent_session_id"),
+  totalTokens: integer("total_tokens"),
+  maxTokens: integer("max_tokens"),
+  rawMaxTokens: integer("raw_max_tokens"),
+  percentage: real("percentage"),
+  model: text("model"),
+  categoriesJson: text("categories_json").notNull().default("[]"),
+  cacheInputTokens: integer("cache_input_tokens"),
+  cacheReadInputTokens: integer("cache_read_input_tokens"),
+  cacheCreationInputTokens: integer("cache_creation_input_tokens"),
+  cacheHitRate: real("cache_hit_rate"),
+  compacted: integer("compacted").notNull().default(0),
+  observedAt: text("observed_at").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+}, (table) => [uniqueIndex("agent_context_usage_snapshots_agent_run_unique").on(table.agentRunId)]);
+
+export const eventLog = sqliteTable("event_log", {
+  id: text("id").primaryKey(),
+  flowId: text("flow_id").notNull(),
+  taskId: text("task_id"),
+  agentRunId: text("agent_run_id"),
+  eventType: text("event_type").notNull(),
+  payloadJson: text("payload_json").notNull().default("{}"),
+  sequence: integer("sequence").notNull(),
+  createdAt: text("created_at").notNull(),
 });

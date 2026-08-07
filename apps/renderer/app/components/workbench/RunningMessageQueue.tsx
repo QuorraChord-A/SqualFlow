@@ -55,13 +55,10 @@ export default function RunningMessageQueue({
         {messages.map((message, index) => {
           const isDispatching = message.status === "dispatching";
           const visibleContent = message.displayContent ?? message.content;
-          const displayContent = visibleContent || (message.planFeedback?.length ? `对编排计划添加了 ${message.planFeedback.length} 条评论` : "附件消息");
+          const displayContent = visibleContent || (message.orchestrationFeedback?.length ? `对编排计划添加了 ${message.orchestrationFeedback.length} 条评论` : "附件消息");
           const previewImages = queuePreviewImages(message);
-          const waitsForNextTurn = actionLabel === "引导" && message.specRequested === true;
           const actionAriaLabel = isDispatching
             ? `消息 ${index + 1} 正在发送`
-            : waitsForNextTurn
-            ? `Spec 消息 ${index + 1} 需等待当前任务结束`
             : actionLabel === "引导"
             ? `引导消息 ${index + 1}`
             : `${actionLabel} 消息 ${index + 1}`;
@@ -115,12 +112,12 @@ export default function RunningMessageQueue({
                 <button
                   type="button"
                   aria-label={actionAriaLabel}
-                  disabled={waitsForNextTurn || isDispatching}
+                  disabled={isDispatching}
                   onClick={() => onGuide(message)}
                   className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-ui-control-hover px-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-background/70 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <CornerUpRight className="size-[17px]" />
-                  {isDispatching ? "发送中" : waitsForNextTurn ? "等待" : actionLabel}
+                  {isDispatching ? "发送中" : actionLabel}
                 </button>
                 <button
                   type="button"

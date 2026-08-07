@@ -1,0 +1,1 @@
+{"id":"change-sets","description":"ChangeSet 与 Diff","assertions":["Leader 单改、多 Run 共享和多个 ChangeSet 均能独立展示贡献和 Diff","finalized 历史不会被后续文件修改覆盖，空 Diff 与失败原因清楚","跨 Flow 独有文件不串归属，并发 Shell 共享文件歧义被排除且说明"]}

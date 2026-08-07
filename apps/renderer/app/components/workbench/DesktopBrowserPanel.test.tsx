@@ -61,7 +61,7 @@ describe("DesktopBrowserPanel agent lease banner", () => {
 
   it("shows the holder name and lets the user reclaim control", async () => {
     const leasedState = baseState({
-      agentLease: { flowId: "flow-a", agentSessionId: "session-a", holderName: "Verify", since: "2026-07-03T00:00:00.000Z" },
+      agentLease: { flowId: "flow-a", agentRunId: "session-a", holderName: "Verify", since: "2026-07-03T00:00:00.000Z" },
     });
     const reclaimedState = baseState({ agentLease: null });
     const reclaimLease = vi.fn().mockResolvedValue(reclaimedState);
@@ -83,7 +83,7 @@ describe("DesktopBrowserPanel agent lease banner", () => {
 
   it("hides another flow's browser lease banner", async () => {
     const state = baseState({
-      agentLease: { flowId: "flow-a", agentSessionId: "session-a", holderName: "Coder", since: "2026-07-03T00:00:00.000Z" },
+      agentLease: { flowId: "flow-a", agentRunId: "session-a", holderName: "Coder", since: "2026-07-03T00:00:00.000Z" },
     });
     vi.stubGlobal("squadflowDesktopBrowser", stubBridge(state));
 

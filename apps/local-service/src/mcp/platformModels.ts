@@ -43,15 +43,9 @@ export const CreateTaskInput = z.object({
   active_form: z.string().optional(),
 }).strict();
 
-export const SaveExecutionPlanInput = z.object({
+export const ResolveOrchestrationFeedbackInput = z.object({
   flow_id: z.string().min(1),
-  title: z.string().min(1),
-  plan: z.string().min(1),
-}).strict();
-
-export const ResolvePlanFeedbackInput = z.object({
-  flow_id: z.string().min(1),
-  plan_approval_id: z.string().min(1),
+  orchestration_approval_id: z.string().min(1),
   resolution_note: z.string().min(1),
 }).strict();
 
@@ -66,9 +60,9 @@ export const UpdateTaskInput = z.object({
   progress: z.string().nullable().optional(),
   /**
    * Explicit Leader reassignment. The task stays one durable Task; a later
-   * dispatch creates a new AgentSession for this selected Expert.
+   * dispatch creates a new AgentRun for this selected Expert.
    */
-  expert_id: z.string().min(1).optional(),
+  recommended_agent_definition_id: z.string().min(1).optional(),
   owner: z.string().optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
   add_blocks: z.array(z.string()).optional(),
@@ -87,26 +81,43 @@ export const GetTaskInput = z.object({
 export const DispatchAgentInput = z.object({
   flow_id: z.string().min(1),
   task_id: z.string().min(1),
-  expert_id: z.string().min(1),
+  agent_definition_id: z.string().min(1),
   prompt: z.string().min(1).optional().default(""),
-  resume_agent_session_id: z.string().optional().default(""),
 }).strict();
 
 export const CancelAgentInput = z.object({
   flow_id: z.string().min(1),
-  task_id: z.string().min(1),
+  agent_session_id: z.string().min(1),
 }).strict();
 
 export const SendMessageInput = z.object({
   flow_id: z.string().min(1),
-  expert_id: z.string().min(1),
-  content: z.string().min(1),
-  summary: z.string().optional(),
+  agent_session_id: z.string().min(1),
+  task_id: z.string().min(1).optional(),
+  message: z.string().min(1),
 }).strict();
 
-export const WorkRunActionInput = z.object({
+export const OpenChangeSetInput = z.object({
   flow_id: z.string().min(1),
-  work_run_id: z.string().min(1),
+  title: z.string().min(1).optional(),
+}).strict();
+
+export const BindChangeSetInput = z.object({
+  flow_id: z.string().min(1),
+  change_set_id: z.string().min(1),
+  agent_run_id: z.string().min(1),
+  task_id: z.string().min(1).optional(),
+}).strict();
+
+export const FinalizeChangeSetInput = z.object({
+  flow_id: z.string().min(1),
+  change_set_id: z.string().min(1),
+  summary: z.string().optional().default(""),
+}).strict();
+
+export const AbandonChangeSetInput = z.object({
+  flow_id: z.string().min(1),
+  change_set_id: z.string().min(1),
 }).strict();
 
 export type QuestionOptionInputValue = z.input<typeof QuestionOptionInput>;
@@ -116,12 +127,14 @@ export type UpdateFlowNameInputValue = z.input<typeof UpdateFlowNameInput>;
 export type AskUserInputValue = z.input<typeof AskUserInput>;
 export type CreatePlanInputValue = z.input<typeof CreatePlanInput>;
 export type CreateTaskInputValue = z.input<typeof CreateTaskInput>;
-export type SaveExecutionPlanInputValue = z.input<typeof SaveExecutionPlanInput>;
-export type ResolvePlanFeedbackInputValue = z.input<typeof ResolvePlanFeedbackInput>;
+export type ResolveOrchestrationFeedbackInputValue = z.input<typeof ResolveOrchestrationFeedbackInput>;
 export type UpdateTaskInputValue = z.input<typeof UpdateTaskInput>;
 export type ListTasksInputValue = z.input<typeof ListTasksInput>;
 export type GetTaskInputValue = z.input<typeof GetTaskInput>;
 export type DispatchAgentInputValue = z.input<typeof DispatchAgentInput>;
 export type CancelAgentInputValue = z.input<typeof CancelAgentInput>;
 export type SendMessageInputValue = z.input<typeof SendMessageInput>;
-export type WorkRunActionInputValue = z.input<typeof WorkRunActionInput>;
+export type OpenChangeSetInputValue = z.input<typeof OpenChangeSetInput>;
+export type BindChangeSetInputValue = z.input<typeof BindChangeSetInput>;
+export type FinalizeChangeSetInputValue = z.input<typeof FinalizeChangeSetInput>;
+export type AbandonChangeSetInputValue = z.input<typeof AbandonChangeSetInput>;

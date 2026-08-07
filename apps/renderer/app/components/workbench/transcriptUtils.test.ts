@@ -2,10 +2,10 @@ import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import {
   cloneUiMessage,
-  extractMessageAgentSessionId,
-  extractToolDecisionCardIds,
+  extractMessageAgentRunId,
+  extractToolDecisionRequestIds,
   lastPartIndex,
-  parseDecisionCardId,
+  parseDecisionRequestId,
 } from "./transcriptUtils";
 
 function message(id: string, parts: UIMessage["parts"] = []): UIMessage {
@@ -13,23 +13,23 @@ function message(id: string, parts: UIMessage["parts"] = []): UIMessage {
 }
 
 describe("transcriptUtils", () => {
-  it("extracts current and legacy agent session ids", () => {
-    expect(extractMessageAgentSessionId({ agent_session_id: "agent-1" })).toBe("agent-1");
-    expect(extractMessageAgentSessionId({ flow_expert_id: "legacy-1" })).toBe("legacy-1");
-    expect(extractMessageAgentSessionId({})).toBeUndefined();
+  it("extracts only explicit AgentRun ids", () => {
+    expect(extractMessageAgentRunId({ agent_run_id: "agent-1" })).toBe("agent-1");
+    expect(extractMessageAgentRunId({ agent_session_id: "session-1" })).toBeUndefined();
+    expect(extractMessageAgentRunId({})).toBeUndefined();
   });
 
-  it("parses decision card ids from supported output shapes", () => {
-    expect(parseDecisionCardId({ card_id: "direct" })).toBe("direct");
-    expect(parseDecisionCardId(JSON.stringify({ card_id: "json-string" }))).toBe("json-string");
-    expect(parseDecisionCardId({ result: { card_id: "wrapped-result" } })).toBe("wrapped-result");
-    expect(parseDecisionCardId({ result: JSON.stringify({ card_id: "wrapped-result-string" }) })).toBe(
+  it("parses DecisionRequest ids from supported output shapes", () => {
+    expect(parseDecisionRequestId({ decision_request_id: "direct" })).toBe("direct");
+    expect(parseDecisionRequestId(JSON.stringify({ decision_request_id: "json-string" }))).toBe("json-string");
+    expect(parseDecisionRequestId({ result: { decision_request_id: "wrapped-result" } })).toBe("wrapped-result");
+    expect(parseDecisionRequestId({ result: JSON.stringify({ decision_request_id: "wrapped-result-string" }) })).toBe(
       "wrapped-result-string",
     );
-    expect(parseDecisionCardId({ content: JSON.stringify({ card_id: "wrapped-content" }) })).toBe(
+    expect(parseDecisionRequestId({ content: JSON.stringify({ decision_request_id: "wrapped-content" }) })).toBe(
       "wrapped-content",
     );
-    expect(parseDecisionCardId("not-json")).toBe("");
+    expect(parseDecisionRequestId("not-json")).toBe("");
   });
 
   it("finds the last part index by type", () => {
@@ -59,20 +59,20 @@ describe("transcriptUtils", () => {
     expect(cloned.parts[1]).not.toBe(original.parts[1]);
   });
 
-  it("extracts decision card ids only from matching MCP tool parts", () => {
+  it("extracts DecisionRequest ids only from matching MCP tool parts", () => {
     const messages = [
       message("msg-1", [
-        { type: "tool-mcp__planner__ask_user", output: { card_id: "card-1" } },
-        { type: "tool-mcp__planner__not_ask_user", output: { card_id: "ignored-1" } },
-        { type: "tool-other__planner__ask_user", output: { card_id: "ignored-2" } },
+        { type: "tool-mcp__planner__ask_user", output: { decision_request_id: "request-1" } },
+        { type: "tool-mcp__planner__not_ask_user", output: { decision_request_id: "ignored-1" } },
+        { type: "tool-other__planner__ask_user", output: { decision_request_id: "ignored-2" } },
         {
           type: "tool-mcp__reviewer__ask_user",
-          output: { result: JSON.stringify({ card_id: "card-2" }) },
+          output: { result: JSON.stringify({ decision_request_id: "request-2" }) },
         },
         { type: "text", text: "done" },
       ] as UIMessage["parts"]),
     ];
 
-    expect(extractToolDecisionCardIds(messages)).toEqual(new Set(["card-1", "card-2"]));
+    expect(extractToolDecisionRequestIds(messages)).toEqual(new Set(["request-1", "request-2"]));
   });
 });

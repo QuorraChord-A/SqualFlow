@@ -25,7 +25,8 @@ import {
 } from "@/components/ui/popover";
 
 export type RiskMode = "auto_edit" | "full_access";
-export type PlanApproval = "on" | "off";
+export type BehaviorMode = "execute" | "plan";
+export type OrchestrationMode = "approval_required" | "automatic";
 
 const modeOptions = [
   {
@@ -37,7 +38,7 @@ const modeOptions = [
   {
     value: "plan" as const,
     label: "计划模式",
-    description: "本条消息先生成 Spec，批准前不执行",
+    description: "整个 Flow 按计划流程协作，直到批准或你切换模式",
     icon: ClipboardList,
   },
   {
@@ -48,47 +49,42 @@ const modeOptions = [
   },
 ];
 
-const planApprovalOptions: Array<{ value: PlanApproval; label: string; description: string }> = [
-  { value: "on", label: "需要批准", description: "Leader 提交编排计划后暂停，等待你批准。" },
-  { value: "off", label: "自动执行", description: "编排计划通过校验后立即调度。" },
+const orchestrationApprovalOptions: Array<{ value: OrchestrationMode; label: string; description: string }> = [
+  { value: "approval_required", label: "需要批准", description: "该模式下创建的编排修订等待你批准后才物化 Task。" },
+  { value: "automatic", label: "自动执行", description: "该模式下创建的编排修订立即物化 Task，不显示审批按钮。" },
 ];
 
 interface ComposerModeMenuProps {
-  specRequested: boolean;
+  behaviorMode?: BehaviorMode;
   riskMode?: RiskMode;
-  planApproval?: PlanApproval;
-  /** Once a Spec/Plan turn has been sent, only approval (or an explicit stop) may leave plan mode. */
-  planModeLocked?: boolean;
+  orchestrationMode?: OrchestrationMode;
   disabled?: boolean;
-  onSpecChange: (requested: boolean) => void;
-  onRiskModeChange?: (mode: RiskMode) => void;
-  onPlanApprovalChange?: (approval: PlanApproval) => void;
+  onModeChange: (mode: { behaviorMode: BehaviorMode; riskMode: RiskMode }) => void;
+  onOrchestrationModeChange?: (mode: OrchestrationMode) => void;
   onAddImages?: (files: File[]) => void | Promise<void>;
 }
 
 export default function ComposerModeMenu({
-  specRequested,
+  behaviorMode = "execute",
   riskMode = "auto_edit",
-  planApproval = "on",
-  planModeLocked = false,
+  orchestrationMode = "approval_required",
   disabled = false,
-  onSpecChange,
-  onRiskModeChange,
-  onPlanApprovalChange,
+  onModeChange,
+  onOrchestrationModeChange,
   onAddImages,
 }: ComposerModeMenuProps) {
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [modeMenuOpen, setModeMenuOpen] = useState(false);
-  const [planApprovalDialogOpen, setPlanApprovalDialogOpen] = useState(false);
+  const [orchestrationApprovalDialogOpen, setOrchestrationApprovalDialogOpen] = useState(false);
   const [rollDirection, setRollDirection] = useState(1);
-  const openPlanApprovalDialogAfterMenuCloseRef = useRef(false);
+  const openOrchestrationApprovalDialogAfterMenuCloseRef = useRef(false);
   const addMenuTriggerRef = useRef<HTMLButtonElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const previousModeRef = useRef<(typeof modeOptions)[number]["value"] | null>(null);
   const reduceMotion = useReducedMotion();
-  const selectedMode = specRequested ? "plan" : riskMode;
+  const selectedMode = behaviorMode === "plan" ? "plan" : riskMode;
   const selectedOption = modeOptions.find((option) => option.value === selectedMode) ?? modeOptions[0];
-  const selectedPlanApproval = planApprovalOptions.find((option) => option.value === planApproval) ?? planApprovalOptions[0];
+  const selectedOrchestrationApproval = orchestrationApprovalOptions.find((option) => option.value === orchestrationMode) ?? orchestrationApprovalOptions[0];
   const isFullAccess = selectedMode === "full_access";
 
   useEffect(() => {
@@ -102,15 +98,13 @@ export default function ComposerModeMenu({
   }, [selectedMode]);
 
   const selectMode = (value: (typeof modeOptions)[number]["value"]) => {
-    if (planModeLocked && value !== "plan") return;
     const currentIndex = modeOptions.findIndex((option) => option.value === selectedMode);
     const nextIndex = modeOptions.findIndex((option) => option.value === value);
     setRollDirection(nextIndex >= currentIndex ? 1 : -1);
     if (value === "plan") {
-      onSpecChange(true);
+      onModeChange({ behaviorMode: "plan", riskMode });
     } else {
-      onSpecChange(false);
-      onRiskModeChange?.(value);
+      onModeChange({ behaviorMode: "execute", riskMode: value });
     }
     setModeMenuOpen(false);
   };
@@ -135,9 +129,9 @@ export default function ComposerModeMenu({
         open={addMenuOpen}
         onOpenChange={setAddMenuOpen}
         onOpenChangeComplete={(open) => {
-          if (open || !openPlanApprovalDialogAfterMenuCloseRef.current) return;
-          openPlanApprovalDialogAfterMenuCloseRef.current = false;
-          setPlanApprovalDialogOpen(true);
+          if (open || !openOrchestrationApprovalDialogAfterMenuCloseRef.current) return;
+          openOrchestrationApprovalDialogAfterMenuCloseRef.current = false;
+          setOrchestrationApprovalDialogOpen(true);
         }}
       >
         <PopoverTrigger
@@ -190,9 +184,9 @@ export default function ComposerModeMenu({
             <div className="px-3 pb-1.5 pt-0.5 text-[12px] font-semibold text-muted-foreground">Flow</div>
             <button
               type="button"
-              aria-label={`编排审批设置，当前：${selectedPlanApproval.label}`}
+              aria-label={`编排审批设置，当前：${selectedOrchestrationApproval.label}`}
               onClick={() => {
-                openPlanApprovalDialogAfterMenuCloseRef.current = true;
+                openOrchestrationApprovalDialogAfterMenuCloseRef.current = true;
                 setAddMenuOpen(false);
               }}
               className="flex min-h-12 w-full items-center gap-3 rounded-xl px-3 py-2 text-left transition-colors hover:bg-ui-control-hover focus-visible:bg-ui-control-hover focus-visible:outline-none"
@@ -204,11 +198,11 @@ export default function ComposerModeMenu({
                 <span className="flex items-center gap-2">
                   <span className="text-[14px] font-medium text-foreground">编排审批设置</span>
                   <span className="rounded-md bg-ui-control px-1.5 py-0.5 text-[10px] font-semibold leading-none text-foreground">
-                    {selectedPlanApproval.label}
+                    {selectedOrchestrationApproval.label}
                   </span>
                 </span>
                 <span className="mt-0.5 block truncate text-[12px] leading-4 text-muted-foreground">
-                  {selectedPlanApproval.description}
+                  {selectedOrchestrationApproval.description}
                 </span>
               </span>
             </button>
@@ -252,14 +246,13 @@ export default function ComposerModeMenu({
         >
           {modeOptions.map((option) => {
             const Icon = option.icon;
-            const optionLocked = planModeLocked && option.value !== "plan";
             return (
               <button
                 key={option.value}
                 type="button"
                 aria-label={`${option.label}：${option.description}`}
                 aria-pressed={selectedMode === option.value}
-                disabled={disabled || optionLocked}
+                disabled={disabled}
                 onClick={() => selectMode(option.value)}
                 className={`flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-left transition-colors hover:bg-ui-control-hover disabled:cursor-not-allowed disabled:opacity-45 ${
                   selectedMode === option.value ? "bg-ui-control" : ""
@@ -277,22 +270,22 @@ export default function ComposerModeMenu({
         </PopoverContent>
       </Popover>
 
-      <Dialog open={planApprovalDialogOpen} onOpenChange={setPlanApprovalDialogOpen}>
+      <Dialog open={orchestrationApprovalDialogOpen} onOpenChange={setOrchestrationApprovalDialogOpen}>
         <DialogContent className="sm:max-w-[480px]">
           <DialogHeader>
             <DialogTitle>编排审批设置</DialogTitle>
             <DialogDescription>只控制编排计划是否需要批准，与 Agent 执行权限无关。</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2 py-1">
-            {planApprovalOptions.map((option) => (
+            {orchestrationApprovalOptions.map((option) => (
               <button
                 key={option.value}
                 type="button"
                 aria-label={option.label}
-                aria-pressed={planApproval === option.value}
+                aria-pressed={orchestrationMode === option.value}
                 onClick={() => {
-                  onPlanApprovalChange?.(option.value);
-                  setPlanApprovalDialogOpen(false);
+                  onOrchestrationModeChange?.(option.value);
+                  setOrchestrationApprovalDialogOpen(false);
                 }}
                 className="flex min-h-16 items-center gap-3 rounded-xl border border-border px-3 py-2 text-left transition-colors hover:bg-ui-control-hover"
               >
@@ -300,7 +293,7 @@ export default function ComposerModeMenu({
                   <span className="block text-sm font-semibold">{option.label}</span>
                   <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{option.description}</span>
                 </span>
-                {planApproval === option.value ? <Check className="size-4 shrink-0" /> : null}
+                {orchestrationMode === option.value ? <Check className="size-4 shrink-0" /> : null}
               </button>
             ))}
           </div>

@@ -25,7 +25,7 @@ async function withClient(
     desktopBridge,
     holderName: "Verify",
     flowId: "flow-a",
-    getAgentSessionId: () => "session-a",
+    getAgentRunId: () => "session-a",
     getScratchDir: () => "/tmp/scratch",
     ...ctxOverrides,
   });
@@ -105,7 +105,7 @@ describe("browser MCP server", () => {
     desktopBridge.connect({ send: () => {} });
     desktopBridge.acquireLease("session-other", "Frontend", "flow-other");
 
-    await withClient(desktopBridge, { getAgentSessionId: () => "session-a" }, async (client) => {
+    await withClient(desktopBridge, { getAgentRunId: () => "session-a" }, async (client) => {
       const result = await client.callTool({ name: "browser_snapshot", arguments: {} });
       const parsed = jsonResult(result as any);
       expect(parsed).toEqual({ ok: false, error: { code: "BROWSER_BUSY", message: expect.stringContaining("Frontend") } });
@@ -118,7 +118,7 @@ describe("browser MCP server", () => {
     desktopBridge.acquireLease("session-a", "Verify", "flow-a");
     desktopBridge.reclaimLease();
 
-    await withClient(desktopBridge, { getAgentSessionId: () => "session-a" }, async (client) => {
+    await withClient(desktopBridge, { getAgentRunId: () => "session-a" }, async (client) => {
       const result = await client.callTool({ name: "browser_snapshot", arguments: {} });
       const parsed = jsonResult(result as any);
       expect(parsed).toEqual({ ok: false, error: { code: "BROWSER_LEASE_REVOKED", message: expect.any(String) } });

@@ -41,8 +41,7 @@ function activeFlow(id: string): SquadFlow {
     description: '',
     type: 'full',
     status: 'active',
-    has_active_execution: true,
-    current_stage: null,
+    has_active_agent_run: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
   };
@@ -93,7 +92,7 @@ describe('AppUpdateButton', () => {
   it('does not warn for an active flow that is waiting for user input', async () => {
     const user = userEvent.setup();
     const bridge = installBridge(readyState);
-    useFlowStore.setState({ flows: [{ ...activeFlow('f1'), has_active_execution: false, is_streaming: false }] });
+    useFlowStore.setState({ flows: [{ ...activeFlow('f1'), status: 'idle', has_active_agent_run: false }] });
 
     render(<AppUpdateButton />);
 

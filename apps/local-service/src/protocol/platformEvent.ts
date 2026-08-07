@@ -6,12 +6,12 @@ import { config } from "../config.js";
 export const PLATFORM_EVENT_TYPES = [
   "expert_result",
   "expert_message",
-  "plan_feedback",
-  "spec_requested",
-  "spec_run",
+  "flow_mode",
+  "orchestration_feedback",
+  "orchestration_resolved",
   "decision_answered",
   "decision_cancelled",
-  "plan_approved",
+  "plan_resolved",
   "turn_recovery",
   "guide",
   "browser_comment",
@@ -45,14 +45,14 @@ const eventOpeningTag = /<squadflow\b((?:[^">]|"[^"]*")*)>/giu;
 const eventClosingTag = "</squadflow>";
 const eventTypes = new Set<string>(PLATFORM_EVENT_TYPES);
 const allowedAttrs: Record<PlatformEventType, ReadonlySet<string>> = {
-  expert_result: new Set(["task"]),
-  expert_message: new Set(["expert", "session"]),
-  plan_feedback: new Set(),
-  spec_requested: new Set(),
-  spec_run: new Set(),
+  expert_result: new Set(["task", "session", "run"]),
+  expert_message: new Set(["session", "run"]),
+  flow_mode: new Set(["behavior", "risk", "orchestration"]),
+  orchestration_feedback: new Set(),
+  orchestration_resolved: new Set(),
   decision_answered: new Set(),
   decision_cancelled: new Set(),
-  plan_approved: new Set(),
+  plan_resolved: new Set(),
   turn_recovery: new Set(),
   guide: new Set(),
   browser_comment: new Set(["n", "url", "label", "selector"]),
@@ -144,8 +144,8 @@ function assertAttrs(type: PlatformEventType, attrs: Record<string, string>) {
     if (!value) throw new Error(`Platform event attribute cannot be empty: ${name}`);
   }
   if (type === "expert_result" && !attrs.task) throw new Error("expert_result requires task");
-  if (type === "expert_message" && (!attrs.expert || !attrs.session)) {
-    throw new Error("expert_message requires expert and session");
+  if (type === "expert_message" && !attrs.session) {
+    throw new Error("expert_message requires session");
   }
   if (type === "browser_comment") {
     const markerNumber = Number(attrs.n);

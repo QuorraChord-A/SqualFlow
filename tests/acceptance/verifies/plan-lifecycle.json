@@ -1,0 +1,1 @@
+{"id":"plan-lifecycle","description":"计划版本与审批","assertions":["卡片统一显示计划并能查看当前与历史版本","审批、拒绝和修改只作用于精确修订，新修订不继承旧审批","计划解决后创建新的 Leader Run，不自动产生 Task 或 Expert"]}

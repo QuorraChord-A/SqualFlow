@@ -15,8 +15,8 @@ function jsonResult(result: { content: Array<{ type: string; text: string }> }) 
 
 const actor: ExpertTaskActorScope = {
   flowId: "flow-a",
-  flowExpertId: "fexp-coder-a",
-  agentSessionId: "ags-coder-a",
+  agentSessionId: "fexp-coder-a",
+  agentRunId: "ags-coder-a",
 };
 
 function task(overrides: Partial<ExpertTask> = {}): ExpertTask {
@@ -28,7 +28,7 @@ function task(overrides: Partial<ExpertTask> = {}): ExpertTask {
     active_form: "Implementing the feature",
     assignment: {
       expert_id: "exp-coder",
-      flow_expert_id: actor.flowExpertId,
+      agent_session_id: actor.agentSessionId,
       display_name: "阿码",
     },
     status: "in_progress",
@@ -113,11 +113,11 @@ describe("expert task MCP server", () => {
     });
   });
 
-  it("does not pass a model-supplied FlowExpert or Flow scope to the store", async () => {
+  it("does not pass a model-supplied AgentSession or Flow scope to the store", async () => {
     const getMyTask = vi.fn<ExpertTaskStorePort["getMyTask"]>(() => task());
     const handlers = createExpertTaskToolHandlers(fakeStore({ getMyTask }), { getActorScope: () => actor });
 
-    await expect(handlers.getMyTask({ task_id: "task-a", flow_expert_id: "fexp-other" } as any)).rejects.toThrow();
+    await expect(handlers.getMyTask({ task_id: "task-a", agent_session_id: "fexp-other" } as any)).rejects.toThrow();
     expect(getMyTask).not.toHaveBeenCalled();
   });
 
@@ -173,9 +173,9 @@ describe("expert task MCP server", () => {
     for (const mutation of [
       { owner: "exp-other" },
       { flow_id: "flow-other" },
-      { flow_expert_id: "fexp-other" },
+      { agent_session_id: "fexp-other" },
       { dependency_task_ids: ["task-other"] },
-      { agent_session_id: "ags-other" },
+      { agent_run_id: "ags-other" },
     ]) {
       await expect(handlers.updateMyTask({ task_id: "task-a", ...mutation } as any)).rejects.toThrow();
     }
@@ -198,8 +198,8 @@ describe("expert task MCP server", () => {
     });
     expect(updateMyTask).toHaveBeenCalledWith(expect.objectContaining({
       flowId: actor.flowId,
-      flowExpertId: actor.flowExpertId,
       agentSessionId: actor.agentSessionId,
+      agentRunId: actor.agentRunId,
       taskId: "task-a",
       expectedRevision: 3,
     }));

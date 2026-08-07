@@ -1,0 +1,1 @@
+{"id":"guide-queued-message","description":"把一条队列消息引导给当前 Leader Run","params":["message"],"steps":["确认 Leader 正在运行并把 {message} 加入队列","对该队列项点击引导","等待引导回执并重新读取无障碍树"],"verify":["该队列项不再停留在待发送列表","聊天时间线以引导消息展示该内容","引导没有创建另一条普通消息副本"]}

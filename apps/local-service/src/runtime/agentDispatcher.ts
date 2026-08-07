@@ -1,101 +1,73 @@
 import { randomUUID } from "node:crypto";
 import type { Store } from "../db/store.js";
-import { isExpertRuntimeEnabled, readAgentRuntimeConfigSnapshot } from "../config/agentRuntimeConfig.js";
 import type { EventBus } from "../ws/eventBus.js";
+import { isExpertRuntimeEnabled, readAgentRuntimeConfigSnapshot } from "../config/agentRuntimeConfig.js";
 import type {
   ExpertConversationFinishedEvent,
   ExpertRuntime,
   ExpertTaskFinishedEvent,
 } from "./expertRuntime.js";
-import { publishWorkRunEvent } from "../domain/workRun.js";
-import { capturePersistentChangeBaseline } from "./changeBaseline.js";
 
 export type AgentDispatcher = {
   dispatchAgent: (input: {
     flowId: string;
-    taskId: string | null;
-    expertId: string;
+    taskId: string;
+    agentDefinitionId: string;
     prompt?: string;
-    resumeAgentSessionId: string;
   }) => Promise<{
-    agent_session_id: string;
-    flow_expert_id?: string;
+    agent_run_id: string;
+    agent_session_id?: string;
     status: string;
-    expert_id?: string;
+    agent_definition_id?: string;
     task_id?: string | null;
-    work_run_id?: string | null;
-    task?: {
-      task_id: string;
-      work_run_id: string;
-      subject: string;
-      description: string;
-      active_form: string;
-      progress: string | null;
-      status: string;
-      expert_id: string | null;
-      flow_expert_id: string | null;
-      agent_session_id: string | null;
-      revision: number;
-    };
+    task?: Record<string, unknown>;
     error?: string;
   }>;
   sendMessage: (input: {
     flowId: string;
-    workRunId?: string;
-    expertId: string;
-    content: string;
-    summary?: string;
+    agentSessionId: string;
+    taskId?: string;
+    message: string;
   }) => Promise<{
     accepted: boolean;
+    agent_run_id?: string;
     message_id?: string;
     error?: { code: string; message: string };
   }>;
-  cancelAgent: (input: {
-    flowId: string;
-    workRunId: string;
-    taskId: string;
-    agentSessionId: string;
-  }) => Promise<{
-    ok: true;
-    task: NonNullable<ReturnType<Store["getTask"]>>;
-    agentSession: NonNullable<ReturnType<Store["getAgentSession"]>>;
-  } | {
-    ok: false;
-    error: { code: string; message: string };
+  cancelAgent: (input: { flowId: string; agentSessionId: string }) => Promise<{
+    ok: boolean;
+    idempotent?: boolean;
+    agentRun?: NonNullable<ReturnType<Store["getAgentRun"]>>;
+    error?: { code: string; message: string };
   }>;
 };
 
-function parseTaskMetadata(metadataJson: string | null): { planRevisionId: string | null; resourceKeys: string[] } {
-  try {
-    const parsed = JSON.parse(metadataJson ?? "{}") as Record<string, unknown>;
-    const planRevisionId = typeof parsed.plan_revision_id === "string" ? parsed.plan_revision_id : null;
-    const resourceKeys = Array.isArray(parsed.resource_keys)
-      ? parsed.resource_keys.filter((key): key is string => typeof key === "string")
-      : [];
-    return { planRevisionId, resourceKeys };
-  } catch {
-    return { planRevisionId: null, resourceKeys: [] };
-  }
+function taskProjection(store: Store, task: NonNullable<ReturnType<Store["getTask"]>>) {
+  return {
+    task_id: task.id,
+    flow_id: task.flowId,
+    subject: task.title,
+    description: task.description,
+    active_form: task.activeForm,
+    progress: task.progress,
+    status: task.status,
+    revision: task.revision,
+    recommended_agent_definition_id: task.recommendedAgentDefinitionId,
+    agent_session_id: task.agentSessionId,
+    blocked_by: store.listTaskDependencies(task.id),
+  };
 }
 
-async function recordLeaderInputAudit(
-  store: Store,
-  session: NonNullable<ReturnType<Store["getAgentSession"]>>,
-  summary = "",
-) {
+async function auditLeaderMessage(store: Store, runId: string, message: string) {
+  const run = store.getAgentRun(runId);
+  if (!run) return "";
   const messageId = `msg-leader-${Date.now()}-${randomUUID().slice(0, 6)}`;
   store.appendEventLog({
-    flowId: session.flowId,
-    workRunId: session.workRunId,
-    taskId: session.taskId,
-    agentSessionId: session.id,
-    eventType: "agent_session.leader_message",
-    payload: {
-      message_id: messageId,
-      summary,
-      created_at: new Date().toISOString(),
-      delivery_status: "accepted",
-    },
+    flowId: run.flowId,
+    taskId: run.taskId,
+    agentRunId: run.id,
+    eventType: "agent_run.leader_message",
+    payload: { message_id: messageId, message, created_at: new Date().toISOString() },
   });
   return messageId;
 }
@@ -103,396 +75,182 @@ async function recordLeaderInputAudit(
 export function createAgentDispatcher(input: {
   store: Store;
   eventBus: EventBus;
-  expertRuntime: Pick<ExpertRuntime, "runTask">
-    & Partial<Pick<ExpertRuntime, "runConversation" | "sendMessage" | "cancelTask">>;
+  expertRuntime: Pick<ExpertRuntime, "runTask" | "runConversation" | "sendMessage" | "cancelAgent">;
   onTaskFinished?: (event: ExpertTaskFinishedEvent) => Promise<void> | void;
   onConversationFinished?: (event: ExpertConversationFinishedEvent) => Promise<void> | void;
 }): AgentDispatcher {
+  async function definitionIsEnabled(agentDefinitionId: string) {
+    const definition = input.store.getAgentDefinition(agentDefinitionId);
+    if (!definition || definition.role === "leader") return false;
+    return isExpertRuntimeEnabled((await readAgentRuntimeConfigSnapshot()).roles, definition.role);
+  }
+
+  async function publishSession(sessionId: string, runId: string | null) {
+    const session = input.store.getAgentSession(sessionId);
+    if (!session) return;
+    await input.eventBus.publish(session.flowId, {
+      type: "agent_session:event",
+      flow_id: session.flowId,
+      data: {
+        agent_session_id: session.id,
+        agent_definition_id: session.agentDefinitionId,
+        display_name: session.displayName,
+        active_agent_run_id: runId,
+      },
+    });
+  }
+
+  async function publishRun(runId: string) {
+    const run = input.store.getAgentRun(runId);
+    if (!run) return;
+    await input.eventBus.publish(run.flowId, {
+      type: "agent_run:event",
+      flow_id: run.flowId,
+      data: {
+        agent_run_id: run.id,
+        agent_session_id: run.agentSessionId,
+        task_id: run.taskId,
+        trigger_kind: run.triggerKind,
+        status: run.status,
+        error_message: run.errorMessage,
+      },
+    });
+  }
+
   return {
     async dispatchAgent(dispatch) {
-      if (!dispatch.taskId) {
-        return { agent_session_id: "", status: "failed", error: "task_id is required in V1" };
-      }
-
-      const flow = input.store.getFlow(dispatch.flowId);
-      if (!flow) return { agent_session_id: "", status: "failed", error: "flow not found" };
-      const expert = input.store.getExpert(dispatch.expertId);
-      if (!expert) return { agent_session_id: "", status: "failed", error: "expert not found" };
       const task = input.store.getTask(dispatch.taskId);
-      if (!task || task.flowId !== dispatch.flowId) {
-        return { agent_session_id: "", status: "failed", error: "task not found" };
+      const definition = input.store.getAgentDefinition(dispatch.agentDefinitionId);
+      if (!task || task.flowId !== dispatch.flowId) return { agent_run_id: "", status: "failed", error: "TASK_NOT_FOUND" };
+      if (!definition || definition.role === "leader") return { agent_run_id: "", status: "failed", error: "AGENT_DEFINITION_NOT_FOUND" };
+      if (!(await definitionIsEnabled(definition.id))) return { agent_run_id: "", status: "failed", error: "AGENT_DEFINITION_DISABLED" };
+      if (!["pending", "in_progress", "blocked"].includes(task.status)) {
+        return { agent_run_id: "", status: "failed", error: "TASK_NOT_DISPATCHABLE" };
       }
-      if (task.expertId && task.expertId !== dispatch.expertId) {
-        return { agent_session_id: "", status: "failed", error: "expert does not match task expert" };
-      }
-
-      const workRun = input.store.getWorkRun(task.workRunId);
-      if (!workRun || !["ready", "executing"].includes(workRun.status)) {
-        return { agent_session_id: "", status: "failed", error: workRun?.status === "interrupted" ? "WORK_RUN_INTERRUPTED" : "WORK_RUN_NOT_EXECUTABLE" };
-      }
-      if (!input.store.listTaskDependencies(task.id).every((dependencyId) =>
-        input.store.getTask(dependencyId)?.status === "completed"
-      )) {
-        return { agent_session_id: "", status: "failed", error: "task is blocked by incomplete dependencies" };
-      }
-      const taskMetadata = parseTaskMetadata(task.metadataJson);
-      if (taskMetadata.planRevisionId) {
-        const run = input.store.getPlanRunForRevision(taskMetadata.planRevisionId);
-        if (run?.status === "paused_for_feedback") {
-          return { agent_session_id: "", status: "failed", error: "plan is paused for feedback" };
-        }
-      }
-      if (taskMetadata.resourceKeys.length > 0) {
-        const activeStatuses = new Set(["in_progress"]);
-        const conflicting = input.store.listWorkRunTasks(task.workRunId).some((candidate) =>
-          candidate.id !== task.id
-          && activeStatuses.has(candidate.status)
-          && parseTaskMetadata(candidate.metadataJson).resourceKeys.some((key) => taskMetadata.resourceKeys.includes(key))
-        );
-        if (conflicting) {
-          return { agent_session_id: "", status: "failed", error: "resource conflict with a running task" };
-        }
-      }
-      const runtimeConfigSnapshot = await readAgentRuntimeConfigSnapshot();
-      if (!isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role)) {
-        return { agent_session_id: "", status: "failed", error: "expert is disabled" };
+      if (!input.store.listTaskDependencies(task.id).every((dependencyId) => input.store.getTask(dependencyId)?.status === "completed")) {
+        return { agent_run_id: "", status: "failed", error: "TASK_DEPENDENCY_BLOCKED" };
       }
 
-      const currentSession = task.agentSessionId ? input.store.getAgentSession(task.agentSessionId) : null;
-      if (currentSession?.status === "streaming" || currentSession?.status === "queued") {
-        return { agent_session_id: "", status: "failed", error: "running sessions must use send_message" };
-      }
-      let resumeSessionId: string | undefined;
-      if (dispatch.resumeAgentSessionId) {
-        const oldSession = input.store.getAgentSession(dispatch.resumeAgentSessionId);
-        if (
-          !oldSession
-          || oldSession.flowId !== dispatch.flowId
-          || oldSession.taskId !== task.id
-          || oldSession.expertId !== dispatch.expertId
-          || !["completed", "failed", "interrupted"].includes(oldSession.status)
-          || !oldSession.sessionId
-        ) {
-          return { agent_session_id: "", status: "failed", error: "invalid resume_agent_session_id" };
-        }
-        resumeSessionId = oldSession.sessionId;
-      } else if (currentSession?.sessionId && ["completed", "failed", "interrupted"].includes(currentSession.status)) {
-        // A FlowExpert owns the provider conversation. A subsequent explicit
-        // dispatch starts a new execution record while resuming that same
-        // provider session by default.
-        resumeSessionId = currentSession.sessionId;
-      }
-
-      if (!["pending", "in_progress"].includes(task.status)) {
-        return { agent_session_id: "", status: "failed", error: "task is not dispatchable" };
-      }
-
-      const flowExpert = input.store.getOrCreateFlowExpert({
+      const session = input.store.createAgentSession({
         flowId: dispatch.flowId,
-        expertId: dispatch.expertId,
+        agentDefinitionId: definition.id,
       });
-      const started = input.store.startAgentDispatch({
+      if (!session) return { agent_run_id: "", status: "failed", error: "AGENT_SESSION_CREATE_FAILED" };
+      const run = input.store.createAgentRun({
         flowId: dispatch.flowId,
+        agentSessionId: session.id,
         taskId: task.id,
-        expertId: dispatch.expertId,
-        flowExpertId: flowExpert.id,
-        displayName: flowExpert.displayName,
-        resumeFromAgentSessionId: dispatch.resumeAgentSessionId || currentSession?.id || undefined,
+        triggerKind: "dispatch",
+        modelInput: { prompt: dispatch.prompt ?? "" },
       });
-      if (!started) {
-        return { agent_session_id: "", status: "failed", error: "task could not be started" };
-      }
-
-      const { agentSession, task: startedTask, flowExpert: updatedFlowExpert } = started;
-      capturePersistentChangeBaseline({
-        store: input.store,
-        flowId: dispatch.flowId,
-        sourceAgentSessionId: agentSession.id,
-        workRunId: startedTask.workRunId,
-        rootPath: workRun.workRootPath,
-      });
-      const executingWorkRun = input.store.getWorkRun(startedTask.workRunId);
-      if (executingWorkRun) await publishWorkRunEvent(input.eventBus, executingWorkRun);
-      await input.eventBus.publish(dispatch.flowId, {
-        type: "task:event",
-        flow_id: dispatch.flowId,
-        data: {
-          task_id: startedTask.id,
-          work_run_id: startedTask.workRunId,
-          expert_id: startedTask.expertId,
-          flow_expert_id: startedTask.flowExpertId,
-          status: startedTask.status,
-        },
-      });
-      await input.eventBus.publish(dispatch.flowId, {
-        type: "session:event",
-        flow_id: dispatch.flowId,
-        data: {
-          event: "created",
-          agent_session_id: agentSession.id,
-          work_run_id: agentSession.workRunId,
-          task_id: agentSession.taskId,
-          expert_id: agentSession.expertId,
-          flow_expert_id: agentSession.flowExpertId,
-          display_name: agentSession.displayName,
-          status: agentSession.status,
-        },
-      });
-      await input.eventBus.publish(dispatch.flowId, {
-        type: "flow_expert:event",
-        flow_id: dispatch.flowId,
-        data: {
-          event: "updated",
-          flow_expert_id: flowExpert.id,
-          agent_session_id: agentSession.id,
-          expert_id: flowExpert.expertId,
-          display_name: flowExpert.displayName,
-          status: updatedFlowExpert.status,
-        },
-      });
-      await recordLeaderInputAudit(
-        input.store,
-        agentSession,
-        currentSession ? "继续执行" : "首次派发",
-      );
+      if (!run) return { agent_run_id: "", status: "failed", error: "AGENT_RUN_CREATE_FAILED" };
+      input.store.bindTaskAgentSession(task.id, session.id);
+      await publishSession(session.id, run.id);
+      await publishRun(run.id);
+      await auditLeaderMessage(input.store, run.id, dispatch.prompt ?? "");
 
       void input.expertRuntime.runTask({
         flowId: dispatch.flowId,
-        workRunId: startedTask.workRunId,
-        taskId: startedTask.id,
-        flowExpertId: flowExpert.id,
-        agentSessionId: agentSession.id,
+        taskId: task.id,
+        agentSessionId: session.id,
+        agentRunId: run.id,
         prompt: dispatch.prompt || undefined,
-        resumeSessionId: flowExpert.sdkSessionId ?? resumeSessionId,
+        resumeSessionId: undefined,
       }).catch(async (error) => {
         const message = error instanceof Error ? error.message : String(error);
-        input.store.updateAgentSessionStatus(agentSession.id, "failed");
-        input.store.updateFlowExpertStatus(flowExpert.id, "failed");
-        void input.eventBus.publish(dispatch.flowId, {
-          type: "task:event",
-          flow_id: dispatch.flowId,
-          data: {
-            task_id: startedTask.id,
-            work_run_id: startedTask.workRunId,
-            expert_id: startedTask.expertId,
-            flow_expert_id: startedTask.flowExpertId,
-            agent_session_id: agentSession.id,
-            status: input.store.getTask(startedTask.id)?.status ?? startedTask.status,
-            session_status: "failed",
-            error_message: message,
-          },
-        });
-        await input.onTaskFinished?.({
-          flowId: dispatch.flowId,
-          workRunId: startedTask.workRunId,
-          taskId: startedTask.id,
-          agentSessionId: agentSession.id,
-          expertId: dispatch.expertId,
-          status: "failed",
-          taskStatus: input.store.getTask(startedTask.id)?.status ?? startedTask.status,
-          turnOutcome: "errored",
-          summary: message,
-          error: message,
-          artifactRefs: [],
-          filesChanged: [],
-          metrics: {},
-          completedAt: new Date().toISOString(),
-        });
+        input.store.updateAgentRunStatus(run.id, "failed", message);
+        await publishRun(run.id);
       });
 
       return {
-        agent_session_id: agentSession.id,
-        flow_expert_id: flowExpert.id,
-        status: agentSession.status,
-        expert_id: agentSession.expertId,
-        task_id: agentSession.taskId,
-        work_run_id: agentSession.workRunId,
-        task: {
-          task_id: startedTask.id,
-          work_run_id: startedTask.workRunId,
-          subject: startedTask.title,
-          description: startedTask.description,
-          active_form: startedTask.activeForm,
-          progress: startedTask.progress,
-          status: startedTask.status,
-          expert_id: startedTask.expertId,
-          flow_expert_id: startedTask.flowExpertId,
-          agent_session_id: startedTask.agentSessionId,
-          revision: startedTask.revision,
-        },
+        agent_run_id: run.id,
+        agent_session_id: session.id,
+        status: run.status,
+        agent_definition_id: definition.id,
+        task_id: task.id,
+        task: taskProjection(input.store, input.store.getTask(task.id)!),
       };
     },
 
     async sendMessage(message) {
-      const flow = input.store.getFlow(message.flowId);
-      const expert = input.store.getExpert(message.expertId);
-      const workRun = message.workRunId ? input.store.getWorkRun(message.workRunId) : undefined;
-      if (!flow || (workRun && (workRun.flowId !== message.flowId || workRun.status === "interrupted"))) {
-        return {
-          accepted: false,
-          error: { code: "WORK_RUN_NOT_EXECUTABLE", message: "Expert conversation is not available for this WorkRun" },
-        };
+      const session = input.store.getAgentSession(message.agentSessionId);
+      if (!session || session.flowId !== message.flowId || session.role !== "expert") {
+        return { accepted: false, error: { code: "AGENT_SESSION_NOT_FOUND", message: "AgentSession 不存在或不属于当前 Flow" } };
       }
-      if (!expert || expert.role === "leader") {
-        return {
-          accepted: false,
-          error: { code: "EXPERT_NOT_FOUND", message: `expert not found: ${message.expertId}` },
-        };
+      if (!(await definitionIsEnabled(session.agentDefinitionId))) {
+        return { accepted: false, error: { code: "AGENT_DEFINITION_DISABLED", message: "AgentDefinition 当前不可用" } };
       }
-      const runtimeConfigSnapshot = await readAgentRuntimeConfigSnapshot();
-      if (!isExpertRuntimeEnabled(runtimeConfigSnapshot.roles, expert.role)) {
-        return {
-          accepted: false,
-          error: { code: "EXPERT_DISABLED", message: `expert is disabled: ${message.expertId}` },
-        };
-      }
-
-      const flowExpert = input.store.getOrCreateFlowExpert({
-        flowId: message.flowId,
-        expertId: message.expertId,
-      });
-      const sessions = input.store.listAgentSessions(message.flowId)
-        .filter((session) => session.flowExpertId === flowExpert.id)
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-      const runningSession = sessions.find((session) => session.status === "streaming");
-      if (runningSession) {
-        const accepted = input.expertRuntime.sendMessage?.({
-          flowId: message.flowId,
-          flowExpertId: flowExpert.id,
-          agentSessionId: runningSession.id,
-          content: message.content,
-        }) ?? false;
-        if (!accepted) {
-          return {
-            accepted: false,
-            error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "runtime delivery channel unavailable" },
-          };
+      if (message.taskId) {
+        const task = input.store.getTask(message.taskId);
+        if (!task || task.flowId !== message.flowId) {
+          return { accepted: false, error: { code: "TASK_NOT_FOUND", message: "Task 不存在或不属于当前 Flow" } };
         }
-        const messageId = await recordLeaderInputAudit(input.store, runningSession, message.summary);
-        return { accepted: true, message_id: messageId };
       }
-      if (sessions.some((session) => session.status === "queued")) {
-        return {
+      const active = input.store.getActiveAgentRun(session.id);
+      if (active) {
+        const accepted = input.expertRuntime.sendMessage({
+          flowId: message.flowId,
+          agentSessionId: session.id,
+          agentRunId: active.id,
+          content: message.message,
+        });
+        if (!accepted) return {
           accepted: false,
-          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "Expert conversation is still starting" },
+          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "当前 AgentRun 暂时无法接收引导消息" },
+        };
+        return {
+          accepted: true,
+          agent_run_id: active.id,
+          message_id: await auditLeaderMessage(input.store, active.id, message.message),
         };
       }
 
-      const previousSession = sessions[0] ?? null;
-      if (!input.expertRuntime.runConversation) {
-        return {
-          accepted: false,
-          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "Expert conversation runtime is unavailable" },
-        };
-      }
-      const agentSession = input.store.createAgentSession({
+      const run = input.store.createAgentRun({
         flowId: message.flowId,
-        workRunId: message.workRunId ?? null,
-        taskId: null,
-        expertId: message.expertId,
-        flowExpertId: flowExpert.id,
-        sessionId: flowExpert.sdkSessionId,
-        displayName: flowExpert.displayName,
-        resumeFromAgentSessionId: previousSession?.id,
-        status: "queued",
+        agentSessionId: session.id,
+        taskId: message.taskId ?? null,
+        triggerKind: "leader_message",
+        modelInput: { message: message.message },
       });
-      if (!agentSession) {
-        return {
-          accepted: false,
-          error: { code: "RUNTIME_DELIVERY_UNAVAILABLE", message: "taskless Expert session could not be created" },
-        };
-      }
-      input.store.updateFlowExpertStatus(flowExpert.id, "queued");
-      await input.eventBus.publish(message.flowId, {
-        type: "session:event",
-        flow_id: message.flowId,
-        data: {
-          event: "created",
-          agent_session_id: agentSession.id,
-          work_run_id: agentSession.workRunId,
-          task_id: null,
-          expert_id: agentSession.expertId,
-          flow_expert_id: agentSession.flowExpertId,
-          display_name: agentSession.displayName,
-          status: agentSession.status,
-        },
-      });
-      await input.eventBus.publish(message.flowId, {
-        type: "flow_expert:event",
-        flow_id: message.flowId,
-        data: {
-          event: "updated",
-          flow_expert_id: flowExpert.id,
-          agent_session_id: agentSession.id,
-          expert_id: flowExpert.expertId,
-          display_name: flowExpert.displayName,
-          status: "queued",
-        },
-      });
-      const messageId = await recordLeaderInputAudit(input.store, agentSession, message.summary);
+      if (!run) return { accepted: false, error: { code: "AGENT_RUN_CREATE_FAILED", message: "无法创建新的 AgentRun" } };
+      if (message.taskId) input.store.bindTaskAgentSession(message.taskId, session.id);
+      await publishSession(session.id, run.id);
+      await publishRun(run.id);
+      const messageId = await auditLeaderMessage(input.store, run.id, message.message);
       void input.expertRuntime.runConversation({
         flowId: message.flowId,
-        workRunId: message.workRunId,
-        flowExpertId: flowExpert.id,
-        agentSessionId: agentSession.id,
-        expertId: message.expertId,
-        content: message.content,
-        resumeSessionId: flowExpert.sdkSessionId ?? previousSession?.sessionId ?? undefined,
+        taskId: message.taskId,
+        agentSessionId: session.id,
+        agentRunId: run.id,
+        content: message.message,
+        resumeSessionId: session.providerSessionId ?? undefined,
       }).catch(async (error) => {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        input.store.updateAgentSessionStatus(agentSession.id, "failed");
-        input.store.updateFlowExpertStatus(flowExpert.id, "failed");
-        await input.onConversationFinished?.({
-          flowId: message.flowId,
-          workRunId: message.workRunId,
-          agentSessionId: agentSession.id,
-          expertId: message.expertId,
-          status: "failed",
-          turnOutcome: "errored",
-          summary: errorMessage,
-          error: errorMessage,
-          artifactRefs: [],
-          filesChanged: [],
-          metrics: {},
-          completedAt: new Date().toISOString(),
-        });
+        const failure = error instanceof Error ? error.message : String(error);
+        input.store.updateAgentRunStatus(run.id, "failed", failure);
+        await publishRun(run.id);
       });
-      return { accepted: true, message_id: messageId };
+      return { accepted: true, agent_run_id: run.id, message_id: messageId };
     },
 
     async cancelAgent(message) {
       const session = input.store.getAgentSession(message.agentSessionId);
-      const task = input.store.getTask(message.taskId);
-      if (
-        !session
-        || !task
-        || session.flowId !== message.flowId
-        || session.workRunId !== message.workRunId
-        || session.taskId !== task.id
-        || task.agentSessionId !== session.id
-        || task.status !== "in_progress"
-        || session.status !== "streaming"
-      ) {
-        return { ok: false, error: { code: "TASK_NOT_RUNNING", message: "task is not attached to a running AgentSession" } };
+      if (!session || session.flowId !== message.flowId || session.role !== "expert") {
+        return { ok: false, error: { code: "AGENT_SESSION_NOT_FOUND", message: "AgentSession 不存在或不属于当前 Flow" } };
       }
-      if (!input.expertRuntime.cancelTask) {
-        return { ok: false, error: { code: "UNSUPPORTED_V1", message: "expert runtime does not support task cancellation" } };
+      const active = input.store.getActiveAgentRun(session.id);
+      if (!active) {
+        return { ok: true, idempotent: true, agentRun: input.store.listAgentSessionRuns(session.id).at(-1) };
       }
-      const cancelled = await input.expertRuntime.cancelTask({
+      const cancelled = await input.expertRuntime.cancelAgent({
         flowId: message.flowId,
-        workRunId: message.workRunId,
-        taskId: message.taskId,
-        agentSessionId: message.agentSessionId,
+        agentSessionId: session.id,
+        agentRunId: active.id,
       });
-      if (!cancelled) {
-        return { ok: false, error: { code: "TASK_CANCEL_FAILED", message: "running AgentSession could not be interrupted" } };
-      }
-      const cancelledTask = input.store.getTask(message.taskId);
-      const cancelledSession = input.store.getAgentSession(message.agentSessionId);
-      if (!cancelledTask || !cancelledSession) {
-        return { ok: false, error: { code: "TASK_CANCEL_FAILED", message: "task cancellation did not persist" } };
-      }
-      return { ok: true, task: cancelledTask, agentSession: cancelledSession };
+      if (!cancelled) return { ok: false, error: { code: "AGENT_CANCEL_FAILED", message: "无法取消当前 AgentRun" } };
+      if (input.store.getAgentRun(active.id)?.status !== "cancelled") input.store.updateAgentRunStatus(active.id, "cancelled");
+      await publishRun(active.id);
+      await publishSession(session.id, null);
+      return { ok: true, idempotent: false, agentRun: input.store.getAgentRun(active.id) };
     },
   };
 }

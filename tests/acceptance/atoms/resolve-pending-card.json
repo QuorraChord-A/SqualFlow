@@ -1,0 +1,1 @@
+{"id":"resolve-pending-card","description":"处理当前精确待用户动作卡片","params":["cardType","resolution","feedback"],"steps":["定位最新的 {cardType} 卡片并核对其版本","选择 {resolution}","如界面提供反馈框则填写 {feedback}","确认并重新读取无障碍树"],"verify":["该精确版本显示 {resolution}","旧版本和其他类型的待用户动作没有被一并处理"]}

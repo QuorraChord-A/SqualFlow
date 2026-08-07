@@ -45,7 +45,7 @@ export type BrowserToolRuntimeContext = {
   desktopBridge: DesktopBridge;
   holderName: string;
   flowId: string;
-  getAgentSessionId: () => string | null;
+  getAgentRunId: () => string | null;
   getScratchDir: () => string;
 };
 
@@ -71,9 +71,9 @@ function desktopUnavailableText() {
 export function createBrowserToolHandlers(ctx: BrowserToolRuntimeContext) {
   const withLease = async (fn: () => Promise<Record<string, unknown>>): Promise<string> => {
     if (!ctx.desktopBridge.isConnected()) return desktopUnavailableText();
-    const agentSessionId = ctx.getAgentSessionId();
-    if (!agentSessionId) return fail("NO_ACTIVE_TURN", "浏览器工具只能在活动任务中使用。");
-    const lease = ctx.desktopBridge.acquireLease(agentSessionId, ctx.holderName, ctx.flowId);
+    const agentRunId = ctx.getAgentRunId();
+    if (!agentRunId) return fail("NO_ACTIVE_TURN", "浏览器工具只能在活动任务中使用。");
+    const lease = ctx.desktopBridge.acquireLease(agentRunId, ctx.holderName, ctx.flowId);
     if (!lease.ok) return leaseErrorText(lease.heldBy, lease.reason);
     try {
       return ok(await fn());
@@ -184,7 +184,7 @@ export function createBrowserMcpServer(handlers: ReturnType<typeof createBrowser
     "browser_screenshot",
     {
       title: "browser_screenshot",
-      description: "Capture a screenshot of the current page, saved to this AgentSession's scratch directory. Returns the file path.",
+      description: "Capture a screenshot of the current page, saved to this AgentRun's scratch directory. Returns the file path.",
       inputSchema: BrowserScreenshotInput,
     },
     async () => ({ content: [{ type: "text", text: await handlers.screenshot() }] }),

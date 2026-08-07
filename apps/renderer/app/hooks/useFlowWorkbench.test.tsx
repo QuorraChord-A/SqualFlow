@@ -42,10 +42,9 @@ describe("useFlowWorkbench", () => {
 
     resolveFetch(new Response(JSON.stringify({
       team: { leader: null, experts: [] },
-      artifacts: { specs: [], files: [], reports: [] },
+      artifacts: { plans: [], files: [], reports: [], change_sets: [] },
       tasks: [],
       files: { root_path: null, tree_available: false },
-      reviews: [],
     }), { status: 200, headers: { "Content-Type": "application/json" } }));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));

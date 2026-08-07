@@ -194,48 +194,45 @@ function toolStateFromPart(state: "input-streaming" | "input-available" | "outpu
   }
 }
 
-function parseDecisionCardId(output: unknown): string {
+function parseDecisionRequestId(output: unknown): string {
   const parsed = parseMcpOutput(output);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const obj = parsed as Record<string, unknown>;
-    if (typeof obj.decision_card_id === "string" && obj.decision_card_id) {
-      return obj.decision_card_id;
-    }
+    if (typeof obj.decision_request_id === "string") return obj.decision_request_id;
     if (obj.result && typeof obj.result === "object") {
       const result = obj.result as Record<string, unknown>;
-      return typeof result.card_id === "string" ? result.card_id : "";
+      return typeof result.decision_request_id === "string" ? result.decision_request_id : "";
     }
-    if (typeof obj.card_id === "string") return obj.card_id;
   }
   return "";
 }
 
-function parseSpecCard(output: unknown): { specApprovalId: string } | null {
+function parsePlanCard(output: unknown): { planApprovalId: string } | null {
   const parsed = parseMcpOutput(output);
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const obj = parsed as Record<string, unknown>;
-    if (typeof obj.spec_approval_id === "string" && obj.spec_approval_id) {
-      return { specApprovalId: obj.spec_approval_id };
+    if (typeof obj.plan_approval_id === "string" && obj.plan_approval_id) {
+      return { planApprovalId: obj.plan_approval_id };
     }
-    const approval = obj.spec_approval;
+    const approval = obj.plan_approval;
     if (approval && typeof approval === "object") {
-      const specApprovalId = (approval as Record<string, unknown>).spec_approval_id;
-      if (typeof specApprovalId === "string" && specApprovalId) {
-        return { specApprovalId };
+      const planApprovalId = (approval as Record<string, unknown>).plan_approval_id;
+      if (typeof planApprovalId === "string" && planApprovalId) {
+        return { planApprovalId };
       }
     }
   }
   return null;
 }
 
-function parsePlanCard(output: unknown): { planRevisionId: string } | null {
+function parseOrchestrationCard(output: unknown): { orchestrationRevisionId: string } | null {
   const parsed = parseMcpOutput(output);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
   const revision = (parsed as Record<string, unknown>).revision;
   if (!revision || typeof revision !== "object") return null;
   const row = revision as Record<string, unknown>;
-  const id = typeof row.plan_revision_id === "string" ? row.plan_revision_id : typeof row.id === "string" ? row.id : "";
-  return id ? { planRevisionId: id } : null;
+  const id = typeof row.orchestration_revision_id === "string" ? row.orchestration_revision_id : typeof row.id === "string" ? row.id : "";
+  return id ? { orchestrationRevisionId: id } : null;
 }
 
 /** Preserve the normalized MCP envelope while parsing current string payloads. */
@@ -274,14 +271,14 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
       .filter((part): part is Extract<TimelineInputPart, { type: "text" }> => part.type === "text")
       .map((part) => part.text)
       .join("");
-    const decisionCardId = message.metadata?.decisionCardId;
-    const decisionStatus = message.metadata?.decisionStatus;
-    if (decisionCardId && (decisionStatus === "resolved" || decisionStatus === "cancelled")) {
+    const decisionRequestId = message.metadata?.decisionRequestId;
+    const decisionRequestStatus = message.metadata?.decisionRequestStatus;
+    if (decisionRequestId && (decisionRequestStatus === "resolved" || decisionRequestStatus === "cancelled")) {
       return [{
-        id: `${message.id}:decision-card-result:${decisionCardId}`,
-        type: "decision-card-result",
-        cardId: decisionCardId,
-        status: decisionStatus,
+        id: `${message.id}:decision-request-result:${decisionRequestId}`,
+        type: "decision-request-result",
+        requestId: decisionRequestId,
+        status: decisionRequestStatus,
         collapseState: "shallow",
       }];
     }
@@ -365,12 +362,12 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
     if (part.state !== "output-available" || !currentGroup) return;
 
     if (isMcpToolNamed(part.toolName, "ask_user", part.mcp?.tool)) {
-      const cardId = parseDecisionCardId(part.output);
-      if (cardId && !currentGroup.cards.some((card) => card.type === "decision-card" && card.cardId === cardId)) {
+      const requestId = parseDecisionRequestId(part.output);
+      if (requestId && !currentGroup.cards.some((card) => card.type === "decision-request" && card.requestId === requestId)) {
         currentGroup.cards.push({
-          id: `${message.id}:decision-card:${cardId}`,
-          type: "decision-card",
-          cardId,
+          id: `${message.id}:decision-request:${requestId}`,
+          type: "decision-request",
+          requestId,
           toolCallId: part.toolCallId,
         });
       }
@@ -378,12 +375,12 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
     }
 
     if (isMcpToolNamed(part.toolName, "create_plan", part.mcp?.tool)) {
-      const specCard = parseSpecCard(part.output);
-      if (specCard) {
+      const planCard = parsePlanCard(part.output);
+      if (planCard) {
         currentGroup.cards.push({
-          id: `${message.id}:spec-card:${specCard.specApprovalId}`,
-          type: "spec-card",
-          specApprovalId: specCard.specApprovalId,
+          id: `${message.id}:plan-card:${planCard.planApprovalId}`,
+          type: "plan-card",
+          planApprovalId: planCard.planApprovalId,
           toolCallId: part.toolCallId,
         });
       }
@@ -391,11 +388,11 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
     }
 
     if (isMcpToolNamed(part.toolName, "submit_orchestration_plan", part.mcp?.tool)) {
-      const planCard = parsePlanCard(part.output);
+      const planCard = parseOrchestrationCard(part.output);
       if (planCard) currentGroup.cards.push({
         id: `tool-card:${part.toolCallId}:orchestration-plan`,
-        type: "plan-card",
-        planRevisionId: planCard.planRevisionId,
+        type: "orchestration-card",
+        orchestrationRevisionId: planCard.orchestrationRevisionId,
         toolCallId: part.toolCallId,
       });
     }
@@ -527,7 +524,7 @@ export function buildTranscriptTimeline({ message, activity }: BuildOptions): Tr
   )) {
     const anchorId = [...blocks]
       .reverse()
-      .find((block) => block.type !== "decision-card" && block.type !== "spec-card")?.id ?? "initial";
+      .find((block) => block.type !== "decision-request" && block.type !== "plan-card" && block.type !== "orchestration-card")?.id ?? "initial";
     blocks.push({ id: `${message.id}:thinking-after:${anchorId}`, type: "thinking" });
   }
 

@@ -1,0 +1,1 @@
+{"id":"collect-scenario-evidence","description":"记录场景结果和用户体验证据","params":["scenarioId"],"steps":["为 {scenarioId} 获取最终无障碍树和必要截图","记录 PASS、FAIL 或 BLOCKED","记录失败重现步骤、严重度、日志索引和用户体验意见"],"verify":["证据目录存在该场景结果","结果没有用内部接口成功替代 UI 成功"]}

@@ -22,20 +22,19 @@ export const EXPERT_TASK_MCP_TOOL_NAMES = [
  */
 export type ExpertTaskActorScope = {
   flowId: string;
-  flowExpertId: string;
   agentSessionId: string;
+  agentRunId: string;
 };
 
 export type ExpertTaskAssignment = {
-  expert_id: string;
-  flow_expert_id: string;
+  agent_definition_id: string;
+  agent_session_id: string;
   display_name?: string;
 };
 
 /** The read-only Task projection exposed to an Expert. */
 export type ExpertTask = {
   task_id: string;
-  work_run_id: string;
   subject: string;
   description: string;
   active_form: string;

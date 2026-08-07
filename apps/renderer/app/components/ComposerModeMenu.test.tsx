@@ -6,18 +6,58 @@ import ComposerModeMenu from "./ComposerModeMenu";
 function renderMenu(overrides: Partial<React.ComponentProps<typeof ComposerModeMenu>> = {}) {
   return render(
     <ComposerModeMenu
-      specRequested={false}
+      behaviorMode="execute"
       riskMode="auto_edit"
-      planApproval="on"
-      onSpecChange={vi.fn()}
-      onRiskModeChange={vi.fn()}
-      onPlanApprovalChange={vi.fn()}
+      orchestrationMode="approval_required"
+      onModeChange={vi.fn()}
+      onOrchestrationModeChange={vi.fn()}
       {...overrides}
     />,
   );
 }
 
 describe("ComposerModeMenu", () => {
+  it("enters Plan without changing risk and leaves Plan only through an explicit execution selection", async () => {
+    const user = userEvent.setup();
+    const onModeChange = vi.fn();
+    const { rerender } = render(
+      <ComposerModeMenu
+        behaviorMode="execute"
+        riskMode="full_access"
+        orchestrationMode="approval_required"
+        onModeChange={onModeChange}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "执行模式：完全访问" }));
+    await user.click(screen.getByRole("button", { name: /计划模式：/ }));
+    expect(onModeChange).toHaveBeenCalledWith({ behaviorMode: "plan", riskMode: "full_access" });
+
+    rerender(
+      <ComposerModeMenu
+        behaviorMode="plan"
+        riskMode="full_access"
+        orchestrationMode="approval_required"
+        onModeChange={onModeChange}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "执行模式：计划模式" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "执行模式：计划模式" }));
+    await user.click(screen.getByRole("button", { name: /自动编辑：/ }));
+    expect(onModeChange).toHaveBeenLastCalledWith({ behaviorMode: "execute", riskMode: "auto_edit" });
+  });
+
+  it("changes orchestration approval independently from execution behavior and risk", async () => {
+    const user = userEvent.setup();
+    const onModeChange = vi.fn();
+    const onOrchestrationModeChange = vi.fn();
+    renderMenu({ onModeChange, onOrchestrationModeChange });
+    await user.click(screen.getByRole("button", { name: "添加消息选项" }));
+    await user.click(screen.getByRole("button", { name: "编排审批设置，当前：需要批准" }));
+    await user.click(await screen.findByRole("button", { name: "自动执行" }));
+    expect(onOrchestrationModeChange).toHaveBeenCalledWith("automatic");
+    expect(onModeChange).not.toHaveBeenCalled();
+  });
+
   it("opens approval settings only after the add popover has fully closed", async () => {
     const user = userEvent.setup();
     renderMenu();

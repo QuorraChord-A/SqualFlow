@@ -1,0 +1,1 @@
+{"id":"open-workbench-section","description":"打开右侧工作台指定功能","params":["section"],"steps":["展开右侧工作台","选择 {section}","等待内容加载并重新读取无障碍树"],"verify":["工作台显示 {section} 对应内容","快速切换后没有残留前一个 Flow 的数据"]}

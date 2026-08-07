@@ -1,0 +1,1 @@
+{"id":"switch-flow-mode","description":"切换当前 Flow 行为或风险模式","params":["mode"],"steps":["打开输入框执行模式菜单","选择 {mode}","关闭菜单并重新读取无障碍树"],"verify":["输入框模式入口显示 {mode}","现有 Run、Task 和队列顺序没有仅因切换模式而变化"]}

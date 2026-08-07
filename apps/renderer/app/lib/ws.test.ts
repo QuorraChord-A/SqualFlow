@@ -73,7 +73,7 @@ describe("SquadFlowWs subscriptions", () => {
       event: "flow_switch_failed",
       durationMs: 12.6,
       errorCode: "SESSION_HISTORY_UNAVAILABLE",
-      leaderAgentSessionId: "agent-1",
+      leaderAgentRunId: "agent-1",
     });
 
     await vi.waitFor(() => expect(socket.sent.length).toBeGreaterThan(0));
@@ -83,7 +83,7 @@ describe("SquadFlowWs subscriptions", () => {
       event: "flow_switch_failed",
       duration_ms: 13,
       error_code: "SESSION_HISTORY_UNAVAILABLE",
-      leader_agent_session_id: "agent-1",
+      leader_agent_run_id: "agent-1",
     });
   });
 

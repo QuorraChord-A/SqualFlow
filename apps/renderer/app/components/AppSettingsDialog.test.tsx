@@ -7,7 +7,7 @@ import type { DesktopUpdateBridge, DesktopUpdateState } from "../lib/desktopUpda
 
 const apiMocks = vi.hoisted(() => ({
   fetchAgentRuntimeConfig: vi.fn(),
-  fetchExperts: vi.fn(),
+  fetchAgentDefinitions: vi.fn(),
   createAgentRuntimeConfig: vi.fn(),
   deleteAgentRuntimeConfig: vi.fn(),
   checkAgentRuntimeLocalAuth: vi.fn(),
@@ -101,7 +101,7 @@ describe("AppSettingsDialog", () => {
   beforeEach(() => {
     delete window.squadflowDesktopUpdate;
     Object.values(apiMocks).forEach((mock) => mock.mockReset());
-    apiMocks.fetchExperts.mockResolvedValue([]);
+    apiMocks.fetchAgentDefinitions.mockResolvedValue([]);
     clipboardWriteText.mockClear();
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: clipboardWriteText } });
     useThemeStore.setState({ theme: "system", resolvedTheme: "dark" });
@@ -155,7 +155,7 @@ describe("AppSettingsDialog", () => {
   it("opens the full system prompt as a styled Markdown document", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
-    apiMocks.fetchExperts.mockResolvedValue([{
+    apiMocks.fetchAgentDefinitions.mockResolvedValue([{
       id: "exp-leader",
       role: "leader",
       name: "Leader",

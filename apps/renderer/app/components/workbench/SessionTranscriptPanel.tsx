@@ -5,12 +5,12 @@ import type { UIMessage } from "ai";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
 import { ConversationEmptyState } from "@/components/ai-elements-official/conversation";
 import { PromptInlineContent } from "@/components/ai-elements-official/prompt-inline-entity";
-import { CheckIcon, CopyIcon, FileText, MessageSquareIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, MessageSquareIcon } from "lucide-react";
 import { wsClient } from "../../lib/ws";
 import type { TranscriptTimelineItem, WsInMessage } from "../../lib/ws";
 import {
+  extractMessageAgentRunId,
   extractMessageAgentSessionId,
-  extractMessageFlowExpertId,
 } from "./transcriptUtils";
 import TranscriptTimelineRenderer from "./transcript/TranscriptTimelineRenderer";
 import ThinkingIndicator from "./transcript/ThinkingIndicator";
@@ -20,9 +20,8 @@ import {
 } from "./transcript/buildTranscriptTimeline";
 import type { TimelineInputMessage, TranscriptActivity, TranscriptBlock } from "./transcript/types";
 import type { TurnTiming } from "./transcript/buildTranscriptTimeline";
-import type { DecisionCardData, SpecCardState } from "../../hooks/useDashboardData";
+import type { DecisionRequestCardData, PlanCardState } from "../../hooks/useDashboardData";
 import type { OrchestrationPlanView } from "../../types/orchestration";
-import type { WorkRunReview } from "../../hooks/useFlowWorkbench";
 import { useAppPreferencesStore } from "../../stores/useAppPreferencesStore";
 import type { BrowserElementAttachment } from "../../stores/useBrowserSelectionStore";
 import type { MessageImageAttachment } from "../../types/messageAttachments";
@@ -41,234 +40,33 @@ import { isMcpToolNamed, parseMcpOutput } from "./transcript/mcpToolPresenters";
 
 export interface SessionTranscriptPanelProps {
   flowId: string | null;
-  agentSessionId: string | null;
-  flowExpertId?: string | null;
+  agentRunId: string | null;
+  agentSessionId?: string | null;
   readonly: boolean;
   emptyTitle?: string;
   emptyDescription?: string;
-  decisionCards?: DecisionCardData[];
-  decisionCardStatuses?: Record<string, "pending" | "resolved" | "cancelled">;
-  decisionCardAnswers?: Record<string, Record<string, string | string[]>>;
-  specCards?: Record<string, SpecCardState>;
+  decisionRequests?: DecisionRequestCardData[];
+  planCards?: Record<string, PlanCardState>;
   orchestrationPlans?: OrchestrationPlanView[];
   optimisticMessages?: UIMessage[];
   followRequestKey?: number;
   isAwaitingResponse?: boolean;
-  allowInferredAgentSessionId?: boolean;
+  allowInferredAgentRunId?: boolean;
   stableTranscriptChannel?: boolean;
   className?: string;
   bottomOverlayHeight?: number;
-  onOpenSpec?: (specRevisionId: string, title: string) => void;
-  onOpenPlan?: (plan: OrchestrationPlanView) => void;
-  onApprovePlan?: (plan: OrchestrationPlanView) => void;
+  onOpenPlan?: (planRevisionId: string, title: string) => void;
+  onOpenOrchestration?: (plan: OrchestrationPlanView) => void;
+  onApproveOrchestration?: (plan: OrchestrationPlanView) => void;
   showReasoning?: boolean;
-  reviews?: WorkRunReview[];
-  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
   workspaceRootPath?: string | null;
 }
-
-export type WorkRunDisplay = {
-  id: string;
-  triggerMessageId: string;
-  status: "ready" | "executing" | "waiting_user" | "interrupted" | "completed" | "failed" | "cancelled" | string;
-  startedAt: string | null;
-  activeStartedAt: string | null;
-  activeDurationMs: number;
-  completedAt: string | null;
-  workRootPath?: string | null;
-  specRequested?: boolean;
-  revision?: number;
-  executionStartedAt?: string | null;
-};
 
 export function shouldBatchTranscriptEvent(event: TranscriptEvent) {
   return event.type === "text-delta"
     || event.type === "reasoning-delta"
     || event.type.startsWith("tool-");
-}
-
-type WorkRunReviewFile = WorkRunReview["files"][number];
-type WorkRunReviewLine = WorkRunReviewFile["lines"][number];
-const REVIEW_DIFF_PREVIEW_UNLOCK_MS = 1_000;
-const REVIEW_DIFF_PREVIEW_LOCK_MS = 750;
-
-function DiffPreviewLine({ line }: { line: WorkRunReviewLine }) {
-  const marker = line.kind === "added" ? "+" : line.kind === "removed" ? "-" : " ";
-  const rowClassName = line.kind === "added"
-    ? "bg-emerald-500/10 text-foreground dark:bg-emerald-500/14"
-    : line.kind === "removed"
-      ? "bg-red-500/10 text-foreground dark:bg-red-500/14"
-      : "text-muted-foreground";
-  const markerClassName = line.kind === "added"
-    ? "text-emerald-600 dark:text-emerald-400"
-    : line.kind === "removed"
-      ? "text-red-600 dark:text-red-400"
-      : "text-muted-foreground";
-
-  return (
-    <div className={`grid min-w-[680px] grid-cols-[52px_52px_28px_minmax(420px,1fr)] text-[12px] leading-6 ${rowClassName}`}>
-      <span className="select-none border-r border-border/45 px-2 text-right text-muted-foreground/80">{line.old_line ?? ""}</span>
-      <span className="select-none border-r border-border/45 px-2 text-right text-muted-foreground/80">{line.new_line ?? ""}</span>
-      <span className={`select-none px-2 font-semibold ${markerClassName}`}>{marker}</span>
-      <code className="whitespace-pre px-2 font-mono text-current">{line.text || " "}</code>
-    </div>
-  );
-}
-
-function FileDiffPreview({ file }: { file: WorkRunReviewFile }) {
-  return (
-    <div
-      data-testid="review-file-diff-preview"
-      className="absolute inset-x-0 bottom-full z-40 mb-2 overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-2xl"
-    >
-      <div className="flex items-center gap-3 border-b border-border/70 px-3 py-2 text-xs">
-        <span className="min-w-0 flex-1 truncate font-medium" title={file.path}>{file.path}</span>
-        <span className="shrink-0 text-emerald-400">{file.additions === null ? "—" : `+${file.additions}`}</span>
-        <span className="shrink-0 text-red-400">{file.deletions === null ? "—" : `-${file.deletions}`}</span>
-      </div>
-      <div data-testid="review-file-diff-preview-body" className="max-h-72 overflow-auto bg-background/90 font-mono">
-        {file.lines.length > 0 ? (
-          file.lines.map((line, index) => (
-            <DiffPreviewLine key={`${file.path}:${index}:${line.kind}`} line={line} />
-          ))
-        ) : (
-          <div className="px-3 py-6 text-center text-xs text-muted-foreground">暂无可预览 diff</div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function WorkRunReviewSummaryCard({
-  review,
-  onOpenReview,
-}: {
-  review: WorkRunReview;
-  onOpenReview?: (workRunId: string) => void;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [previewPath, setPreviewPath] = useState<string | null>(null);
-  const hoveredPreviewPathRef = useRef<string | null>(null);
-  const previewUnlockedRef = useRef(false);
-  const unlockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const visibleFiles = expanded ? review.files : review.files.slice(0, 3);
-  const remaining = Math.max(0, review.files.length - visibleFiles.length);
-
-  const clearUnlockTimer = useCallback(() => {
-    if (unlockTimerRef.current) {
-      clearTimeout(unlockTimerRef.current);
-      unlockTimerRef.current = null;
-    }
-  }, []);
-
-  const clearLockTimer = useCallback(() => {
-    if (lockTimerRef.current) {
-      clearTimeout(lockTimerRef.current);
-      lockTimerRef.current = null;
-    }
-  }, []);
-
-  const handlePreviewEnter = useCallback((path: string) => {
-    hoveredPreviewPathRef.current = path;
-    clearLockTimer();
-
-    if (previewUnlockedRef.current) {
-      setPreviewPath(path);
-      return;
-    }
-
-    clearUnlockTimer();
-    unlockTimerRef.current = setTimeout(() => {
-      if (hoveredPreviewPathRef.current !== path) return;
-      previewUnlockedRef.current = true;
-      setPreviewPath(path);
-    }, REVIEW_DIFF_PREVIEW_UNLOCK_MS);
-  }, [clearLockTimer, clearUnlockTimer]);
-
-  const handlePreviewLeave = useCallback((path: string) => {
-    if (hoveredPreviewPathRef.current === path) {
-      hoveredPreviewPathRef.current = null;
-    }
-    setPreviewPath((current) => (current === path ? null : current));
-    clearUnlockTimer();
-    clearLockTimer();
-    lockTimerRef.current = setTimeout(() => {
-      if (hoveredPreviewPathRef.current !== null) return;
-      previewUnlockedRef.current = false;
-    }, REVIEW_DIFF_PREVIEW_LOCK_MS);
-  }, [clearLockTimer, clearUnlockTimer]);
-
-  useEffect(() => () => {
-    clearUnlockTimer();
-    clearLockTimer();
-  }, [clearLockTimer, clearUnlockTimer]);
-
-  return (
-    <div data-testid="work-run-review-summary" className="my-4 w-full max-w-[820px] rounded-lg border border-border bg-card/70 shadow-sm">
-      <div className="flex items-center gap-3 border-b border-border/70 px-4 py-3">
-        <div className="flex size-9 shrink-0 items-center justify-center rounded-md border border-border bg-background">
-          <FileText className="size-4 text-muted-foreground" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold">
-            {review.status === "ready"
-              ? `已编辑 ${review.totals.files} 个文件`
-              : review.status === "empty"
-                ? "本次 WorkRun 无文件变化"
-                : review.status === "skipped"
-                  ? "本次 WorkRun 未生成完整 Diff"
-                  : "本次 WorkRun Diff 生成失败"}
-          </div>
-          {review.status === "ready" ? (
-            <>
-              <div className="mt-0.5 flex gap-2 text-xs">
-                <span className="text-emerald-400">+{review.totals.additions}</span>
-                <span className="text-red-400">-{review.totals.deletions}</span>
-              </div>
-              {review.reason ? <div className="mt-1 truncate text-xs text-muted-foreground">{review.reason}</div> : null}
-            </>
-          ) : review.reason ? <div className="mt-0.5 truncate text-xs text-muted-foreground">{review.reason}</div> : null}
-        </div>
-        <button
-          type="button"
-          onClick={() => onOpenReview?.(review.work_run_id)}
-          className="shrink-0 cursor-pointer rounded-md border border-border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-muted"
-        >
-          查看全部
-        </button>
-      </div>
-      <div className="divide-y divide-border/70">
-        {visibleFiles.map((file) => (
-          <div
-            key={file.path}
-            data-testid="review-file-row"
-            tabIndex={0}
-            onMouseEnter={() => handlePreviewEnter(file.path)}
-            onMouseLeave={() => handlePreviewLeave(file.path)}
-            onFocus={() => handlePreviewEnter(file.path)}
-            onBlur={() => handlePreviewLeave(file.path)}
-            className="relative grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 px-4 py-2 text-xs outline-none transition-colors hover:bg-muted/45 focus-visible:bg-muted/45"
-          >
-            <span className="truncate text-muted-foreground" title={file.path}>{file.path}</span>
-            <span className="text-emerald-400">{file.additions === null ? "—" : `+${file.additions}`}</span>
-            <span className="text-red-400">{file.deletions === null ? "—" : `-${file.deletions}`}</span>
-            {previewPath === file.path ? <FileDiffPreview file={file} /> : null}
-          </div>
-        ))}
-      </div>
-      {remaining > 0 || expanded ? (
-        <button
-          type="button"
-          onClick={() => setExpanded((value) => !value)}
-          className="w-full cursor-pointer px-4 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/60"
-        >
-          {expanded ? "收起文件" : `再显示 ${remaining} 个文件`}
-        </button>
-      ) : null}
-    </div>
-  );
 }
 
 function ScrollToBottomButton({ bottomOffset = 16 }: { bottomOffset?: number }) {
@@ -379,11 +177,11 @@ function messageText(message: UIMessage): string {
     .join("");
 }
 
-function isDecisionCardResultMessage(message: UIMessage): boolean {
-  const metadata = (message as { metadata?: { decisionCardId?: unknown; decisionStatus?: unknown } }).metadata;
+function isDecisionRequestResultMessage(message: UIMessage): boolean {
+  const metadata = (message as { metadata?: { decisionRequestId?: unknown; decisionRequestStatus?: unknown } }).metadata;
   return message.role === "user"
-    && typeof metadata?.decisionCardId === "string"
-    && (metadata.decisionStatus === "resolved" || metadata.decisionStatus === "cancelled");
+    && typeof metadata?.decisionRequestId === "string"
+    && (metadata.decisionRequestStatus === "resolved" || metadata.decisionRequestStatus === "cancelled");
 }
 
 function timelineInputMessage(message: UIMessage): TimelineInputMessage {
@@ -391,7 +189,7 @@ function timelineInputMessage(message: UIMessage): TimelineInputMessage {
 }
 
 function guideMessageBlock(message: UIMessage, options: { showStatusLabel?: boolean } = {}): TranscriptBlock | null {
-  if (isDecisionCardResultMessage(message)) return null;
+  if (isDecisionRequestResultMessage(message)) return null;
   const rawText = messageText(message);
   const text = rawText;
   if (!text) return null;
@@ -593,32 +391,28 @@ function UserMessage({
 }
 
 function useCardMaps(
-  decisionCards: DecisionCardData[] | undefined,
-  decisionCardStatuses: Record<string, "pending" | "resolved" | "cancelled"> | undefined,
-  decisionCardAnswers: Record<string, Record<string, string | string[]>> | undefined,
-  specCards: Record<string, SpecCardState> | undefined,
+  decisionRequests: DecisionRequestCardData[] | undefined,
+  planCards: Record<string, PlanCardState> | undefined,
   orchestrationPlans: OrchestrationPlanView[] | undefined,
 ) {
   return useMemo(() => {
-    const decisionCardsById = new Map<string, DecisionCardData>();
-    if (decisionCards) {
-      for (const card of decisionCards) {
-        const status = decisionCardStatuses?.[card.card_id] || card.status;
-        const answers = decisionCardAnswers?.[card.card_id] ?? card.answers;
-        decisionCardsById.set(card.card_id, { ...card, status, answers });
+    const decisionRequestsById = new Map<string, DecisionRequestCardData>();
+    if (decisionRequests) {
+      for (const card of decisionRequests) {
+        decisionRequestsById.set(card.decision_request_id, card);
       }
     }
 
-    const specCardsById = new Map<string, SpecCardState>();
-    if (specCards) {
-      for (const [id, card] of Object.entries(specCards)) {
-        if (card) specCardsById.set(id, card);
+    const planCardsById = new Map<string, PlanCardState>();
+    if (planCards) {
+      for (const [id, card] of Object.entries(planCards)) {
+        if (card) planCardsById.set(id, card);
       }
     }
 
-    const plansByRevisionId = new Map((orchestrationPlans ?? []).map((plan) => [plan.revision.plan_revision_id, plan]));
-    return { decisionCardsById, specCardsById, plansByRevisionId };
-  }, [decisionCards, decisionCardStatuses, decisionCardAnswers, orchestrationPlans, specCards]);
+    const plansByRevisionId = new Map((orchestrationPlans ?? []).map((plan) => [plan.revision.orchestration_revision_id, plan]));
+    return { decisionRequestsById, planCardsById, plansByRevisionId };
+  }, [decisionRequests, orchestrationPlans, planCards]);
 }
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -627,9 +421,9 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-function submittedPlanRevisionId(output: unknown): string | null {
+function submittedOrchestrationRevisionId(output: unknown): string | null {
   const revision = recordValue(recordValue(parseMcpOutput(output))?.revision);
-  const revisionId = revision?.plan_revision_id ?? revision?.id;
+  const revisionId = revision?.orchestration_revision_id ?? revision?.id;
   return typeof revisionId === "string" && revisionId ? revisionId : null;
 }
 
@@ -638,8 +432,8 @@ function submissionToolMatchesPlan(
   plan: OrchestrationPlanView,
 ) {
   if (!isMcpToolNamed(tool.toolName, "submit_orchestration_plan", tool.mcp?.tool)) return false;
-  const revisionId = submittedPlanRevisionId(tool.output);
-  return revisionId === plan.revision.plan_revision_id;
+  const revisionId = submittedOrchestrationRevisionId(tool.output);
+  return revisionId === plan.revision.orchestration_revision_id;
 }
 
 export function hasMatchingPlanToolAnchor(messages: UIMessage[], plan: OrchestrationPlanView) {
@@ -688,8 +482,8 @@ export function reconcileDurablePlanCard(
   const matchedPlan = match.plan;
   const matchedAnchor = match.anchor;
   const hasCard = blocks.some((block) => (
-    block.type === "plan-card"
-    && block.planRevisionId === matchedPlan.revision.plan_revision_id
+    block.type === "orchestration-card"
+    && block.orchestrationRevisionId === matchedPlan.revision.orchestration_revision_id
   ));
 
   return blocks.flatMap((block) => {
@@ -711,8 +505,8 @@ export function reconcileDurablePlanCard(
     if (block.id !== matchedAnchor.blockId || hasCard) return reconciledBlock;
     return [reconciledBlock, {
       id: `tool-card:${matchedAnchor.tool.toolCallId}:orchestration-plan`,
-      type: "plan-card" as const,
-      planRevisionId: matchedPlan.revision.plan_revision_id,
+      type: "orchestration-card" as const,
+      orchestrationRevisionId: matchedPlan.revision.orchestration_revision_id,
       toolCallId: matchedAnchor.tool.toolCallId,
     }];
   });
@@ -736,22 +530,18 @@ function SessionTranscriptContent({
   isLoadingHistory,
   emptyTitle,
   emptyDescription,
-  decisionCards,
-  decisionCardStatuses,
-  decisionCardAnswers,
-  specCards,
+  decisionRequests,
+  planCards,
   orchestrationPlans,
   isAwaitingResponse,
   followRequestKey,
   flowId,
-  onOpenSpec,
   onOpenPlan,
-  onApprovePlan,
+  onOpenOrchestration,
+  onApproveOrchestration,
   activity,
   activityMessageId,
   activeTurnTiming,
-  reviews,
-  onOpenReview,
   onOpenWorkspaceFile,
   expandedDecisionResultIds,
   showReasoning,
@@ -763,22 +553,18 @@ function SessionTranscriptContent({
   isLoadingHistory: boolean;
   emptyTitle: string;
   emptyDescription?: string;
-  decisionCards?: DecisionCardData[];
-  decisionCardStatuses?: Record<string, "pending" | "resolved" | "cancelled">;
-  decisionCardAnswers?: Record<string, Record<string, string | string[]>>;
-  specCards?: Record<string, SpecCardState>;
+  decisionRequests?: DecisionRequestCardData[];
+  planCards?: Record<string, PlanCardState>;
   orchestrationPlans?: OrchestrationPlanView[];
   isAwaitingResponse: boolean;
   followRequestKey?: number;
   flowId: string | null;
-  onOpenSpec?: (specRevisionId: string, title: string) => void;
-  onOpenPlan?: (plan: OrchestrationPlanView) => void;
-  onApprovePlan?: (plan: OrchestrationPlanView) => void;
+  onOpenPlan?: (planRevisionId: string, title: string) => void;
+  onOpenOrchestration?: (plan: OrchestrationPlanView) => void;
+  onApproveOrchestration?: (plan: OrchestrationPlanView) => void;
   activity?: TranscriptActivity | null;
   activityMessageId?: string | null;
   activeTurnTiming?: TurnTiming | null;
-  reviews?: WorkRunReview[];
-  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
   expandedDecisionResultIds: Set<string>;
   showReasoning: boolean;
@@ -787,17 +573,14 @@ function SessionTranscriptContent({
   thinkingLabel?: string | null;
 }) {
   const lastFollowRequestKeyRef = useRef(followRequestKey);
-  const followedPlanRevisionIdsRef = useRef(new Set<string>());
+  const followedOrchestrationRevisionIdsRef = useRef(new Set<string>());
   const { follow, followIfAtBottom, registerThread } = useTranscriptScroll();
-  const { decisionCardsById, specCardsById, plansByRevisionId } = useCardMaps(
-    decisionCards,
-    decisionCardStatuses,
-    decisionCardAnswers,
-    specCards,
+  const { decisionRequestsById, planCardsById, plansByRevisionId } = useCardMaps(
+    decisionRequests,
+    planCards,
     orchestrationPlans,
   );
 
-  const reviewAnchorIds = new Set((reviews ?? []).map((review) => review.anchor_message_id));
   const visiblePresentationItems = presentationItems.flatMap((item): TranscriptPresentationItem[] => {
     if (item.type === "session-boundary" || item.type === "context-compaction") return [item];
     if (item.type === "user-message") {
@@ -805,7 +588,6 @@ function SessionTranscriptContent({
     }
     const messages = item.messages.filter((message) =>
       message.id === activityMessageId
-      || reviewAnchorIds.has(message.id)
       || hasRenderableContent(message, showReasoning)
     );
     return messages.length > 0 ? [{ ...item, messages }] : [];
@@ -813,23 +595,21 @@ function SessionTranscriptContent({
   const visibleMessages = visiblePresentationItems.flatMap((item) =>
     item.type === "user-message" ? [item.message] : item.type === "assistant-turn" ? item.messages : []
   );
-  const renderablePlanRevisionIds = (orchestrationPlans ?? [])
+  const renderableOrchestrationRevisionIds = (orchestrationPlans ?? [])
     .filter((plan) => hasMatchingPlanToolAnchor(visibleMessages, plan))
-    .map((plan) => plan.revision.plan_revision_id);
-  const renderablePlanRevisionKey = renderablePlanRevisionIds.join(":");
+    .map((plan) => plan.revision.orchestration_revision_id);
+  const renderableOrchestrationRevisionKey = renderableOrchestrationRevisionIds.join(":");
 
   const activeAssistantMessage = visibleMessages.find(
     (message) => message.role === "assistant" && message.id === activityMessageId,
   );
   const lastVisibleMessage = visibleMessages.at(-1);
-  const missingPlanAnchors = (orchestrationPlans ?? []).filter((plan) => !hasMatchingPlanToolAnchor(visibleMessages, plan));
-  const anchoredSpecIds = new Set(visibleMessages.flatMap((message) => message.role === "assistant"
+  const missingOrchestrationAnchors = (orchestrationPlans ?? []).filter((plan) => !hasMatchingPlanToolAnchor(visibleMessages, plan));
+  const anchoredPlanIds = new Set(visibleMessages.flatMap((message) => message.role === "assistant"
     ? buildTranscriptTimeline({ message: timelineInputMessage(message), activity: "finished" })
-      .flatMap((block) => block.type === "spec-card" ? [block.specApprovalId] : [])
+      .flatMap((block) => block.type === "plan-card" ? [block.planApprovalId] : [])
     : []));
-  const missingSpecAnchors = [...specCardsById.values()].filter((card) => !anchoredSpecIds.has(card.spec_approval_id));
-  const visibleMessageIds = new Set(visibleMessages.map((message) => message.id));
-  const missingReviewAnchors = (reviews ?? []).filter((review) => !visibleMessageIds.has(review.anchor_message_id));
+  const missingPlanAnchors = [...planCardsById.values()].filter((card) => !anchoredPlanIds.has(card.plan_approval_id));
   const showThinkingIndicator =
     isAwaitingResponse && !activeAssistantMessage && lastVisibleMessage?.role !== "assistant";
 
@@ -840,15 +620,15 @@ function SessionTranscriptContent({
   }, [follow, followRequestKey]);
 
   useLayoutEffect(() => {
-    const newlyRenderableRevisionIds = renderablePlanRevisionKey.split(":").filter(Boolean).filter(
-      (revisionId) => !followedPlanRevisionIdsRef.current.has(revisionId),
+    const newlyRenderableRevisionIds = renderableOrchestrationRevisionKey.split(":").filter(Boolean).filter(
+      (revisionId) => !followedOrchestrationRevisionIdsRef.current.has(revisionId),
     );
     if (newlyRenderableRevisionIds.length === 0) return;
     for (const revisionId of newlyRenderableRevisionIds) {
-      followedPlanRevisionIdsRef.current.add(revisionId);
+      followedOrchestrationRevisionIdsRef.current.add(revisionId);
     }
     followIfAtBottom();
-  }, [followIfAtBottom, renderablePlanRevisionKey]);
+  }, [followIfAtBottom, renderableOrchestrationRevisionKey]);
 
   return (
     <>
@@ -870,19 +650,14 @@ function SessionTranscriptContent({
               />
             )}
 
-            {missingPlanAnchors.map((plan) => (
-              <button key={`missing-plan:${plan.revision.plan_revision_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenPlan?.(plan)}>
+            {missingOrchestrationAnchors.map((plan) => (
+              <button key={`missing-orchestration:${plan.revision.orchestration_revision_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenOrchestration?.(plan)}>
                 编排计划缺少 Transcript 锚点，请在右侧查看
               </button>
             ))}
-            {missingSpecAnchors.map((card) => (
-              <button key={`missing-spec:${card.spec_approval_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenSpec?.(card.spec_revision_id, card.file_name)}>
-                Spec 审批缺少 Transcript 锚点，请在右侧查看
-              </button>
-            ))}
-            {missingReviewAnchors.map((review) => (
-              <button key={`missing-review:${review.work_run_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenReview?.(review.work_run_id)}>
-                文件 Review 缺少 Transcript 锚点，请在右侧查看
+            {missingPlanAnchors.map((card) => (
+              <button key={`missing-plan:${card.plan_approval_id}`} type="button" className={styles.historyBoundary} onClick={() => onOpenPlan?.(card.plan_revision_id, card.title)}>
+                计划审批缺少 Transcript 锚点，请在右侧查看
               </button>
             ))}
 
@@ -926,10 +701,10 @@ function SessionTranscriptContent({
                 );
               }
               const blocks = buildTranscriptTimeline({ message: timelineInputMessage(msg), activity: "finished" });
-              const hasDecisionResult = blocks.some((block) => block.type === "decision-card-result");
+              const hasDecisionResult = blocks.some((block) => block.type === "decision-request-result");
               if (hasDecisionResult) {
                 const projectedBlocks = blocks.map((block) =>
-                  block.type === "decision-card-result" && expandedDecisionResultIds.has(block.cardId)
+                  block.type === "decision-request-result" && expandedDecisionResultIds.has(block.requestId)
                     ? { ...block, collapseState: "expanded" as const }
                     : block
                 );
@@ -939,12 +714,12 @@ function SessionTranscriptContent({
                     turnId={msg.id}
                     blocks={projectedBlocks}
                     flowId={flowId ?? ""}
-                    decisionCardsById={decisionCardsById}
-                    specCardsById={specCardsById}
+                    decisionRequestsById={decisionRequestsById}
+                    planCardsById={planCardsById}
                     plansByRevisionId={plansByRevisionId}
-                    onSpecOpen={onOpenSpec ?? (() => {})}
                     onPlanOpen={onOpenPlan ?? (() => {})}
-                    onPlanApprove={onApprovePlan ?? (() => {})}
+                    onOrchestrationOpen={onOpenOrchestration ?? (() => {})}
+                    onOrchestrationApprove={onApproveOrchestration ?? (() => {})}
                     activity="finished"
                     showReasoning={showReasoning}
                     workspaceRootPath={workspaceRootPath}
@@ -981,28 +756,23 @@ function SessionTranscriptContent({
               });
             });
             const renderedBlocks = reconcileDurablePlanCard(blocks, orchestrationPlans ?? []);
-            const reviewForTurn = reviews?.find((review) =>
-              targetMessages.some((message) => message.id === review.anchor_message_id)
-            ) ?? null;
-
             return (
               <TranscriptTimelineRenderer
                 key={item.id}
                 turnId={item.presentationTurnId}
                 blocks={renderedBlocks}
                 flowId={flowId ?? ""}
-                decisionCardsById={decisionCardsById}
-                specCardsById={specCardsById}
+                decisionRequestsById={decisionRequestsById}
+                planCardsById={planCardsById}
                 plansByRevisionId={plansByRevisionId}
-                onSpecOpen={onOpenSpec ?? (() => {})}
                 onPlanOpen={onOpenPlan ?? (() => {})}
-                onPlanApprove={onApprovePlan ?? (() => {})}
+                onOrchestrationOpen={onOpenOrchestration ?? (() => {})}
+                onOrchestrationApprove={onApproveOrchestration ?? (() => {})}
                 activity={activeInGroup ? activity ?? "waiting" : "finished"}
                 turnTiming={rendererTurnTiming}
                 showReasoning={showReasoning}
                 workspaceRootPath={workspaceRootPath}
                 onOpenWorkspaceFile={onOpenWorkspaceFile}
-                beforeFooter={reviewForTurn ? <WorkRunReviewSummaryCard review={reviewForTurn} onOpenReview={onOpenReview} /> : undefined}
                 data-testid="chat-message-assistant"
                 data-transcript-activity={activeInGroup ? activity ?? undefined : undefined}
                 thinkingLabel={activeInGroup ? thinkingLabel ?? undefined : undefined}
@@ -1030,29 +800,25 @@ const EMPTY_OPTIMISTIC_MESSAGES: UIMessage[] = [];
 
 export default function SessionTranscriptPanel({
   flowId,
-  agentSessionId,
-  flowExpertId = null,
+  agentRunId,
+  agentSessionId = null,
   readonly,
   emptyTitle = "暂无消息",
   emptyDescription,
-  decisionCards,
-  decisionCardStatuses,
-  decisionCardAnswers,
-  specCards,
+  decisionRequests,
+  planCards,
   orchestrationPlans,
   optimisticMessages = EMPTY_OPTIMISTIC_MESSAGES,
   followRequestKey,
   isAwaitingResponse = false,
-  allowInferredAgentSessionId = false,
+  allowInferredAgentRunId = false,
   stableTranscriptChannel = false,
   className,
   bottomOverlayHeight,
-  onOpenSpec,
   onOpenPlan,
-  onApprovePlan,
+  onOpenOrchestration,
+  onApproveOrchestration,
   showReasoning: showReasoningOverride,
-  reviews,
-  onOpenReview,
   onOpenWorkspaceFile,
   workspaceRootPath,
 }: SessionTranscriptPanelProps) {
@@ -1064,9 +830,9 @@ export default function SessionTranscriptPanel({
   const [historyLoadVersion, setHistoryLoadVersion] = useState(0);
   const [runtimeTransportLabel, setRuntimeTransportLabel] = useState<string | null>(null);
   const prevFlowIdRef = useRef<string | null>(null);
-  const prevFlowExpertIdRef = useRef<string | null>(null);
   const prevAgentSessionIdRef = useRef<string | null>(null);
-  const lastRealAgentSessionIdRef = useRef<string | null>(null);
+  const prevAgentRunIdRef = useRef<string | null>(null);
+  const lastRealAgentRunIdRef = useRef<string | null>(null);
   const fetchedSessionRef = useRef<string | null>(null);
   const pendingHistoryRequestRef = useRef<string | null>(null);
   const eventFrameRef = useRef<number | null>(null);
@@ -1074,13 +840,13 @@ export default function SessionTranscriptPanel({
   const resyncInFlightRef = useRef<string | null>(null);
   const planRecoveryAttemptsRef = useRef(new Set<string>());
   const activeFlowIdRef = useRef<string | null>(flowId);
-  const activeFlowExpertIdRef = useRef<string | null>(flowExpertId);
   const activeAgentSessionIdRef = useRef<string | null>(agentSessionId);
-  const inferredAgentSessionIdRef = useRef<string | null>(null);
+  const activeAgentRunIdRef = useRef<string | null>(agentRunId);
+  const inferredAgentRunIdRef = useRef<string | null>(null);
 
   activeFlowIdRef.current = flowId;
-  activeFlowExpertIdRef.current = flowExpertId;
-  activeAgentSessionIdRef.current = agentSessionId ?? (allowInferredAgentSessionId ? inferredAgentSessionIdRef.current : null);
+  activeAgentSessionIdRef.current = agentSessionId;
+  activeAgentRunIdRef.current = agentRunId ?? (allowInferredAgentRunId ? inferredAgentRunIdRef.current : null);
 
   const flushPendingEvents = useCallback(() => {
     if (eventFrameRef.current !== null) {
@@ -1120,31 +886,31 @@ export default function SessionTranscriptPanel({
 
   const requestTranscriptResync = useCallback(() => {
     if (!flowId) return;
-    const requestKey = `${flowId}:${flowExpertId ?? "leader"}:${agentSessionId ?? "latest"}`;
+    const requestKey = `${flowId}:${agentSessionId ?? "leader"}:${agentRunId ?? "latest"}`;
     if (resyncInFlightRef.current === requestKey) return;
     resyncInFlightRef.current = requestKey;
-    wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined, flowExpertId ?? undefined);
-  }, [agentSessionId, flowExpertId, flowId]);
+    wsClient.sendSessionGet(flowId, "", agentRunId ?? undefined, agentSessionId ?? undefined);
+  }, [agentRunId, agentSessionId, flowId]);
 
   useEffect(() => {
     const prevFlowId = prevFlowIdRef.current;
-    const prevFlowExpertId = prevFlowExpertIdRef.current;
-    const prevSessionId = prevAgentSessionIdRef.current;
+    const prevAgentSessionId = prevAgentSessionIdRef.current;
+    const prevSessionId = prevAgentRunIdRef.current;
 
-    if (flowId !== prevFlowId || flowExpertId !== prevFlowExpertId) {
+    if (flowId !== prevFlowId || agentSessionId !== prevAgentSessionId) {
       prevFlowIdRef.current = flowId;
-      prevFlowExpertIdRef.current = flowExpertId;
       prevAgentSessionIdRef.current = agentSessionId;
+      prevAgentRunIdRef.current = agentRunId;
       // Only overwrite the "last real" tracker with a genuine session id.
-      // agentSessionId is transiently null right after switching flows
+      // agentRunId is transiently null right after switching flows
       // (useDashboardData resets it before a fresh flow:state repopulates
       // it); blindly overwriting here erases the previous real value, so
       // the mismatch check below (guarding whether a resync is needed once
       // the real id arrives) silently no-ops instead of detecting a change.
-      if (agentSessionId !== null) {
-        lastRealAgentSessionIdRef.current = agentSessionId;
+      if (agentRunId !== null) {
+        lastRealAgentRunIdRef.current = agentRunId;
       }
-      inferredAgentSessionIdRef.current = agentSessionId;
+      inferredAgentRunIdRef.current = agentRunId;
       fetchedSessionRef.current = null;
       pendingHistoryRequestRef.current = null;
       resyncInFlightRef.current = null;
@@ -1152,51 +918,51 @@ export default function SessionTranscriptPanel({
       cancelPendingEventFlush();
       setRuntimeTransportLabel(null);
       dispatchTranscript({ type: "reset" });
-    } else if (agentSessionId !== prevSessionId) {
-      prevAgentSessionIdRef.current = agentSessionId;
-      if (agentSessionId !== null) {
-        inferredAgentSessionIdRef.current = agentSessionId;
+    } else if (agentRunId !== prevSessionId) {
+      prevAgentRunIdRef.current = agentRunId;
+      if (agentRunId !== null) {
+        inferredAgentRunIdRef.current = agentRunId;
       }
-      const lastRealAgentSessionId = lastRealAgentSessionIdRef.current;
+      const lastRealAgentRunId = lastRealAgentRunIdRef.current;
       if (
         !stableTranscriptChannel
-        && agentSessionId !== null
-        && lastRealAgentSessionId !== null
-        && lastRealAgentSessionId !== agentSessionId
+        && agentRunId !== null
+        && lastRealAgentRunId !== null
+        && lastRealAgentRunId !== agentRunId
       ) {
         fetchedSessionRef.current = null;
         cancelPendingEventFlush();
         setRuntimeTransportLabel(null);
         dispatchTranscript({ type: "reset" });
       }
-      if (agentSessionId !== null) {
-        lastRealAgentSessionIdRef.current = agentSessionId;
+      if (agentRunId !== null) {
+        lastRealAgentRunIdRef.current = agentRunId;
       }
     }
 
-    if (!flowId || (!agentSessionId && !flowExpertId)) {
+    if (!flowId || (!agentRunId && !agentSessionId)) {
       fetchedSessionRef.current = null;
       pendingHistoryRequestRef.current = null;
       setIsLoadingHistory(false);
       return;
     }
 
-    const fetchKey = flowExpertId
-      ? `${flowId}:fexp:${flowExpertId}`
+    const fetchKey = agentSessionId
+      ? `${flowId}:fexp:${agentSessionId}`
       : stableTranscriptChannel
         ? `${flowId}:leader-channel`
-        : `${flowId}:ags:${agentSessionId}`;
+        : `${flowId}:ags:${agentRunId}`;
     if (fetchKey === fetchedSessionRef.current) return;
     fetchedSessionRef.current = fetchKey;
     pendingHistoryRequestRef.current = fetchKey;
 
     setIsLoadingHistory(true);
-    if (flowExpertId) {
-      wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined, flowExpertId);
+    if (agentSessionId) {
+      wsClient.sendSessionGet(flowId, "", agentRunId ?? undefined, agentSessionId);
     } else {
-      wsClient.sendSessionGet(flowId, "", agentSessionId ?? undefined);
+      wsClient.sendSessionGet(flowId, "", agentRunId ?? undefined);
     }
-  }, [flowId, flowExpertId, agentSessionId, stableTranscriptChannel, cancelPendingEventFlush]);
+  }, [flowId, agentSessionId, agentRunId, stableTranscriptChannel, cancelPendingEventFlush]);
 
   useEffect(() => {
     dispatchTranscript({ type: "sync-optimistic", messages: optimisticMessages });
@@ -1207,26 +973,22 @@ export default function SessionTranscriptPanel({
 
     const unsubscribe = wsClient.onMessage((msg: WsInMessage) => {
       const activeFlowId = activeFlowIdRef.current;
-      const activeFlowExpertId = activeFlowExpertIdRef.current;
       const activeAgentSessionId = activeAgentSessionIdRef.current;
+      const activeAgentRunId = activeAgentRunIdRef.current;
       if (msg.flow_id !== activeFlowId) return;
 
       if (msg.type === "runtime:transport") {
-        if (activeFlowExpertId) {
-          if (msg.flow_expert_id !== activeFlowExpertId) return;
+        if (activeAgentSessionId) {
+          if (msg.agent_session_id !== activeAgentSessionId) return;
         } else {
-          if (msg.flow_expert_id) return;
-          if (activeAgentSessionId && msg.agent_session_id !== activeAgentSessionId) return;
+          if (msg.agent_session_id) return;
+          if (activeAgentRunId && msg.agent_run_id !== activeAgentRunId) return;
         }
         setRuntimeTransportLabel(msg.data.state === "clear" ? null : msg.data.message ?? "Codex 网络连接正在恢复");
         return;
       }
 
-      if (msg.type === "flow:decision_card_resolved" && !activeFlowExpertId) {
-        return;
-      }
-
-      if (msg.type === "context_compaction:event" && !activeFlowExpertId) {
+      if (msg.type === "context_compaction:event" && !activeAgentSessionId) {
         const timelineItem = msg.data?.timeline_item as TranscriptTimelineItem | undefined;
         if (timelineItem?.type === "context_compaction") {
           dispatchTranscript({ type: "upsert-timeline-item", item: timelineItem });
@@ -1234,31 +996,31 @@ export default function SessionTranscriptPanel({
         return;
       }
 
-      if (activeFlowExpertId) {
-        if (extractMessageFlowExpertId(msg) !== activeFlowExpertId) return;
+      if (activeAgentSessionId) {
+        if (extractMessageAgentSessionId(msg) !== activeAgentSessionId) return;
       } else {
-        const msgAgentSessionId = extractMessageAgentSessionId(msg);
+        const msgAgentRunId = extractMessageAgentRunId(msg);
         const messageUsesStableLeaderChannel = stableTranscriptChannel
           && "session_id" in msg
           && msg.session_id === `leader:${activeFlowId}`;
-        if (!messageUsesStableLeaderChannel && msgAgentSessionId !== activeAgentSessionId) {
-          if (allowInferredAgentSessionId && activeAgentSessionId === null && msgAgentSessionId) {
-            inferredAgentSessionIdRef.current = msgAgentSessionId;
-            activeAgentSessionIdRef.current = msgAgentSessionId;
+        if (!messageUsesStableLeaderChannel && msgAgentRunId !== activeAgentRunId) {
+          if (allowInferredAgentRunId && activeAgentRunId === null && msgAgentRunId) {
+            inferredAgentRunIdRef.current = msgAgentRunId;
+            activeAgentRunIdRef.current = msgAgentRunId;
           } else {
             return;
           }
         }
       }
 
-      if (msg.type === "session:event" && String(msg.data?.status ?? "") === "interrupted") {
+      if (msg.type === "agent_run:event" && String(msg.data?.status ?? "") === "interrupted") {
         setRuntimeTransportLabel(null);
         flushPendingEvents();
         dispatchTranscript({ type: "finish-active", finishedAt: new Date().toISOString() });
         return;
       }
 
-      if (msg.type === "flow_expert:event" && activeFlowExpertId) {
+      if (msg.type === "agent_session:event" && activeAgentSessionId) {
         const expertStatus = String(msg.data?.status ?? "");
         if (["completed", "failed"].includes(expertStatus)) {
           setRuntimeTransportLabel(null);
@@ -1303,7 +1065,7 @@ export default function SessionTranscriptPanel({
     });
 
     return unsubscribe;
-  }, [flowId, flowExpertId, agentSessionId, allowInferredAgentSessionId, stableTranscriptChannel, flushPendingEvents, scheduleTranscriptEvent]);
+  }, [flowId, agentSessionId, agentRunId, allowInferredAgentRunId, stableTranscriptChannel, flushPendingEvents, scheduleTranscriptEvent]);
 
   useEffect(() => {
     if (!transcript.needsResync || !flowId) return;
@@ -1323,7 +1085,7 @@ export default function SessionTranscriptPanel({
   useEffect(() => {
     if (
       !flowId
-      || flowExpertId
+      || agentSessionId
       || isAwaitingResponse
       || isLoadingHistory
       || transcript.streamEpoch === null
@@ -1332,12 +1094,12 @@ export default function SessionTranscriptPanel({
       || !pendingPlanForRecovery
       || pendingPlanHasAnchor
     ) return;
-    const recoveryKey = `${flowId}:${pendingPlanForRecovery.revision.plan_revision_id}:${transcript.streamEpoch}`;
+    const recoveryKey = `${flowId}:${pendingPlanForRecovery.revision.orchestration_revision_id}:${transcript.streamEpoch}`;
     if (planRecoveryAttemptsRef.current.has(recoveryKey)) return;
     planRecoveryAttemptsRef.current.add(recoveryKey);
     requestTranscriptResync();
   }, [
-    flowExpertId,
+    agentSessionId,
     flowId,
     isAwaitingResponse,
     isLoadingHistory,
@@ -1376,22 +1138,18 @@ export default function SessionTranscriptPanel({
         isLoadingHistory={isLoadingHistory}
         emptyTitle={emptyTitle}
         emptyDescription={emptyDescription}
-        decisionCards={decisionCards}
-        decisionCardStatuses={decisionCardStatuses}
-        decisionCardAnswers={decisionCardAnswers}
-        specCards={specCards}
+        decisionRequests={decisionRequests}
+        planCards={planCards}
         orchestrationPlans={orchestrationPlans}
         followRequestKey={followRequestKey}
         isAwaitingResponse={isAwaitingResponse}
         flowId={flowId}
-        onOpenSpec={onOpenSpec}
         onOpenPlan={onOpenPlan}
-        onApprovePlan={onApprovePlan}
+        onOpenOrchestration={onOpenOrchestration}
+        onApproveOrchestration={onApproveOrchestration}
         activity={transcript.activeTurn?.activity ?? null}
         activityMessageId={transcript.activeTurn?.renderMessageId ?? null}
         activeTurnTiming={transcript.activeTurn?.timing ?? null}
-        reviews={reviews}
-        onOpenReview={onOpenReview}
         onOpenWorkspaceFile={onOpenWorkspaceFile}
         expandedDecisionResultIds={transcript.expandedDecisionResultIds}
         showReasoning={showReasoning}

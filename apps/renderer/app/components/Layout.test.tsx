@@ -46,15 +46,15 @@ vi.mock("../hooks/useDashboardData", () => ({
   useDashboardData: (flowId: string | null) => ({
     flowStatus: "waiting_user",
     flowStateLoadedFlowId: flowId,
-    leaderAgentSessionId: "leader-1",
+    leaderAgentRunId: "leader-1",
     leaderTranscriptReadyFlowId: flowId,
-    leaderTranscriptReadyAgentSessionId: "leader-1",
-    decisionCards: flowId ? [{ card_id: "permission-1", status: "pending", questions: [] }] : [],
-    specCards: {},
+    leaderTranscriptReadyAgentRunId: "leader-1",
+    decisionRequests: flowId ? [{ decision_request_id: "permission-1", status: "pending", questions: [] }] : [],
+    planCards: {},
     orchestrationPlans: [],
     riskMode: "auto_edit",
-    planApproval: "on",
-    workRuns: flowId ? [{ id: "turn-1", status: "waiting_user" }] : [],
+    orchestrationMode: "approval_required",
+    agentRuns: [],
   }),
 }));
 
@@ -67,8 +67,8 @@ vi.mock("../hooks/useFlowWorkbench", () => ({
   }),
 }));
 
-vi.mock("../hooks/useFlowExperts", () => ({
-  useAgentSessions: () => ({ agentSessions: [] }),
+vi.mock("../hooks/useAgentSessions", () => ({
+  useAgentRuns: () => ({ agentRuns: [] }),
 }));
 
 vi.mock("../stores/useThemeStore", () => ({
@@ -86,8 +86,8 @@ vi.mock("../stores/useComposerImageStore", () => ({
   useComposerImageStore: (selector: (state: { setActiveFlowId: ReturnType<typeof vi.fn> }) => unknown) =>
     selector({ setActiveFlowId: vi.fn() }),
 }));
-vi.mock("../stores/usePlanFeedbackStore", () => ({
-  usePlanFeedbackStore: (selector: (state: { setActiveFlowId: ReturnType<typeof vi.fn> }) => unknown) =>
+vi.mock("../stores/useOrchestrationFeedbackStore", () => ({
+  useOrchestrationFeedbackStore: (selector: (state: { setActiveFlowId: ReturnType<typeof vi.fn> }) => unknown) =>
     selector({ setActiveFlowId: vi.fn() }),
 }));
 
@@ -105,7 +105,6 @@ const flow: SquadFlow = {
   description: "",
   type: "full",
   status: "active",
-  current_stage: null,
   project_id: "project-1",
   created_at: "2026-07-12T00:00:00.000Z",
   updated_at: "2026-07-12T00:00:00.000Z",

@@ -14,7 +14,7 @@ import {
   buildLeaderGuidePrompt,
   buildLeaderPrompt,
   buildFlowNameRequestPrompt,
-  type LeaderPlanFeedback,
+  type LeaderOrchestrationFeedback,
   type LeaderTurnInput,
 } from "../leaderPrompt.js";
 import { AsyncMessageQueue } from "./asyncMessageQueue.js";
@@ -90,12 +90,12 @@ function leaderGuideMessage(
   flowId: string,
   content: string,
   attachments?: MessageImageAttachment[],
-  planFeedback?: LeaderPlanFeedback[],
-  specRequested?: boolean,
+  orchestrationFeedback?: LeaderOrchestrationFeedback[],
+  modes?: { behaviorMode: "execute" | "plan"; riskMode: "auto_edit" | "full_access"; orchestrationMode: "approval_required" | "automatic" },
 ): CodexRuntimeInput {
   return {
     type: "text",
-    text: buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback, specRequested }),
+    text: buildLeaderGuidePrompt({ flowId, content, attachments, orchestrationFeedback, ...modes }),
     flowId,
     attachments,
     attachmentPlacement: "trailing",

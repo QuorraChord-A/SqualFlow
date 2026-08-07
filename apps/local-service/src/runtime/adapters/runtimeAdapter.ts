@@ -7,7 +7,7 @@ import type { ChatUIMessage } from "../../ws/chatJournal.js";
 import type { McpBridgeRegistry } from "../../mcp/mcpBridgeRegistry.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RuntimeCapability, RuntimeToolInput } from "../capabilities.js";
-import type { LeaderPlanFeedback, LeaderTurnInput } from "../leaderPrompt.js";
+import type { LeaderOrchestrationFeedback, LeaderTurnInput } from "../leaderPrompt.js";
 import type { AsyncMessageQueue } from "./asyncMessageQueue.js";
 import type { RuntimeAdapterCapabilities, RuntimeEvent } from "../runtimeEvents.js";
 
@@ -218,8 +218,12 @@ export type AgentRuntimeAdapter = {
     flowId: string,
     content: string,
     attachments?: MessageImageAttachment[],
-    planFeedback?: LeaderPlanFeedback[],
-    specRequested?: boolean,
+    orchestrationFeedback?: LeaderOrchestrationFeedback[],
+    modes?: {
+      behaviorMode: "execute" | "plan";
+      riskMode: "auto_edit" | "full_access";
+      orchestrationMode: "approval_required" | "automatic";
+    },
   ) => unknown;
   createLeaderFlowNameMessage: (flowId: string) => unknown;
   createSingleTextInput: (text: string) => AsyncIterable<unknown>;

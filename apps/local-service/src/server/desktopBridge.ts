@@ -12,7 +12,7 @@ type PendingRequest = {
 
 export type BrowserLease = {
   flowId: string;
-  agentSessionId: string;
+  agentRunId: string;
   holderName: string;
   since: string;
 };
@@ -97,28 +97,28 @@ export class DesktopBridge {
     });
   }
 
-  acquireLease(agentSessionId: string, holderName: string, flowId: string): LeaseAcquireResult {
-    if (this.revokedSessionIds.has(agentSessionId)) {
+  acquireLease(agentRunId: string, holderName: string, flowId: string): LeaseAcquireResult {
+    if (this.revokedSessionIds.has(agentRunId)) {
       return { ok: false, heldBy: "用户", reason: "revoked" };
     }
-    if (this.lease && this.lease.agentSessionId !== agentSessionId) {
+    if (this.lease && this.lease.agentRunId !== agentRunId) {
       return { ok: false, heldBy: this.lease.holderName, reason: "busy" };
     }
     if (!this.lease) {
-      this.lease = { flowId, agentSessionId, holderName, since: new Date().toISOString() };
+      this.lease = { flowId, agentRunId, holderName, since: new Date().toISOString() };
       this.notifyLeaseChange();
     }
     return { ok: true };
   }
 
-  releaseLease(agentSessionId: string) {
-    if (this.lease?.agentSessionId !== agentSessionId) return;
+  releaseLease(agentRunId: string) {
+    if (this.lease?.agentRunId !== agentRunId) return;
     this.lease = null;
     this.notifyLeaseChange();
   }
 
   reclaimLease(): void {
-    if (this.lease) this.revokedSessionIds.add(this.lease.agentSessionId);
+    if (this.lease) this.revokedSessionIds.add(this.lease.agentRunId);
     this.lease = null;
     this.notifyLeaseChange();
   }

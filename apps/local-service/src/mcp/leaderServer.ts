@@ -2,158 +2,128 @@ import crypto from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   AskUserInput,
+  AbandonChangeSetInput,
+  BindChangeSetInput,
   CancelAgentInput,
   CreatePlanInput,
   CreateTaskInput,
   DispatchAgentInput,
+  FinalizeChangeSetInput,
   GetContextInput,
   GetTaskInput,
   ListTasksInput,
-  SaveExecutionPlanInput,
-  ResolvePlanFeedbackInput,
+  OpenChangeSetInput,
+  ResolveOrchestrationFeedbackInput,
   SubmitOrchestrationPlanInput,
   SendMessageInput,
   UpdateTaskInput,
   UpdateFlowNameInput,
-  WorkRunActionInput,
   type AskUserInputValue,
+  type AbandonChangeSetInputValue,
+  type BindChangeSetInputValue,
   type CancelAgentInputValue,
   type CreatePlanInputValue,
   type CreateTaskInputValue,
   type DispatchAgentInputValue,
+  type FinalizeChangeSetInputValue,
   type GetContextInputValue,
   type GetTaskInputValue,
   type ListTasksInputValue,
+  type OpenChangeSetInputValue,
   type QuestionInputValue,
-  type SaveExecutionPlanInputValue,
-  type ResolvePlanFeedbackInputValue,
+  type ResolveOrchestrationFeedbackInputValue,
   type SubmitOrchestrationPlanInputValue,
   type SendMessageInputValue,
   type UpdateTaskInputValue,
   type UpdateFlowNameInputValue,
-  type WorkRunActionInputValue,
 } from "./platformModels.js";
 
 export interface CurrentTurnInput {
-  trigger_kind: "user_message" | "decision_resolved" | "decision_cancelled" | "spec_run" | "expert_result" | "expert_message" | "plan_approved" | "flow_name_generation";
-  work_run_id?: string;
+  trigger_kind:
+    | "user_message"
+    | "decision_resolved"
+    | "decision_cancelled"
+    | "plan_resolved"
+    | "orchestration_resolved"
+    | "expert_result"
+    | "expert_message"
+    | "flow_name_generation";
+  agent_run_id?: string;
   message_id?: string;
-  card_id?: string;
+  decision_request_id?: string;
   content?: string;
   answers?: Record<string, string | string[]>;
-  spec_requested?: boolean;
   created_at: string;
 }
 
 export interface PendingUserActionRow {
   id: string;
-  type: "clarification" | "spec_approval" | "plan_approval";
+  type: "plan_approval" | "orchestration_approval" | "decision_request";
   status: "pending";
 }
 
 export type LeaderToolHooks = {
-  onFlowNameUpdated?: (args: { flowId: string; flow: { flow_id: string; name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }) => Promise<void> | void;
-  onDecisionCardCreated?: (args: {
+  onFlowNameUpdated?: (args: {
     flowId: string;
-    workRunId: string;
-    cardId: string;
-    cardType: "clarification";
+    flow: { flow_id: string; name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" };
+  }) => Promise<void> | void;
+  onDecisionRequestCreated?: (args: {
+    flowId: string;
+    decisionRequestId: string;
+    agentRunId: string;
     questions: QuestionInputValue[];
-    status: string;
-  }) => Promise<void> | void;
-  onSpecCardCreated?: (args: {
-    flowId: string;
-    specApprovalId: string;
-    specRevisionId: string;
-    workRunId: string | null;
-    status: "pending";
-    fileName: string;
-    overview: string;
-  }) => Promise<void> | void;
-  onTaskCreated?: (args: {
-    flowId: string;
-    workRunId: string;
-    task: Record<string, unknown>;
-  }) => Promise<void> | void;
-  /**
-   * A Task changed through an explicit Leader action. Provider turn completion
-   * is intentionally not routed through this hook: a reply is not a Task
-   * state transition.
-   */
-  onTaskUpdated?: (args: {
-    flowId: string;
-    task: Record<string, unknown>;
-  }) => Promise<void> | void;
-  onArtifactCreated?: (args: {
-    flowId: string;
-    artifact: Record<string, unknown>;
   }) => Promise<void> | void;
   onPlanCreated?: (args: {
     flowId: string;
-    workRunId: string;
-    plan: Record<string, unknown>;
-    revision: Record<string, unknown>;
+    planRevision: Record<string, unknown>;
     approval: Record<string, unknown>;
   }) => Promise<void> | void;
-  onPlanApprovalChanged?: (args: { flowId: string; approval: Record<string, unknown> }) => Promise<void> | void;
-  onPlanRunChanged?: (args: { flowId: string; run: Record<string, unknown> }) => Promise<void> | void;
-  onWorkRunChanged?: (args: { flowId: string; workRun: Record<string, unknown>; action: "interrupt" | "resume" | "cancel" }) => Promise<void> | void;
+  onTaskCreated?: (args: { flowId: string; task: Record<string, unknown> }) => Promise<void> | void;
+  onTaskUpdated?: (args: { flowId: string; task: Record<string, unknown> }) => Promise<void> | void;
+  onOrchestrationCreated?: (args: {
+    flowId: string;
+    revision: Record<string, unknown>;
+    approval: Record<string, unknown> | null;
+    tasks: Array<Record<string, unknown>>;
+  }) => Promise<void> | void;
 };
-
-export type PlanFeedbackResolution = {
-  approval: Record<string, unknown>;
-  run?: Record<string, unknown>;
-};
-
-export type CancelAgentResult =
-  | { ok: true; agent_session: Record<string, unknown>; task: Record<string, unknown> }
-  | { ok: false; error: { code: string; message: string } };
 
 export interface StorePort {
   getContext: (flowId: string) => Record<string, unknown> | null;
-  updateFlowName: (args: {
-    flowId: string;
-    name: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => { ok: true; flow: { flow_id: string; name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } } | { ok: false; error: { code: string; message: string } };
+  updateFlowName: (args: { flowId: string; name: string; currentTurnInput?: CurrentTurnInput }) =>
+    | { ok: true; flow: { flow_id: string; name: string; name_generation_status: "generated" } }
+    | { ok: false; error: { code: string; message: string } };
   listPendingUserActions: (args: { flowId: string }) => PendingUserActionRow[];
+  askUser: (args: {
+    flowId: string;
+    decisionRequestId: string;
+    questions: QuestionInputValue[];
+    sourceAgentRunId?: string;
+  }) => Record<string, unknown> | null;
   createPlan: (args: {
     flowId: string;
     mode: "write" | "rewrite";
     name?: string;
     overview: string;
     plan: string;
-    sourceAgentSessionId?: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) =>
-    | { spec_revision: Record<string, unknown>; spec_approval: Record<string, unknown> }
+    sourceAgentRunId?: string;
+  }) => { plan_revision: Record<string, unknown>; plan_approval: Record<string, unknown> }
     | { error: { code: string; message: string } };
-  askUser: (args: {
-    flowId: string;
-    cardId: string;
-    sessionId: string;
-    questions: QuestionInputValue[];
-    currentTurnInput?: CurrentTurnInput;
-  }) => { id: string; status: string; workRunId: string } | undefined;
   createTask: (args: {
     flowId: string;
     subject: string;
     description: string;
     activeForm?: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => { work_run_id: string; task: Record<string, unknown> } | { error: { code: string; message: string } };
-  saveExecutionPlan: (args: {
+    sourceAgentRunId?: string;
+  }) => { task: Record<string, unknown> } | { error: { code: string; message: string } };
+  submitOrchestrationPlan: (args: SubmitOrchestrationPlanInputValue & { sourceAgentRunId?: string }) =>
+    | { revision: Record<string, unknown>; approval: Record<string, unknown> | null; tasks: Array<Record<string, unknown>>; [key: string]: unknown }
+    | { error: { code: string; message: string; issues?: unknown[] } };
+  resolveOrchestrationFeedback: (args: {
     flowId: string;
-    title: string;
-    plan: string;
-    sourceAgentSessionId?: string;
-    currentTurnInput?: CurrentTurnInput;
+    orchestrationApprovalId: string;
+    resolutionNote: string;
   }) => Record<string, unknown> | null;
-  submitOrchestrationPlan: (args: SubmitOrchestrationPlanInputValue & {
-    sourceAgentSessionId?: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => Record<string, unknown> | null;
-  resolvePlanFeedback: (args: { flowId: string; planApprovalId: string; resolutionNote: string; currentTurnInput?: CurrentTurnInput }) => PlanFeedbackResolution | Record<string, unknown> | null;
   updateTask: (args: {
     flowId: string;
     taskId: string;
@@ -163,78 +133,61 @@ export interface StorePort {
     description?: string;
     activeForm?: string;
     progress?: string | null;
-    expertId?: string;
-    owner?: string;
+    recommendedAgentDefinitionId?: string;
     metadata?: Record<string, unknown>;
-    addBlocks?: string[];
     addBlockedBy?: string[];
-    currentTurnInput?: CurrentTurnInput;
   }) => Record<string, unknown> | null;
-  listTasks: (args: { flowId: string; currentTurnInput?: CurrentTurnInput }) => Array<Record<string, unknown>>;
-  getTask: (args: { flowId: string; taskId: string; currentTurnInput?: CurrentTurnInput }) => Record<string, unknown> | null;
+  listTasks: (args: { flowId: string }) => Array<Record<string, unknown>>;
+  getTask: (args: { flowId: string; taskId: string }) => Record<string, unknown> | null;
   dispatchAgent: (args: {
     flowId: string;
     taskId: string;
-    expertId: string;
+    agentDefinitionId: string;
     prompt?: string;
-    resumeAgentSessionId: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => Promise<
-    | { ok: true; agent_session: Record<string, unknown>; task: Record<string, unknown> }
-    | { ok: false; error: { code: string; message: string } }
-  >;
-  cancelAgent: (args: {
-    flowId: string;
-    taskId: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => Promise<CancelAgentResult> | CancelAgentResult;
+  }) => Promise<{ ok: true; agent_run: Record<string, unknown>; task: Record<string, unknown> }
+    | { ok: false; error: { code: string; message: string } }>;
+  cancelAgent: (args: { flowId: string; agentSessionId: string }) => Promise<{
+    ok: boolean;
+    idempotent?: boolean;
+    agent_run?: Record<string, unknown>;
+    error?: { code: string; message: string };
+  }>;
   sendMessage: (args: {
     flowId: string;
-    expertId: string;
-    content: string;
-    summary?: string;
-    currentTurnInput?: CurrentTurnInput;
-  }) => Promise<{ ok: true; accepted: boolean; message_id?: string; error?: { code: string; message: string } }>
-    | { ok: true; accepted: boolean; message_id?: string; error?: { code: string; message: string } };
-  interruptWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
-  resumeWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
-  cancelWorkRun: (args: { flowId: string; workRunId: string }) => { ok: true; work_run: Record<string, unknown> } | { ok: false; error: { code: string; message: string } };
+    agentSessionId: string;
+    taskId?: string;
+    message: string;
+  }) => Promise<{
+    ok: true;
+    accepted: boolean;
+    agent_run_id?: string;
+    message_id?: string;
+    error?: { code: string; message: string };
+  }>;
+  openChangeSet: (args: { flowId: string; agentRunId: string; title?: string }) => Record<string, unknown> | null;
+  bindChangeSet: (args: { flowId: string; changeSetId: string; agentRunId: string; taskId?: string }) => Record<string, unknown> | null;
+  finalizeChangeSet: (args: { flowId: string; changeSetId: string; summary: string }) => Record<string, unknown> | null;
+  abandonChangeSet: (args: { flowId: string; changeSetId: string }) => Record<string, unknown> | null;
 }
 
 export type LeaderToolRuntimeContext = {
   currentTurnInput?: CurrentTurnInput;
   getCurrentTurnInput?: () => CurrentTurnInput | undefined;
-  leaderAgentSessionId?: string;
+  leaderAgentRunId?: string;
 };
 
-function json(value: unknown) {
-  return JSON.stringify(value);
-}
-
-function ok(fields: Record<string, unknown> = {}) {
-  return json({ ok: true, ...fields });
-}
-
-function fail(code: string, message: string) {
-  return json({ ok: false, error: { code, message } });
-}
-
-function hasOwn(input: object, key: string) {
-  return Object.prototype.hasOwnProperty.call(input, key);
-}
+const json = (value: unknown) => JSON.stringify(value);
+const ok = (fields: Record<string, unknown> = {}) => json({ ok: true, ...fields });
+const fail = (code: string, message: string, extra: Record<string, unknown> = {}) =>
+  json({ ok: false, error: { code, message, ...extra } });
 
 export function createLeaderToolHandlers(
   store: StorePort,
   hooks: LeaderToolHooks = {},
   runtimeContext: LeaderToolRuntimeContext = {},
 ) {
-  const currentTurnInput = () => runtimeContext.getCurrentTurnInput?.() ?? runtimeContext.currentTurnInput;
-  const hasPendingUserAction = (flowId: string) => store.listPendingUserActions({ flowId }).length > 0;
-  const isCancellationFollowup = () => currentTurnInput()?.trigger_kind === "decision_cancelled";
-  const cancellationFailure = () => fail(
-    "CLARIFICATION_CANCELLED",
-    "用户已取消澄清。本轮不要继续创建卡片、计划、任务或派发 Expert，请先用自然语言回应用户。",
-  );
+  const current = () => runtimeContext.getCurrentTurnInput?.() ?? runtimeContext.currentTurnInput;
+  const leaderRunId = () => runtimeContext.leaderAgentRunId ?? current()?.agent_run_id;
 
   return {
     async getContext(input: GetContextInputValue) {
@@ -245,14 +198,7 @@ export function createLeaderToolHandlers(
 
     async updateFlowName(input: UpdateFlowNameInputValue) {
       const parsed = UpdateFlowNameInput.parse(input);
-      if (currentTurnInput()?.trigger_kind !== "flow_name_generation") {
-        return fail("FLOW_NAME_GENERATION_REQUIRED", "Flow names can only be generated by the internal naming turn.");
-      }
-      const result = store.updateFlowName({
-        flowId: parsed.flow_id,
-        name: parsed.name,
-        currentTurnInput: currentTurnInput(),
-      });
+      const result = store.updateFlowName({ flowId: parsed.flow_id, name: parsed.name, currentTurnInput: current() });
       if (!result.ok) return fail(result.error.code, result.error.message);
       await hooks.onFlowNameUpdated?.({ flowId: parsed.flow_id, flow: result.flow });
       return ok({ flow: result.flow });
@@ -260,180 +206,98 @@ export function createLeaderToolHandlers(
 
     async askUser(input: AskUserInputValue) {
       const parsed = AskUserInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (!store.getContext(parsed.flow_id)) return fail("FLOW_NOT_FOUND", `flow not found: ${parsed.flow_id}`);
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
-
-      const cardId = `dc-${crypto.randomBytes(4).toString("hex")}`;
-      const card = store.askUser({
+      const sourceAgentRunId = leaderRunId();
+      if (!sourceAgentRunId) return fail("AGENT_RUN_REQUIRED", "ask_user 只能由当前 Leader AgentRun 调用。");
+      const decisionRequestId = `dreq-${crypto.randomBytes(6).toString("hex")}`;
+      const request = store.askUser({
         flowId: parsed.flow_id,
-        cardId,
-        sessionId: runtimeContext.leaderAgentSessionId ?? "",
+        decisionRequestId,
         questions: parsed.questions,
-        currentTurnInput: currentTurnInput(),
+        sourceAgentRunId,
       });
-      if (!card) return fail("WORK_RUN_REQUIRED", "Clarification requires an active WorkRun.");
-      await hooks.onDecisionCardCreated?.({
+      if (!request) return fail("DECISION_REQUEST_CREATE_FAILED", "无法创建澄清请求。");
+      await hooks.onDecisionRequestCreated?.({
         flowId: parsed.flow_id,
-        workRunId: card.workRunId,
-        cardId: card.id,
-        cardType: "clarification",
+        decisionRequestId,
+        agentRunId: sourceAgentRunId,
         questions: parsed.questions,
-        status: card.status,
       });
-      return ok({
-        card_id: card.id,
-        status: card.status,
-        question_count: parsed.questions.length,
-      });
+      return ok({ decision_request_id: decisionRequestId, status: "pending", question_count: parsed.questions.length });
     },
 
     async createPlan(input: CreatePlanInputValue) {
       const parsed = CreatePlanInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (!store.getContext(parsed.flow_id)) {
-        return fail("FLOW_NOT_FOUND", `找不到 Flow：${parsed.flow_id}。请检查 flow_id 后重试。`);
-      }
-      if (currentTurnInput()?.spec_requested !== true) {
-        return fail(
-          "SPEC_REQUEST_REQUIRED",
-          "当前消息不是计划模式请求，不能创建审批计划。请提示用户切换到计划模式后重新发送，不要重试。",
-        );
-      }
-      if (hasPendingUserAction(parsed.flow_id)) {
-        return fail("PENDING_USER_ACTION", "当前已有待用户处理的卡片。请等待用户处理后再创建计划。");
-      }
-      if (parsed.mode === "write" && !parsed.name) {
-        return fail("INVALID_ARGUMENTS", "创建新计划缺少 name。请补全 name 后重试。");
-      }
-
+      const sourceAgentRunId = leaderRunId();
+      if (!sourceAgentRunId) return fail("AGENT_RUN_REQUIRED", "create_plan 只能由当前 Leader AgentRun 调用。");
+      if (parsed.mode === "write" && !parsed.name) return fail("INVALID_ARGUMENTS", "创建计划缺少 name。");
       const result = store.createPlan({
         flowId: parsed.flow_id,
         mode: parsed.mode,
         name: parsed.name,
         overview: parsed.overview,
         plan: parsed.plan,
-        sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
-        currentTurnInput: currentTurnInput(),
+        sourceAgentRunId,
       });
       if ("error" in result) return fail(result.error.code, result.error.message);
-      const specRevision = result.spec_revision as {
-        spec_revision_id: string;
-        file_name: string;
-        overview: string;
-      };
-      const specApproval = result.spec_approval as {
-        spec_approval_id: string;
-        work_run_id?: string | null;
-      };
-      await hooks.onSpecCardCreated?.({
+      await hooks.onPlanCreated?.({
         flowId: parsed.flow_id,
-        specApprovalId: specApproval.spec_approval_id,
-        specRevisionId: specRevision.spec_revision_id,
-        workRunId: specApproval.work_run_id ?? null,
-        status: "pending",
-        fileName: specRevision.file_name,
-        overview: specRevision.overview,
+        planRevision: result.plan_revision,
+        approval: result.plan_approval,
       });
       return ok(result);
     },
 
     async createTask(input: CreateTaskInputValue) {
       const parsed = CreateTaskInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
+      const sourceAgentRunId = leaderRunId();
+      if (!sourceAgentRunId) return fail("AGENT_RUN_REQUIRED", "create_task 只能由当前 Leader AgentRun 调用。");
       const result = store.createTask({
         flowId: parsed.flow_id,
         subject: parsed.subject,
         description: parsed.description,
         activeForm: parsed.active_form,
-        currentTurnInput: currentTurnInput(),
+        sourceAgentRunId,
       });
-      if (!result) return fail("WORK_RUN_REQUIRED", "Task could not be created for the current WorkRun.");
       if ("error" in result) return fail(result.error.code, result.error.message);
-      await hooks.onTaskCreated?.({
-        flowId: parsed.flow_id,
-        workRunId: result.work_run_id,
-        task: result.task,
-      });
+      await hooks.onTaskCreated?.({ flowId: parsed.flow_id, task: result.task });
       return ok(result);
-    },
-
-    async saveExecutionPlan(input: SaveExecutionPlanInputValue) {
-      const parsed = SaveExecutionPlanInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
-      const artifact = store.saveExecutionPlan({
-        flowId: parsed.flow_id,
-        title: parsed.title,
-        plan: parsed.plan,
-        sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
-        currentTurnInput: currentTurnInput(),
-      });
-      if (!artifact) return fail("WORK_RUN_REQUIRED", "编排计划需要一个可执行的 WorkRun。");
-      await hooks.onArtifactCreated?.({
-        flowId: parsed.flow_id,
-        artifact,
-      });
-      return ok({ artifact });
     },
 
     async submitOrchestrationPlan(input: SubmitOrchestrationPlanInputValue) {
       const parsed = SubmitOrchestrationPlanInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      const result = store.submitOrchestrationPlan({
-        ...parsed,
-        sourceAgentSessionId: runtimeContext.leaderAgentSessionId,
-        currentTurnInput: currentTurnInput(),
-      });
-      if (!result) return fail("INVALID_ORCHESTRATION_PLAN", "编排计划无法创建；请检查当前 WorkRun、依赖和 Expert。");
+      const sourceAgentRunId = leaderRunId();
+      if (!sourceAgentRunId) return fail("AGENT_RUN_REQUIRED", "submit_orchestration_plan 只能由当前 Leader AgentRun 调用。");
+      const result = store.submitOrchestrationPlan({ ...parsed, sourceAgentRunId });
       if ("error" in result) {
-        const error = result.error as { code?: string; issues?: unknown };
-        return json({ ok: false, error: { code: error.code ?? "INVALID_ORCHESTRATION_PLAN", message: "编排计划未通过校验", issues: error.issues ?? [] } });
+        const error = result.error as { code: string; message: string; issues?: unknown[] };
+        return fail(error.code, error.message, { issues: error.issues ?? [] });
       }
-      await hooks.onPlanCreated?.({
+      await hooks.onOrchestrationCreated?.({
         flowId: parsed.flow_id,
-        workRunId: currentTurnInput()?.work_run_id ?? "",
-        plan: result.plan as Record<string, unknown>,
-        revision: result.revision as Record<string, unknown>,
-        approval: result.approval as Record<string, unknown>,
+        revision: result.revision,
+        approval: result.approval,
+        tasks: result.tasks,
       });
-      if (result.auto_approved) {
-        // 自动批准：计划已物化，返回任务清单让 Leader 在本轮继续按依赖派发。
-        return ok({
-          ...result,
-          tasks: store.listTasks({ flowId: parsed.flow_id, currentTurnInput: currentTurnInput() }),
-          next: "计划已自动批准并物化为任务；由你按依赖用 dispatch_agent 派发，互不依赖的节点可并行派。",
-        });
-      }
-      return ok(result);
+      return ok({
+        ...result,
+        next: result.approval
+          ? "编排计划正在等待用户批准；结束当前 Leader Run。"
+          : "编排计划已按 automatic 模式物化 Task；当前 Leader Run 可继续决定如何派发。",
+      });
     },
 
-    async resolvePlanFeedback(input: ResolvePlanFeedbackInputValue) {
-      const parsed = ResolvePlanFeedbackInput.parse(input);
-      const rawResult = store.resolvePlanFeedback({
+    async resolveOrchestrationFeedback(input: ResolveOrchestrationFeedbackInputValue) {
+      const parsed = ResolveOrchestrationFeedbackInput.parse(input);
+      const result = store.resolveOrchestrationFeedback({
         flowId: parsed.flow_id,
-        planApprovalId: parsed.plan_approval_id,
+        orchestrationApprovalId: parsed.orchestration_approval_id,
         resolutionNote: parsed.resolution_note,
-        currentTurnInput: currentTurnInput(),
       });
-      let result: PlanFeedbackResolution | null = null;
-      if (rawResult) {
-        const candidate = rawResult as Record<string, unknown>;
-        result = "approval" in candidate && typeof candidate.approval === "object" && candidate.approval !== null
-          ? rawResult as PlanFeedbackResolution
-          : { approval: rawResult };
-      }
-      if (!result) return fail("INVALID_PLAN_FEEDBACK", "计划反馈无法恢复原审批。");
-      await hooks.onPlanApprovalChanged?.({ flowId: parsed.flow_id, approval: result.approval });
-      if (result.run) await hooks.onPlanRunChanged?.({ flowId: parsed.flow_id, run: result.run });
-      return ok(result);
+      return result ? ok({ feedback: result }) : fail("INVALID_ORCHESTRATION_FEEDBACK", "无法处理该编排反馈。");
     },
 
     async updateTask(input: UpdateTaskInputValue) {
       const parsed = UpdateTaskInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
       const task = store.updateTask({
         flowId: parsed.flow_id,
         taskId: parsed.task_id,
@@ -443,223 +307,134 @@ export function createLeaderToolHandlers(
         description: parsed.description,
         activeForm: parsed.active_form,
         progress: parsed.progress,
-        expertId: parsed.expert_id,
-        owner: parsed.owner,
+        recommendedAgentDefinitionId: parsed.recommended_agent_definition_id,
         metadata: parsed.metadata,
-        addBlocks: parsed.add_blocks,
         addBlockedBy: parsed.add_blocked_by,
-        currentTurnInput: currentTurnInput(),
       });
-      if (!task) {
-        return parsed.expected_revision !== undefined
-          ? fail("TASK_REVISION_CONFLICT", `task changed or was not found: ${parsed.task_id}`)
-          : fail("INVALID_TASK", `task not found: ${parsed.task_id}`);
-      }
+      if (!task) return parsed.expected_revision === undefined
+        ? fail("INVALID_TASK", `task not found: ${parsed.task_id}`)
+        : fail("TASK_REVISION_CONFLICT", `task changed or was not found: ${parsed.task_id}`);
       await hooks.onTaskUpdated?.({ flowId: parsed.flow_id, task });
       return ok({ task });
     },
 
     async listTasks(input: ListTasksInputValue) {
       const parsed = ListTasksInput.parse(input);
-      return ok({ tasks: store.listTasks({ flowId: parsed.flow_id, currentTurnInput: currentTurnInput() }) });
+      return ok({ tasks: store.listTasks({ flowId: parsed.flow_id }) });
     },
 
     async getTask(input: GetTaskInputValue) {
       const parsed = GetTaskInput.parse(input);
-      const task = store.getTask({ flowId: parsed.flow_id, taskId: parsed.task_id, currentTurnInput: currentTurnInput() });
+      const task = store.getTask({ flowId: parsed.flow_id, taskId: parsed.task_id });
       return task ? ok({ task }) : fail("INVALID_TASK", `task not found: ${parsed.task_id}`);
     },
 
     async dispatchAgent(input: DispatchAgentInputValue) {
       const parsed = DispatchAgentInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
       const result = await store.dispatchAgent({
         flowId: parsed.flow_id,
         taskId: parsed.task_id,
-        expertId: parsed.expert_id,
+        agentDefinitionId: parsed.agent_definition_id,
         prompt: parsed.prompt,
-        resumeAgentSessionId: parsed.resume_agent_session_id,
-        currentTurnInput: currentTurnInput(),
       });
-      if (!result.ok) {
-        return fail(result.error.code, result.error.message);
-      }
-      return ok({
-        agent_session: result.agent_session,
-        task: result.task,
-      });
+      return result.ok ? ok({ agent_run: result.agent_run, task: result.task }) : fail(result.error.code, result.error.message);
     },
 
     async cancelAgent(input: CancelAgentInputValue) {
       const parsed = CancelAgentInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      if (hasPendingUserAction(parsed.flow_id)) return fail("PENDING_USER_ACTION", "A user action is pending.");
-      const result = await store.cancelAgent({
-        flowId: parsed.flow_id,
-        taskId: parsed.task_id,
-        currentTurnInput: currentTurnInput(),
-      });
-      if (!result.ok) return fail(result.error.code, result.error.message);
-      return ok({ agent_session: result.agent_session, task: result.task });
+      const result = await store.cancelAgent({ flowId: parsed.flow_id, agentSessionId: parsed.agent_session_id });
+      return result.ok
+        ? ok({ agent_run: result.agent_run ?? null, idempotent: result.idempotent ?? false })
+        : fail(result.error?.code ?? "AGENT_CANCEL_FAILED", result.error?.message ?? "取消 Agent 失败");
     },
 
     async sendMessage(input: SendMessageInputValue) {
       const parsed = SendMessageInput.parse(input);
-      if (isCancellationFollowup()) return cancellationFailure();
-      const result = await store.sendMessage({
+      return ok(await store.sendMessage({
         flowId: parsed.flow_id,
-        expertId: parsed.expert_id,
-        content: parsed.content,
-        summary: parsed.summary,
-        currentTurnInput: currentTurnInput(),
+        agentSessionId: parsed.agent_session_id,
+        taskId: parsed.task_id,
+        message: parsed.message,
+      }));
+    },
+
+    async openChangeSet(input: OpenChangeSetInputValue) {
+      const parsed = OpenChangeSetInput.parse(input);
+      const sourceAgentRunId = leaderRunId();
+      if (!sourceAgentRunId) return fail("AGENT_RUN_REQUIRED", "open_change_set 只能由当前 Leader AgentRun 调用。");
+      const changeSet = store.openChangeSet({ flowId: parsed.flow_id, agentRunId: sourceAgentRunId, title: parsed.title });
+      return changeSet ? ok({ change_set: changeSet }) : fail("CHANGE_SET_OPEN_FAILED", "无法从当前 AgentRun 的 baseline 打开 ChangeSet。");
+    },
+
+    async bindChangeSet(input: BindChangeSetInputValue) {
+      const parsed = BindChangeSetInput.parse(input);
+      const changeSet = store.bindChangeSet({
+        flowId: parsed.flow_id,
+        changeSetId: parsed.change_set_id,
+        agentRunId: parsed.agent_run_id,
+        taskId: parsed.task_id,
       });
-      return ok(result);
+      return changeSet ? ok({ change_set: changeSet }) : fail("CHANGE_SET_BIND_FAILED", "ChangeSet 必须处于 open，且 AgentRun、Task 与 Flow 归属一致。");
     },
 
-    async interruptWorkRun(input: WorkRunActionInputValue) {
-      const parsed = WorkRunActionInput.parse(input);
-      const result = store.interruptWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
-      if (!result.ok) return fail(result.error.code, result.error.message);
-      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "interrupt" });
-      return ok({ work_run: result.work_run });
+    async finalizeChangeSet(input: FinalizeChangeSetInputValue) {
+      const parsed = FinalizeChangeSetInput.parse(input);
+      const changeSet = store.finalizeChangeSet({ flowId: parsed.flow_id, changeSetId: parsed.change_set_id, summary: parsed.summary });
+      return changeSet ? ok({ change_set: changeSet }) : fail("CHANGE_SET_FINALIZE_FAILED", "ChangeSet 不存在、不属于当前 Flow 或已终态。");
     },
 
-    async resumeWorkRun(input: WorkRunActionInputValue) {
-      const parsed = WorkRunActionInput.parse(input);
-      const result = store.resumeWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
-      if (!result.ok) return fail(result.error.code, result.error.message);
-      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "resume" });
-      return ok({ work_run: result.work_run, next: "重新读取 Task，再显式决定要续接哪一位 Expert；不要自动批量派发。" });
-    },
-
-    async cancelWorkRun(input: WorkRunActionInputValue) {
-      const parsed = WorkRunActionInput.parse(input);
-      const result = store.cancelWorkRun({ flowId: parsed.flow_id, workRunId: parsed.work_run_id });
-      if (!result.ok) return fail(result.error.code, result.error.message);
-      await hooks.onWorkRunChanged?.({ flowId: parsed.flow_id, workRun: result.work_run, action: "cancel" });
-      return ok({ work_run: result.work_run });
+    async abandonChangeSet(input: AbandonChangeSetInputValue) {
+      const parsed = AbandonChangeSetInput.parse(input);
+      const changeSet = store.abandonChangeSet({ flowId: parsed.flow_id, changeSetId: parsed.change_set_id });
+      return changeSet ? ok({ change_set: changeSet }) : fail("CHANGE_SET_ABANDON_FAILED", "ChangeSet 不存在、不属于当前 Flow 或已终态。");
     },
   };
 }
 
 export function createLeaderMcpServer(handlers: ReturnType<typeof createLeaderToolHandlers>) {
-  const server = new McpServer({ name: "squadflow-leader", version: "0.1.0" });
-
-  server.registerTool(
-    "get_context",
-    { title: "get_context", description: "Return the current SquadFlow Platform context for a Flow.", inputSchema: GetContextInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.getContext(input) }] }),
+  const server = new McpServer({ name: "squadflow-leader", version: "0.2.0" });
+  const register = (
+    name: string,
+    description: string,
+    inputSchema: unknown,
+    handler: (input: any) => Promise<string>,
+  ) => (server.registerTool as any)(
+    name,
+    { title: name, description, inputSchema },
+    async (input: any) => ({ content: [{ type: "text", text: await handler(input) }] }),
   );
 
-  server.registerTool(
-    "update_flow_name",
-    {
-      title: "update_flow_name",
-      description: "Set the generated name for a new Flow during the platform's internal naming turn.",
-      inputSchema: UpdateFlowNameInput,
-    },
-    async (input) => ({ content: [{ type: "text", text: await handlers.updateFlowName(input) }] }),
-  );
-
-  server.registerTool(
-    "ask_user",
-    { title: "ask_user", description: "Ask the user clarification questions. Creates a pending clarification card.", inputSchema: AskUserInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.askUser(input) }] }),
-  );
-
-  server.registerTool(
-    "create_plan",
-    { title: "create_plan", description: "Create or rewrite a Spec plan. The UI shows it as a pending Spec card.", inputSchema: CreatePlanInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.createPlan(input) }] }),
-  );
-
-  server.registerTool(
-    "create_task",
-    { title: "create_task", description: "Create a task for the active WorkRun (single-expert path). Multi-step same-role work goes into one task description. Do not use after an orchestration plan was submitted this turn.", inputSchema: CreateTaskInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.createTask(input) }] }),
-  );
-
-  server.registerTool(
-    "save_execution_plan",
-    { title: "save_execution_plan", description: "Save an execution plan artifact for the active WorkRun (e.g. after Spec approval, single-expert path).", inputSchema: SaveExecutionPlanInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.saveExecutionPlan(input) }] }),
-  );
-
-  server.registerTool(
+  register("get_context", "读取当前 Flow 的 Supervisor 投影。", GetContextInput, handlers.getContext);
+  register("update_flow_name", "在内部命名 Run 中设置 Flow 名称。", UpdateFlowNameInput, handlers.updateFlowName);
+  register("ask_user", "创建普通澄清请求；解决后平台创建新的 Leader AgentRun。", AskUserInput, handlers.askUser);
+  register("create_plan", "创建或修订 Flow 计划。每个修订精确绑定自己的审批。", CreatePlanInput, handlers.createPlan);
+  register("create_task", "创建 Flow 内的持久 Task。Task 状态不会由 AgentRun 结果自动推导。", CreateTaskInput, handlers.createTask);
+  register(
     "submit_orchestration_plan",
-    {
-      title: "submit_orchestration_plan",
-      description:
-        "Submit a multi-expert orchestration plan. Requires 2+ distinct enabled expert roles; single-role work must use create_task + dispatch_agent instead. node expert_id may be person_name, role_title, or template expert_id. If approval is pending, stop and wait. If auto_approved, dispatch ready returned tasks; after plan_approved, the Leader dispatches approved tasks by dependency.",
-      inputSchema: SubmitOrchestrationPlanInput,
-    },
-    async (input) => ({ content: [{ type: "text", text: await handlers.submitOrchestrationPlan(input) }] }),
+    "创建编排修订。单 Expert 也允许建卡；approval_required 等待批准，automatic 立即物化 Task。",
+    SubmitOrchestrationPlanInput,
+    handlers.submitOrchestrationPlan,
   );
-
-  server.registerTool(
-    "resolve_plan_feedback",
-    { title: "resolve_plan_feedback", description: "Resolve feedback without changing the plan and restore its pending approval.", inputSchema: ResolvePlanFeedbackInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.resolvePlanFeedback(input) }] }),
-  );
-
-  server.registerTool(
-    "update_task",
-    { title: "update_task", description: "Update task fields, status, or dependencies (single-expert / manual task path).", inputSchema: UpdateTaskInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.updateTask(input) }] }),
-  );
-
-  server.registerTool(
-    "list_tasks",
-    { title: "list_tasks", description: "List tasks for a Flow.", inputSchema: ListTasksInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.listTasks(input) }] }),
-  );
-
-  server.registerTool(
-    "get_task",
-    { title: "get_task", description: "Get one task by id.", inputSchema: GetTaskInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.getTask(input) }] }),
-  );
-
-  server.registerTool(
+  register("resolve_orchestration_feedback", "标记当前编排修订反馈已处理。", ResolveOrchestrationFeedbackInput, handlers.resolveOrchestrationFeedback);
+  register("update_task", "显式更新 Task 字段、业务状态或依赖。", UpdateTaskInput, handlers.updateTask);
+  register("list_tasks", "列出 Flow 内 Task。", ListTasksInput, handlers.listTasks);
+  register("get_task", "读取一个 Task。", GetTaskInput, handlers.getTask);
+  register(
     "dispatch_agent",
-    { title: "dispatch_agent", description: "Start or resume a task-bound Expert for a single-expert task or a materialized plan node. expert_id must be an enabled template id from get_context.experts.", inputSchema: DispatchAgentInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.dispatchAgent(input) }] }),
+    "为 Task 创建新的 Expert AgentSession 与首个 AgentRun；平台不会替 Leader 选择是否复用旧 Session。",
+    DispatchAgentInput,
+    handlers.dispatchAgent,
   );
-
-  server.registerTool(
-    "cancel_agent",
-    { title: "cancel_agent", description: "Interrupt the running Expert AgentSession bound to a Task.", inputSchema: CancelAgentInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.cancelAgent(input) }] }),
-  );
-
-  server.registerTool(
+  register(
     "send_message",
-    {
-      title: "send_message",
-      description: "Talk to one enabled Expert without creating a Task. If that FlowExpert is running, steer its current turn; otherwise resume its existing provider conversation for a taskless reply.",
-      inputSchema: SendMessageInput,
-    },
-    async (input) => ({ content: [{ type: "text", text: await handlers.sendMessage(input) }] }),
+    "向已有 Expert AgentSession 发送消息；运行中引导当前 Run，空闲时在同一 Session 创建新 Run。",
+    SendMessageInput,
+    handlers.sendMessage,
   );
-
-  server.registerTool(
-    "interrupt_work_run",
-    { title: "interrupt_work_run", description: "Interrupt an executing WorkRun while preserving Task progress and provider context.", inputSchema: WorkRunActionInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.interruptWorkRun(input) }] }),
-  );
-
-  server.registerTool(
-    "resume_work_run",
-    { title: "resume_work_run", description: "Resume an interrupted WorkRun only after the user explicitly asks to continue. This does not dispatch Experts automatically.", inputSchema: WorkRunActionInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.resumeWorkRun(input) }] }),
-  );
-
-  server.registerTool(
-    "cancel_work_run",
-    { title: "cancel_work_run", description: "Permanently cancel a WorkRun when the user explicitly asks to abandon it.", inputSchema: WorkRunActionInput },
-    async (input) => ({ content: [{ type: "text", text: await handlers.cancelWorkRun(input) }] }),
-  );
-
+  register("cancel_agent", "幂等取消指定 Expert AgentSession 的当前活跃 AgentRun。", CancelAgentInput, handlers.cancelAgent);
+  register("open_change_set", "从当前 Leader AgentRun 已捕获的 baseline 显式打开 ChangeSet。首次真实写入仍会自动懒创建。", OpenChangeSetInput, handlers.openChangeSet);
+  register("bind_change_set", "把同一 Flow 内的 AgentRun（及可选 Task）绑定到一个 open ChangeSet。", BindChangeSetInput, handlers.bindChangeSet);
+  register("finalize_change_set", "冻结 ChangeSet 当前文件投影和 Review，后续修改不会覆盖该历史。", FinalizeChangeSetInput, handlers.finalizeChangeSet);
+  register("abandon_change_set", "放弃 open ChangeSet，但保留历史记录。", AbandonChangeSetInput, handlers.abandonChangeSet);
   return server;
 }

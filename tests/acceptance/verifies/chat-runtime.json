@@ -1,0 +1,1 @@
+{"id":"chat-runtime","description":"聊天与 Runtime 展示","assertions":["中文问答、流式正文、reasoning 和 ToolCall 展示自然","复制、折叠、滚动和失败恢复可用","完成后刷新不重复、不丢失、不重排时间线"]}

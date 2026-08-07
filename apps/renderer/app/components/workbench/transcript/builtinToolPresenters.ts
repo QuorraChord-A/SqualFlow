@@ -18,7 +18,7 @@ export function isExplicitPermissionDenial(output: unknown): boolean {
   }
   if (typeof content !== "string") return false;
   return content.startsWith("用户已明确拒绝执行该风险命令")
-    || /^该风险命令已在当前 (?:Task|WorkRun) 中被用户明确拒绝/u.test(content);
+    || /^该风险命令已在当前 Task 中被用户明确拒绝/u.test(content);
 }
 
 function kindForBuiltInTool(tool: TimelineTool): ToolKind {

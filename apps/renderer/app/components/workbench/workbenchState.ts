@@ -1,23 +1,22 @@
-import type { AgentSession } from "../../hooks/useFlowExperts";
 import type { OrchestrationPlanView } from "../../types/orchestration";
 
 export type RightPanelTab = "overview" | "files" | "dynamic";
 
 export type DynamicWorkbenchTab =
-  | { type: "expert_chat"; flow_expert_id: string; agent_session_id?: string | null; title: string }
-  | { type: "spec_preview"; spec_revision_id: string; title: string }
+  | { type: "expert_chat"; agent_session_id: string; agent_run_id?: string | null; title: string }
+  | { type: "plan_preview"; plan_revision_id: string; title: string }
   | { type: "artifact_preview"; artifact_id: string; title: string }
-  | { type: "orchestration_plan"; plan_id?: string; plan_revision_id: string; title: string; plan?: OrchestrationPlanView }
+  | { type: "orchestration_plan"; orchestration_plan_id: string; orchestration_revision_id: string; title: string; plan?: OrchestrationPlanView }
   | { type: "workspace_file_preview"; path: string | null; title: string; tabId?: string }
-  | { type: "review"; title: string; work_run_id?: string }
+  | { type: "change_set"; title: string; change_set_id?: string }
   | { type: "browser"; title: string };
 
 export function dynamicWorkbenchTabId(tab: DynamicWorkbenchTab) {
-  if (tab.type === "expert_chat") return `expert_chat:${tab.flow_expert_id}`;
-  if (tab.type === "spec_preview") return `spec_preview:${tab.spec_revision_id}`;
+  if (tab.type === "expert_chat") return `expert_chat:${tab.agent_session_id}`;
+  if (tab.type === "plan_preview") return `plan_preview:${tab.plan_revision_id}`;
   if (tab.type === "artifact_preview") return `artifact_preview:${tab.artifact_id}`;
-  if (tab.type === "orchestration_plan") return `orchestration_plan:${tab.plan_revision_id}`;
-  if (tab.type === "review") return "review";
+  if (tab.type === "orchestration_plan") return `orchestration_plan:${tab.orchestration_revision_id}`;
+  if (tab.type === "change_set") return `change_set:${tab.change_set_id ?? "latest"}`;
   if (tab.type === "browser") return "browser";
   return `workspace_file_preview:${tab.tabId ?? tab.path ?? "open-file"}`;
 }
@@ -62,23 +61,23 @@ function isDynamicWorkbenchTab(value: unknown): value is DynamicWorkbenchTab {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.type === "expert_chat") {
-    return typeof candidate.flow_expert_id === "string" && typeof candidate.title === "string";
+    return typeof candidate.agent_session_id === "string" && typeof candidate.title === "string";
   }
-  if (candidate.type === "spec_preview") {
-    return typeof candidate.spec_revision_id === "string" && typeof candidate.title === "string";
+  if (candidate.type === "plan_preview") {
+    return typeof candidate.plan_revision_id === "string" && typeof candidate.title === "string";
   }
   if (candidate.type === "artifact_preview") {
     return typeof candidate.artifact_id === "string" && typeof candidate.title === "string";
   }
   if (candidate.type === "orchestration_plan") {
-    return typeof candidate.plan_revision_id === "string" && typeof candidate.title === "string";
+    return typeof candidate.orchestration_revision_id === "string" && typeof candidate.title === "string";
   }
   if (candidate.type === "workspace_file_preview") {
     return (typeof candidate.path === "string" || candidate.path === null) && typeof candidate.title === "string";
   }
-  if (candidate.type === "review") {
+  if (candidate.type === "change_set") {
     return typeof candidate.title === "string"
-      && (candidate.work_run_id === undefined || typeof candidate.work_run_id === "string");
+      && (candidate.change_set_id === undefined || typeof candidate.change_set_id === "string");
   }
   if (candidate.type === "browser") {
     return typeof candidate.title === "string";
@@ -99,19 +98,13 @@ export function parseRightPanelState(raw: string | null): PersistedRightPanelSta
     if (!candidate || typeof candidate !== "object") return null;
 
     const rawTab = (candidate as unknown as { tab?: unknown }).tab;
-    const legacyReviewSelected = rawTab === "review";
     const tab: RightPanelTab = rawTab === "dynamic" || rawTab === "files"
       ? rawTab
-      : legacyReviewSelected
-        ? "dynamic"
-        : "overview";
+      : "overview";
     const parsedDynamicTabsBeforePlanDedupe = Array.isArray(candidate.dynamicTabs)
       ? candidate.dynamicTabs.filter(isDynamicWorkbenchTab)
         .map((item) => isWorkspaceFileWorkbenchTab(item) ? normalizeWorkspaceFileTab(item) : item)
       : [];
-    if (legacyReviewSelected && !parsedDynamicTabsBeforePlanDedupe.some((item) => item.type === "review")) {
-      parsedDynamicTabsBeforePlanDedupe.push({ type: "review", title: "审核" });
-    }
     const activePlanTab = parsedDynamicTabsBeforePlanDedupe.find(
       (item) => item.type === "orchestration_plan" && dynamicWorkbenchTabId(item) === candidate.activeDynamicTabId,
     );
@@ -135,13 +128,9 @@ export function parseRightPanelState(raw: string | null): PersistedRightPanelSta
         ? candidate.activeWorkspaceFilePath
         : activeLegacyWorkspaceFileTab?.path ?? primaryWorkspaceFileTab?.path ?? null;
     const activeDynamicTabId = tab === "dynamic"
-      ? (
-      legacyReviewSelected
-        ? "review"
-        : typeof candidate.activeDynamicTabId === "string" && allowedIds.has(candidate.activeDynamicTabId)
+      ? typeof candidate.activeDynamicTabId === "string" && allowedIds.has(candidate.activeDynamicTabId)
         ? candidate.activeDynamicTabId
         : null
-      )
       : null;
     const nextTab = activeLegacyWorkspaceFileTab && isPrimaryWorkspaceFileTab(activeLegacyWorkspaceFileTab)
       ? "files"
@@ -221,28 +210,19 @@ export function openBrowserWorkbenchTab(state: RightPanelState): RightPanelState
   return openDynamicWorkbenchTab(state, { type: "browser", title: "浏览器" });
 }
 
-export function openReviewWorkbenchTab(state: RightPanelState, workRunId?: string): RightPanelState {
-  const resetState = workRunId
-    ? state
-    : {
-        ...state,
-        dynamicTabs: state.dynamicTabs.map((tab): DynamicWorkbenchTab => {
-          if (tab.type !== "review") return tab;
-          return { type: "review", title: tab.title };
-        }),
-      };
-  return openDynamicWorkbenchTab(resetState, {
-    type: "review",
-    title: "审核",
-    ...(workRunId ? { work_run_id: workRunId } : {}),
+export function openChangeSetWorkbenchTab(state: RightPanelState, changeSetId?: string): RightPanelState {
+  return openDynamicWorkbenchTab(state, {
+    type: "change_set",
+    title: "变更",
+    ...(changeSetId ? { change_set_id: changeSetId } : {}),
   });
 }
 
 export function openOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {
   const tab: DynamicWorkbenchTab = {
     type: "orchestration_plan",
-    plan_id: plan.plan_id,
-    plan_revision_id: plan.revision.plan_revision_id,
+    orchestration_plan_id: plan.orchestration_plan_id,
+    orchestration_revision_id: plan.revision.orchestration_revision_id,
     title: plan.revision.title,
     plan,
   };
@@ -256,19 +236,19 @@ export function openOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: 
 
 export function syncOrchestrationPlanWorkbenchTab(state: RightPanelState, plan: OrchestrationPlanView): RightPanelState {
   const existing = state.dynamicTabs.find((item) =>
-    item.type === "orchestration_plan" && (item.plan_id ?? item.plan?.plan_id) === plan.plan_id
+    item.type === "orchestration_plan" && item.orchestration_plan_id === plan.orchestration_plan_id
   );
   if (!existing || existing.type !== "orchestration_plan") return state;
   if (
-    existing.plan_revision_id === plan.revision.plan_revision_id
+    existing.orchestration_revision_id === plan.revision.orchestration_revision_id
     && existing.title === plan.revision.title
     && existing.plan === plan
   ) return state;
 
   const nextTab: DynamicWorkbenchTab = {
     type: "orchestration_plan",
-    plan_id: plan.plan_id,
-    plan_revision_id: plan.revision.plan_revision_id,
+    orchestration_plan_id: plan.orchestration_plan_id,
+    orchestration_revision_id: plan.revision.orchestration_revision_id,
     title: plan.revision.title,
     plan,
   };
@@ -363,10 +343,10 @@ export function closeDynamicWorkbenchTab(state: RightPanelState, tabId: string):
 
 export function hasWorkbenchContent(input: {
   tasks: unknown[];
-  specRevisions: unknown[];
+  planRevisions: unknown[];
   artifacts: unknown[];
 }) {
-  return input.tasks.length > 0 || input.specRevisions.length > 0 || input.artifacts.length > 0;
+  return input.tasks.length > 0 || input.planRevisions.length > 0 || input.artifacts.length > 0;
 }
 
 export function expertChatTabFromDispatchEvent(
@@ -374,42 +354,32 @@ export function expertChatTabFromDispatchEvent(
 ): Extract<DynamicWorkbenchTab, { type: "expert_chat" }> | null {
   if (!message || typeof message !== "object") return null;
   const envelope = message as Record<string, unknown>;
-  if (envelope.type !== "flow_expert:event" && envelope.type !== "session:event") return null;
+  if (envelope.type !== "agent_session:event") return null;
   const data = envelope.data;
   if (!data || typeof data !== "object") return null;
   const payload = data as Record<string, unknown>;
   if (payload.event && payload.event !== "created" && payload.event !== "updated") return null;
 
-  const flowExpertId = typeof payload.flow_expert_id === "string" ? payload.flow_expert_id : "";
-  const agentSessionId = typeof payload.agent_session_id === "string" ? payload.agent_session_id : null;
-  const expertId = typeof payload.expert_id === "string" ? payload.expert_id : "";
-  if (!flowExpertId || !expertId || expertId === "exp-leader") return null;
+  const agentSessionId = typeof payload.agent_session_id === "string" ? payload.agent_session_id : "";
+  const agentRunId = typeof payload.active_agent_run_id === "string"
+    ? payload.active_agent_run_id
+    : typeof payload.latest_agent_run_id === "string" ? payload.latest_agent_run_id : null;
+  const role = typeof payload.role === "string" ? payload.role : "";
+  if (!agentSessionId || role === "leader") return null;
 
   return {
     type: "expert_chat",
-    flow_expert_id: flowExpertId,
     agent_session_id: agentSessionId,
+    agent_run_id: agentRunId,
     title:
       typeof payload.display_name === "string" && payload.display_name.trim()
         ? payload.display_name
-        : expertId,
+        : "Expert",
   };
 }
 
-export function deriveLeaderAgentSessionId(
-  dashboardLeaderAgentSessionId: string | null,
-  agentSessions: AgentSession[],
+export function deriveLeaderAgentRunId(
+  dashboardLeaderAgentRunId: string | null,
 ): string | null {
-  const dashboardLeader = dashboardLeaderAgentSessionId
-    ? agentSessions.find(
-        (session) => session.id === dashboardLeaderAgentSessionId && session.expert_id === "exp-leader",
-      )
-    : null;
-  if (dashboardLeader) return dashboardLeader.id;
-  if (dashboardLeaderAgentSessionId && !agentSessions.some((session) => session.id === dashboardLeaderAgentSessionId)) {
-    return dashboardLeaderAgentSessionId;
-  }
-  return agentSessions
-    .filter((session) => session.expert_id === "exp-leader")
-    .sort((left, right) => String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")))[0]?.id ?? null;
+  return dashboardLeaderAgentRunId;
 }

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import type { DecisionCardData, SpecCardState } from "../../../hooks/useDashboardData";
+import type { DecisionRequestCardData, PlanCardState } from "../../../hooks/useDashboardData";
 import type { TranscriptActivity } from "./types";
 import type { TurnTiming } from "./buildTranscriptTimeline";
 import type { TranscriptBlock } from "./types";
@@ -11,12 +11,12 @@ type TranscriptTimelineRendererProps = {
   blocks: TranscriptBlock[];
   turnId?: string;
   flowId: string;
-  decisionCardsById: Map<string, DecisionCardData>;
-  specCardsById: Map<string, SpecCardState>;
+  decisionRequestsById: Map<string, DecisionRequestCardData>;
+  planCardsById: Map<string, PlanCardState>;
   plansByRevisionId?: Map<string, OrchestrationPlanView>;
-  onSpecOpen: (specRevisionId: string, title: string) => void;
-  onPlanOpen?: (plan: OrchestrationPlanView) => void;
-  onPlanApprove?: (plan: OrchestrationPlanView) => void;
+  onPlanOpen: (planRevisionId: string, title: string) => void;
+  onOrchestrationOpen?: (plan: OrchestrationPlanView) => void;
+  onOrchestrationApprove?: (plan: OrchestrationPlanView) => void;
   activity?: TranscriptActivity;
   turnTiming?: TurnTiming | null;
   showReasoning?: boolean;
@@ -32,12 +32,12 @@ export default function TranscriptTimelineRenderer({
   blocks,
   turnId,
   flowId,
-  decisionCardsById,
-  specCardsById,
+  decisionRequestsById,
+  planCardsById,
   plansByRevisionId = new Map(),
-  onSpecOpen,
-  onPlanOpen = () => {},
-  onPlanApprove = () => {},
+  onPlanOpen,
+  onOrchestrationOpen = () => {},
+  onOrchestrationApprove = () => {},
   activity,
   turnTiming,
   showReasoning = true,
@@ -59,12 +59,12 @@ export default function TranscriptTimelineRenderer({
           blocks={blocks}
           turnId={turnId}
           flowId={flowId}
-          decisionCardsById={decisionCardsById}
-          specCardsById={specCardsById}
+          decisionRequestsById={decisionRequestsById}
+          planCardsById={planCardsById}
           plansByRevisionId={plansByRevisionId}
-          onSpecOpen={onSpecOpen}
           onPlanOpen={onPlanOpen}
-          onPlanApprove={onPlanApprove}
+          onOrchestrationOpen={onOrchestrationOpen}
+          onOrchestrationApprove={onOrchestrationApprove}
           activity={activity}
           turnTiming={turnTiming}
           showReasoning={showReasoning}
@@ -76,4 +76,4 @@ export default function TranscriptTimelineRenderer({
   );
 }
 
-export type { TranscriptBlock, TranscriptActivity, TurnTiming, DecisionCardData, SpecCardState };
+export type { TranscriptBlock, TranscriptActivity, TurnTiming, DecisionRequestCardData, PlanCardState };

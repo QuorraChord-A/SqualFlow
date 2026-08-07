@@ -16,10 +16,10 @@ export function persistedTurnTimings(
   sdkSessionId: string,
 ): PersistedTurnTiming[] {
   return events
-    .filter((event) => event.eventType === "agent_session.turn_completed")
+    .filter((event) => event.eventType === "agent_run.turn_completed")
     .map((event) => {
       const payload = safeParseJson(event.payloadJson);
-      const sdkSessionIdValue = payload?.sdk_session_id;
+      const sdkSessionIdValue = payload?.provider_session_id;
       if (sdkSessionIdValue !== sdkSessionId) return null;
       const duration = payload?.duration_ms;
       return {

@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "SquadFlow Supervisor acceptance assets",
+  "$defs": {
+    "textArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "atom": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "params", "steps", "verify"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "description": { "type": "string", "minLength": 1 },
+        "params": { "type": "array", "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_]*$" } },
+        "steps": { "$ref": "#/$defs/textArray" },
+        "verify": { "anyOf": [{ "$ref": "#/$defs/textArray" }, { "type": "null" }] }
+      }
+    },
+    "verify": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "assertions"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "description": { "type": "string", "minLength": 1 },
+        "assertions": { "$ref": "#/$defs/textArray" }
+      }
+    },
+    "step": {
+      "anyOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["atom"],
+          "properties": {
+            "atom": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+            "params": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } }
+          }
+        }
+      ]
+    },
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "category", "preconditions", "requirement", "steps", "verifies", "verify", "recovery", "cleanup"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "name": { "type": "string", "minLength": 1 },
+        "category": { "type": "string", "minLength": 1 },
+        "preconditions": { "$ref": "#/$defs/textArray" },
+        "requirement": { "type": "string", "minLength": 1 },
+        "steps": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/step" } },
+        "verifies": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "pattern": "^[a-z0-9-]+$" } },
+        "verify": { "$ref": "#/$defs/textArray" },
+        "recovery": { "$ref": "#/$defs/textArray" },
+        "cleanup": { "$ref": "#/$defs/textArray" }
+      }
+    }
+  }
+}

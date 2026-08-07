@@ -64,9 +64,9 @@ export default function FlowItem({
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const displayName = useFlowNameReveal(flow.name);
-  const isStreaming = Boolean(flow.is_streaming);
-  const isRunning = flow.status === 'active';
-  const hasUnreadOutput = Boolean(flow.has_unread_messages);
+  const isRunning = flow.has_active_agent_run === true || flow.status === 'active';
+  const indicator = flow.indicator
+    ?? (flow.has_pending_user_action ? 'pending' : isRunning ? 'active' : flow.has_unread_output ? 'unread' : 'idle');
   const canOpenInFinder = Boolean(
     projectPath
     && typeof window !== 'undefined'
@@ -134,12 +134,12 @@ export default function FlowItem({
             data-testid="flow-status-indicator"
             className="flex size-4 items-center justify-center transition-opacity group-hover:opacity-0"
           >
-            {flow.has_pending_decision ? (
+            {indicator === 'pending' ? (
               <span
                 data-testid="flow-pending-spinner"
                 className="size-2.5 animate-spin rounded-full border-2 border-status-pending/35 border-t-status-pending"
               />
-            ) : isStreaming ? (
+            ) : indicator === 'active' ? (
               <span
                 data-testid="flow-streaming-spinner"
                 className="size-2.5 animate-spin rounded-full border-2 border-emerald-400/35 border-t-emerald-400"
@@ -147,7 +147,7 @@ export default function FlowItem({
             ) : (
               <span
                 data-testid="flow-status-dot"
-                className={`size-2 rounded-full ${hasUnreadOutput ? 'bg-blue-500' : 'bg-muted-foreground/45'}`}
+                className={`size-2 rounded-full ${indicator === 'unread' ? 'bg-blue-500' : 'bg-muted-foreground/45'}`}
               />
             )}
           </span>
@@ -173,13 +173,7 @@ export default function FlowItem({
 
         <span data-testid="flow-name" aria-hidden="true" className="min-w-0 flex-1 truncate text-sm">{displayName}</span>
 
-        {flow.legacy_spec_flow && (
-          <span className="shrink-0 rounded border border-border px-1 text-[10px] font-medium text-muted-foreground" title="历史 Spec 流程，只读兼容">
-            历史 Spec
-          </span>
-        )}
-
-        {flow.has_pending_decision && (
+        {indicator === 'pending' && (
           <span className="shrink-0 text-[10px] font-medium text-status-pending">
             等待操作
           </span>
@@ -249,7 +243,7 @@ export default function FlowItem({
                 className="text-status-pending"
               >
                 <XCircle className="w-3.5 h-3.5 mr-2" />
-                终止流程
+                中断协作
               </DropdownMenuItem>
             )}
             {(onTogglePinned || onEditFlow || (onAbortFlow && isRunning)) && onDeleteFlow && (
@@ -271,16 +265,10 @@ export default function FlowItem({
       <HoverCardContent side="right" align="start" sideOffset={8} className="w-60 p-3">
         <p className="truncate text-sm font-semibold text-foreground">{displayName}</p>
         <div className="mt-2.5 space-y-1.5 border-t border-border pt-2.5 text-xs text-muted-foreground">
-          {flow.current_stage && (
-            <div className="flex items-center justify-between gap-3">
-              <span>阶段</span>
-              <span className="truncate text-foreground">{flow.current_stage}</span>
-            </div>
-          )}
           <div className="flex items-center justify-between gap-3">
             <span>状态</span>
             <span className="truncate text-foreground">
-              {flow.has_pending_decision ? '等待操作' : FLOW_STATUS_LABELS[flow.status]}
+              {indicator === 'pending' ? '等待操作' : FLOW_STATUS_LABELS[flow.status]}
             </span>
           </div>
           <div className="flex items-center gap-1.5">

@@ -1,0 +1,1 @@
+{"id":"create-flow-with-request","description":"创建 Flow 并发送真实中文需求","params":["projectName","request"],"steps":["进入新任务页面并选择项目 {projectName}","确认当前执行模式和模型配置符合场景前置条件","在输入框原样填写中文需求：{request}","发送需求并等待 Flow 出现在左侧","重新读取无障碍树"],"verify":["新 Flow 已创建并处于选中状态","聊天时间线显示原始中文需求"]}

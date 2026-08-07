@@ -1,0 +1,1 @@
+{"id":"interrupt-flow","description":"从左侧菜单中断当前 Flow 全部协作","params":[],"steps":["打开当前 Flow 的更多菜单","选择中断协作并确认","等待状态更新并重新读取无障碍树"],"verify":["Flow 内 Leader 与 Expert 的活跃 Run 全部结束","Flow、Task、计划、编排卡和历史仍可查看"]}

@@ -14,8 +14,7 @@ function timelineItemDto(item: CanonicalTimelineItem) {
     lifecycle: item.lifecycle,
     message_id: item.messageId,
     session_id: item.sessionId,
-    agent_session_id: item.agentSessionId,
-    work_run_id: item.workRunId,
+    agent_run_id: item.agentRunId,
     presentation_turn_id: item.presentationTurnId,
     message_kind: item.messageKind,
     payload: item.payload,
@@ -35,8 +34,8 @@ export async function finishInterruptedTurn(input: {
   flowId: string;
   sessionId: string;
   transcriptId: string;
+  agentRunId: string;
   agentSessionId: string;
-  flowExpertId: string;
   eventBus: EventBus;
   chatJournal: ChatJournal;
   logId?: string;
@@ -66,7 +65,7 @@ export async function finishInterruptedTurn(input: {
     input.sessionId,
     chunk,
     input.transcriptId,
-    input.agentSessionId,
+    input.agentRunId,
   );
   if (result.ignored) return null;
 
@@ -74,8 +73,8 @@ export async function finishInterruptedTurn(input: {
     type: "session:transcript_event",
     flow_id: input.flowId,
     session_id: input.sessionId,
+    agent_run_id: input.agentRunId,
     agent_session_id: input.agentSessionId,
-    flow_expert_id: input.flowExpertId,
     ...(input.logId ? { log_id: input.logId } : {}),
     data: {
       stream_epoch: input.chatJournal.getStreamEpoch(),
@@ -95,21 +94,21 @@ export async function finishInterruptedTurn(input: {
 }
 
 export class WsPusher {
-  private readonly flowExpertId: string;
+  private readonly agentSessionId: string;
   private readonly transcriptId: string;
 
   constructor(
     private readonly flowId: string,
     private readonly getSessionId: () => string,
-    private readonly agentSessionId: string,
+    private readonly agentRunId: string,
     private readonly eventBus: EventBus,
     private readonly chatJournal: ChatJournal,
     private readonly onOutputCompleted?: (flowId: string) => Promise<void> | void,
-    flowExpertId?: string,
+    agentSessionId?: string,
     transcriptId?: string,
   ) {
-    this.flowExpertId = flowExpertId ?? agentSessionId;
-    this.transcriptId = transcriptId ?? this.flowExpertId;
+    this.agentSessionId = agentSessionId ?? agentRunId;
+    this.transcriptId = transcriptId ?? this.agentSessionId;
   }
 
   async consume(event: PushedChunk): Promise<void> {
@@ -121,7 +120,7 @@ export class WsPusher {
       sessionId,
       chunk,
       this.transcriptId,
-      this.agentSessionId,
+      this.agentRunId,
     );
     if (result.ignored) return;
     const transcriptEvent = withCanonicalMessageId(transcriptEventFromChunk(chunk), result.messageId);
@@ -130,8 +129,8 @@ export class WsPusher {
       type: "session:transcript_event",
       flow_id: this.flowId,
       session_id: sessionId,
+      agent_run_id: this.agentRunId,
       agent_session_id: this.agentSessionId,
-      flow_expert_id: this.flowExpertId,
       ...(logId ? { log_id: logId } : {}),
       data: {
         stream_epoch: this.chatJournal.getStreamEpoch(),
@@ -169,7 +168,7 @@ export class WsPusher {
       createdAt,
       this.transcriptId,
       metadata,
-      this.agentSessionId,
+      this.agentRunId,
     );
     await this.publishMessageAdded(sessionId, commit);
   }
@@ -189,8 +188,8 @@ export class WsPusher {
       type: "session:transcript_event",
       flow_id: this.flowId,
       session_id: sessionId,
+      agent_run_id: this.agentRunId,
       agent_session_id: this.agentSessionId,
-      flow_expert_id: this.flowExpertId,
       data: {
         stream_epoch: this.chatJournal.getStreamEpoch(),
         cursor: commit.cursor,

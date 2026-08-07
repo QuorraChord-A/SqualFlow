@@ -15,7 +15,7 @@ import {
   buildLeaderGuidePrompt,
   buildLeaderPrompt,
   buildFlowNameRequestPrompt,
-  type LeaderPlanFeedback,
+  type LeaderOrchestrationFeedback,
   type LeaderTurnInput,
 } from "../leaderPrompt.js";
 import { AsyncMessageQueue } from "./asyncMessageQueue.js";
@@ -108,10 +108,10 @@ function leaderGuideMessage(
   flowId: string,
   content: string,
   attachments?: MessageImageAttachment[],
-  planFeedback?: LeaderPlanFeedback[],
-  specRequested?: boolean,
+  orchestrationFeedback?: LeaderOrchestrationFeedback[],
+  modes?: { behaviorMode: "execute" | "plan"; riskMode: "auto_edit" | "full_access"; orchestrationMode: "approval_required" | "automatic" },
 ): SDKUserMessage {
-  const message = buildLeaderGuidePrompt({ flowId, content, attachments, planFeedback, specRequested });
+  const message = buildLeaderGuidePrompt({ flowId, content, attachments, orchestrationFeedback, ...modes });
   return {
     type: "user",
     message: {

@@ -1,0 +1,1 @@
+{"id":"approval-stop","description":"审批、停止与中断","assertions":["ToolCall 权限审批恢复同一 Run，计划、编排和澄清结果创建新 Leader Run","输入框停止只取消 Leader 当前 Run","中断协作取消全部活跃 Run 和待处理工具权限但保留业务与历史，重复操作幂等"]}

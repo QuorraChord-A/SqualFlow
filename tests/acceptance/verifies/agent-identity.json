@@ -1,0 +1,1 @@
+{"id":"agent-identity","description":"AgentSession 与 AgentRun","assertions":["新 dispatch 创建新 Expert Session 和首个 Run","复用旧 Expert 时运行中消息引导当前 Run，空闲时在同一 Session 创建新 Run","同一 Session 不会同时出现两个活跃 Run，Leader 可选择重新 dispatch"]}

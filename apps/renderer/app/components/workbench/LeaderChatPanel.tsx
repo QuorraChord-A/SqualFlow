@@ -1,20 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
 import type { UIMessage } from "ai";
-import { Square } from "lucide-react";
 import { PromptInput } from "@/components/ai-elements-official/prompt-input";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
 import {
   API_BASE,
   compactFlowContext,
@@ -22,21 +10,15 @@ import {
   type AgentContextCompactionDto,
   type AgentContextUsageDto,
 } from "../../lib/api";
-import { wsClient } from "../../lib/ws";
-import type { WsInMessage } from "../../lib/ws";
-import type { DecisionCardData } from "../../hooks/useDashboardData";
-import type { SpecCardState } from "../../hooks/useDashboardData";
-import type { AgentSession } from "../../hooks/useFlowExperts";
-import type { WorkRunReview } from "../../hooks/useFlowWorkbench";
-import { getDesktopBrowserBridge } from "../../lib/desktopBrowser";
-import ComposerModeMenu, { type PlanApproval, type RiskMode } from "../ComposerModeMenu";
-import PendingDecisionDock from "./PendingDecisionDock";
+import { wsClient, type WsInMessage } from "../../lib/ws";
+import type { DecisionRequestCardData, PlanCardState } from "../../hooks/useDashboardData";
+import ComposerModeMenu, { type BehaviorMode, type OrchestrationMode, type RiskMode } from "../ComposerModeMenu";
+import PendingDecisionRequestDock from "./PendingDecisionRequestDock";
 import SessionTranscriptPanel from "./SessionTranscriptPanel";
-import type { WorkRunDisplay } from "./SessionTranscriptPanel";
 import LeaderModelSelector from "../LeaderModelSelector";
 import BrowserElementAttachments from "../BrowserElementAttachments";
 import MessageImageAttachments from "../MessageImageAttachments";
-import PlanFeedbackAttachments from "../orchestration/PlanFeedbackAttachments";
+import OrchestrationFeedbackAttachments from "../orchestration/OrchestrationFeedbackAttachments";
 import RunningMessageQueue from "./RunningMessageQueue";
 import {
   EMPTY_RUNNING_QUEUE,
@@ -55,30 +37,25 @@ import {
   type MessageImageAttachment,
   type OutgoingMessageImageAttachment,
 } from "../../types/messageAttachments";
-import { usePlanFeedbackStore } from "../../stores/usePlanFeedbackStore";
-import type { OrchestrationPlanView, PlanFeedbackDraft } from "../../types/orchestration";
+import { useOrchestrationFeedbackStore } from "../../stores/useOrchestrationFeedbackStore";
+import type { OrchestrationFeedbackDraft, OrchestrationPlanView } from "../../types/orchestration";
 import { useNativeContextSlashMenu } from "../../hooks/useNativeContextSlashMenu";
+import { getDesktopBrowserBridge } from "../../lib/desktopBrowser";
 
 export interface LeaderChatPanelProps {
   flowId: string | null;
-  leaderAgentSessionId: string | null;
+  leaderAgentRunId: string | null;
+  activeLeaderAgentRunId?: string | null;
   initialOptimisticMessages?: UIMessage[];
-  initialPlanModeReturnRiskMode?: RiskMode | null;
-  onInitialPlanModeResolved?: () => void;
   flowStatus?: string;
-  decisionCardStatuses: Record<string, "pending" | "resolved" | "cancelled">;
-  decisionCardAnswers: Record<string, Record<string, string | string[]>>;
-  decisionCards: DecisionCardData[];
-  specCards: Record<string, SpecCardState>;
-  orchestrationPlans?: OrchestrationPlanView[];
+  behaviorMode?: BehaviorMode;
   riskMode?: RiskMode;
-  planApproval?: PlanApproval;
-  workRuns?: WorkRunDisplay[];
-  agentSessions?: AgentSession[];
-  onOpenSpecPreview?: (specRevisionId: string, title: string) => void;
+  orchestrationMode?: OrchestrationMode;
+  decisionRequests: DecisionRequestCardData[];
+  planCards: Record<string, PlanCardState>;
+  orchestrationPlans?: OrchestrationPlanView[];
+  onOpenPlanPreview?: (planRevisionId: string, title: string) => void;
   onOpenPlan?: (plan: OrchestrationPlanView) => void;
-  reviews?: WorkRunReview[];
-  onOpenReview?: (workRunId: string) => void;
   onOpenWorkspaceFile?: (path: string) => void;
   composerOnly?: boolean;
   composerVariant?: "default" | "compactFloating";
@@ -88,447 +65,133 @@ export interface LeaderChatPanelProps {
   onOpenModelSettings?: () => void;
 }
 
-type WorkRunWire = {
-  id?: string;
-  work_run_id?: string;
-  trigger_message_id?: string;
-  status?: string;
-  started_at?: string | null;
-  active_started_at?: string | null;
-  active_duration_ms?: number | null;
-  completed_at?: string | null;
-  work_root_path?: string | null;
-  input_snapshot_json?: string | null;
-  revision?: number;
-  execution_started_at?: string | null;
-};
-
-type PendingGuideMessage = {
-  clientMessageId: string;
-  displayText: string;
-  browserElementAttachments?: BrowserElementAttachment[];
-  imageAttachments?: MessageImageAttachment[];
-  planFeedback?: PlanFeedbackDraft[];
-};
-
-type LeaderMessageOptions = {
-  specRequested?: boolean;
+type MessageContent = {
   displayText?: string;
   browserElementAttachments?: BrowserElementAttachment[];
   imageAttachments?: MessageImageAttachment[];
-  outgoingAttachments?: OutgoingMessageImageAttachment[];
-  planFeedback?: PlanFeedbackDraft[];
-  reuseActiveWorkRun?: boolean;
+  orchestrationFeedback?: OrchestrationFeedbackDraft[];
 };
 
-const acceptedPlanApprovalStatuses = new Set(["approved", "auto_approved"]);
-const pendingPlanRevisionStatuses = new Set(["generating", "pending", "pending_approval", "feedback_pending"]);
-const EMPTY_AGENT_SESSIONS: AgentSession[] = [];
-
-function hasPendingPlanWorkflow(
-  specCards: Record<string, SpecCardState>,
-  plans: OrchestrationPlanView[],
-) {
-  if (Object.values(specCards).some((card) => card.status === "pending")) return true;
-  return plans.some((plan) => {
-    const approvalStatus = plan.approval?.status;
-    return approvalStatus === "pending"
-      || approvalStatus === "feedback_pending"
-      || pendingPlanRevisionStatuses.has(plan.revision.status);
-  });
-}
-
-function planApprovalEventField(data: unknown, camelName: string, snakeName: string) {
-  if (!data || typeof data !== "object") return undefined;
-  const record = data as Record<string, unknown>;
-  return record[camelName] ?? record[snakeName];
-}
-
-function planApprovalBelongsToSession(
-  data: unknown,
-  startedAt: number | null,
-  workRunId: string | null,
-) {
-  const eventWorkRunId = planApprovalEventField(data, "workRunId", "work_run_id");
-  if (workRunId && typeof eventWorkRunId === "string") return eventWorkRunId === workRunId;
-  const createdAt = planApprovalEventField(data, "createdAt", "created_at");
-  if (startedAt !== null && typeof createdAt === "string") {
-    const timestamp = Date.parse(createdAt);
-    if (Number.isFinite(timestamp)) return timestamp >= startedAt - 2_000;
-  }
-  // A plan approval event without either identity is still useful for a newly
-  // entered plan mode, but it cannot match a session already tied to a turn.
-  return !workRunId;
-}
-
-function outgoingAttachmentsForMessage(options: Pick<
-  LeaderMessageOptions,
-  "browserElementAttachments" | "imageAttachments" | "outgoingAttachments"
->): OutgoingMessageImageAttachment[] {
-  if (options.outgoingAttachments !== undefined) return options.outgoingAttachments;
+function outgoingAttachments(content: MessageContent): OutgoingMessageImageAttachment[] {
   return [
-    ...(options.imageAttachments ?? []).flatMap((attachment) => {
+    ...(content.imageAttachments ?? []).flatMap((attachment) => {
       const outgoing = outgoingImageAttachment(attachment);
       return outgoing ? [outgoing] : [];
     }),
-    ...browserElementsToOutgoingAttachments(options.browserElementAttachments ?? []),
+    ...browserElementsToOutgoingAttachments(content.browserElementAttachments ?? []),
   ];
 }
 
-function queuedClientPayload(message: RunningQueuedMessage): Record<string, unknown> {
+function queuePayload(message: RunningQueuedMessage) {
   return {
-    ...message,
-    ...(message.imageAttachments?.length ? {
-      imageAttachments: message.imageAttachments.map(({ dataUrl: _dataUrl, ...attachment }) => attachment),
-    } : {}),
+    content: message.content,
+    ...(message.displayContent ? { displayContent: message.displayContent } : {}),
     ...(message.browserElementAttachments?.length ? {
-      browserElementAttachments: message.browserElementAttachments.map(({ screenshotDataUrl: _screenshotDataUrl, ...attachment }) => attachment),
+      browserElementAttachments: message.browserElementAttachments.map(({ screenshotDataUrl: _screenshot, ...item }) => item),
     } : {}),
+    ...(message.imageAttachments?.length ? {
+      imageAttachments: message.imageAttachments.map(({ dataUrl: _data, ...item }) => item),
+    } : {}),
+    ...(message.orchestrationFeedback?.length ? { orchestrationFeedback: message.orchestrationFeedback } : {}),
   };
 }
 
-function runningGuideUiMessage(
-  clientMessageId: string,
-  displayText: string,
-  options: Pick<PendingGuideMessage, "browserElementAttachments" | "imageAttachments">,
-): UIMessage {
+function orchestrationFeedbackPayload(items: OrchestrationFeedbackDraft[]) {
+  return items.map((item) => ({
+    id: item.id,
+    orchestration_revision_id: item.orchestrationRevisionId,
+    orchestration_node_id: item.orchestrationNodeId,
+    marker_number: item.markerNumber,
+    comment: item.comment,
+  }));
+}
+
+function displayText(text: string, content: MessageContent) {
+  if (content.displayText) return content.displayText;
+  if (content.orchestrationFeedback?.length) return `编排评论（${content.orchestrationFeedback.length} 条）`;
+  if (content.browserElementAttachments?.length) return `网页圈选评论（${content.browserElementAttachments.length} 条）`;
+  if (content.imageAttachments?.length && !text) return `图片附件（${content.imageAttachments.length} 个）`;
+  return text;
+}
+
+function optimisticUserMessage(id: string, text: string, content: MessageContent): UIMessage {
+  const visibleText = displayText(text, content);
   return {
-    id: clientMessageId,
+    id,
     role: "user",
-    parts: [{ type: "text", text: displayText }],
-    content: displayText,
+    parts: [{ type: "text", text: visibleText }],
+    content: visibleText,
     createdAt: new Date().toISOString(),
     metadata: {
-      messageKind: "running-guide",
-      guideStatusLabel: "已引导对话",
-      ...(options.browserElementAttachments?.length
-        ? { browserElementAttachments: options.browserElementAttachments }
-        : {}),
-      ...(options.imageAttachments?.length ? { imageAttachments: options.imageAttachments } : {}),
+      ...(content.browserElementAttachments?.length ? { browserElementAttachments: content.browserElementAttachments } : {}),
+      ...(content.imageAttachments?.length ? { imageAttachments: content.imageAttachments } : {}),
+      ...(content.orchestrationFeedback?.length ? { orchestrationFeedback: content.orchestrationFeedback } : {}),
     },
   } as UIMessage;
 }
 
-function normalizeBrowserUrl(url: string) {
-  try {
-    return new URL(url).href;
-  } catch {
-    return url;
-  }
-}
-
-async function restoreBrowserAnnotationsForEditing(elements: BrowserElementAttachment[]) {
-  const bridge = getDesktopBrowserBridge();
-  if (!bridge || elements.length === 0) return;
-  const renumberedElements = elements.map((element, index) => ({ ...element, markerNumber: index + 1 }));
-  const state = bridge.getState ? await bridge.getState().catch(() => null) : null;
-  const currentUrl = state?.url ? normalizeBrowserUrl(state.url) : null;
-  const visibleElements = currentUrl
-    ? renumberedElements.filter((element) => normalizeBrowserUrl(element.url) === currentUrl)
-    : renumberedElements;
-  if (bridge.setConfirmedMarkers) {
-    await bridge.setConfirmedMarkers(visibleElements.map((element) => ({
-      markerNumber: element.markerNumber,
-      selector: element.selector,
-      rect: element.rect,
-    }))).catch(() => null);
-  }
-  await bridge.startElementPicker(renumberedElements.length + 1).catch(() => null);
-}
-
-function normalizeWorkRun(value: unknown): WorkRunDisplay | null {
-  if (!value || typeof value !== "object") return null;
-  const turn = value as WorkRunWire;
-  const id = turn.work_run_id ?? turn.id;
-  if (!id || !turn.trigger_message_id) return null;
-  let specRequested = false;
-  try {
-    const snapshot = JSON.parse(turn.input_snapshot_json ?? "{}") as { spec_requested?: unknown };
-    specRequested = snapshot.spec_requested === true;
-  } catch {
-    // A malformed input snapshot must not prevent the operational WorkRun from rendering.
-  }
-  return {
-    id,
-    triggerMessageId: turn.trigger_message_id,
-    status: turn.status ?? "ready",
-    startedAt: turn.started_at ?? null,
-    activeStartedAt: turn.active_started_at ?? null,
-    activeDurationMs: typeof turn.active_duration_ms === "number" ? turn.active_duration_ms : 0,
-    completedAt: turn.completed_at ?? null,
-    workRootPath: turn.work_root_path?.trim() || undefined,
-    specRequested,
-    revision: typeof turn.revision === "number" ? turn.revision : 1,
-    executionStartedAt: turn.execution_started_at ?? null,
-  };
-}
-
-function mergeWorkRun(prev: WorkRunDisplay[], incoming: WorkRunDisplay): WorkRunDisplay[] {
-  const existing = prev.find((turn) =>
-    turn.id === incoming.id || turn.triggerMessageId === incoming.triggerMessageId
-  );
-  const next = prev.filter((turn) =>
-    turn.id !== incoming.id && turn.triggerMessageId !== incoming.triggerMessageId
-  );
-  next.push({
-    ...incoming,
-    workRootPath: incoming.workRootPath ?? existing?.workRootPath ?? null,
-  });
-  return next.sort((left, right) => String(left.startedAt ?? "").localeCompare(String(right.startedAt ?? "")));
-}
-
-function clampPercentage(value: number | null | undefined): number | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return Math.max(0, Math.min(100, value));
-}
-
-function formatTokenCount(tokens: number | null | undefined): string {
-  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return "未知";
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1)}K`;
-  return String(tokens);
-}
-
-function formatCategoryPercent(value: number): string {
-  if (!Number.isFinite(value)) return "0%";
-  return `${value.toFixed(1)}%`;
-}
-
-function formatCacheHitRate(value: number | null | undefined): string | null {
-  if (typeof value !== "number" || !Number.isFinite(value)) return null;
-  return `${value.toFixed(1)}%`;
-}
-
-function contextUsageLabel(usage: AgentContextUsageDto | null): string {
-  if (!usage) return "上下文使用量暂不可用";
-  const percent = displayPercentage(usage);
-  if (percent !== null && usage.max_tokens !== null) {
-    return `上下文已用 ${percent}%，${formatTokenCount(usage.total_tokens)} / ${formatTokenCount(usage.max_tokens)} token`;
-  }
-  return `上下文已用 ${formatTokenCount(usage.total_tokens)} token`;
-}
-
-function displayPercentage(usage: AgentContextUsageDto | null): number | null {
-  if (!usage) return null;
-  const percent = clampPercentage(usage.percentage);
-  if (percent === null) return null;
-  if (percent > 0 && percent < 1) return 1;
-  if (percent === 0 && typeof usage.total_tokens === "number" && usage.total_tokens > 0) return 1;
-  return Math.round(percent);
-}
-
-function contextCategoryLabel(name: string): string {
-  const normalized = name.trim().toLowerCase().replace(/[_-]+/gu, " ");
-  if (normalized.includes("system") && normalized.includes("tool")) return "系统工具";
-  if (normalized.includes("message")) return "消息";
-  if (normalized.includes("system") && normalized.includes("prompt")) return "系统提示词";
-  if (normalized.includes("skill")) return "技能";
-  if (normalized.includes("memory")) return "记忆";
-  if (normalized.includes("tool")) return "工具";
-  if (normalized.includes("other")) return "其他";
-  return name || "其他";
-}
-
-function contextUsageCategoryRows(usage: AgentContextUsageDto | null) {
-  if (!usage?.categories?.length) return [];
-  const totalTokens = usage.categories.reduce((sum, category) => sum + Math.max(0, category.tokens || 0), 0);
-  if (totalTokens <= 0) return [];
-  return usage.categories
-    .filter((category) => category.tokens > 0)
-    .map((category, index) => ({
-      label: contextCategoryLabel(category.name),
-      percent: (category.tokens / totalTokens) * 100,
-      color: category.color || `color-mix(in srgb, var(--foreground) ${Math.max(28, 72 - index * 10)}%, var(--ui-surface-raised))`,
-    }));
-}
-
-function isLeaderCompaction(
-  value: AgentContextCompactionDto | null | undefined,
-  leaderAgentSessionId: string | null,
-) {
-  if (!value) return false;
-  if (leaderAgentSessionId && value.agent_session_id === leaderAgentSessionId) return true;
-  return value.role === "leader" || value.expert_id === "exp-leader";
-}
-
 function ContextUsageIndicator({
   usage,
-  canCompact,
-  isCompacting,
+  compacting,
+  disabled,
   onCompact,
 }: {
   usage: AgentContextUsageDto | null;
-  canCompact: boolean;
-  isCompacting: boolean;
+  compacting: boolean;
+  disabled: boolean;
   onCompact: () => void;
 }) {
-  const anchorRef = useRef<HTMLDivElement | null>(null);
-  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [popoverPosition, setPopoverPosition] = useState<{ left: number; top: number } | null>(null);
-  const percent = clampPercentage(usage?.percentage);
-  const displayPercentLabel = displayPercentage(usage);
-  const displayPercent = displayPercentLabel ?? 0;
-  const ringColor = percent === null
-    ? "color-mix(in srgb, var(--muted-foreground) 70%, transparent)"
-    : "color-mix(in srgb, var(--foreground) 58%, var(--ui-surface-raised))";
-  const detail = usage?.max_tokens !== null && usage?.max_tokens !== undefined
-    ? `${formatTokenCount(usage.total_tokens)}/${formatTokenCount(usage.max_tokens)}`
-    : usage
-      ? formatTokenCount(usage.total_tokens)
-      : "运行后会显示上下文使用量";
-  const categoryRows = contextUsageCategoryRows(usage);
-  const cacheHitRate = formatCacheHitRate(usage?.cache_hit_rate);
-  const hasCacheTelemetry = usage?.cache_input_tokens !== null && usage?.cache_input_tokens !== undefined;
-  const configuredContextWindow = usage?.raw_max_tokens !== null
-    && usage?.raw_max_tokens !== undefined
-    && usage?.max_tokens !== null
-    && usage?.max_tokens !== undefined
-    && usage.raw_max_tokens !== usage.max_tokens
-    ? usage.raw_max_tokens
-    : null;
-  const openPopover = useCallback(() => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-    if (!usage) return;
-    const rect = anchorRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    setPopoverPosition({
-      left: rect.right - 296,
-      top: rect.top - 8,
-    });
-  }, [usage]);
-  const closePopover = useCallback(() => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-    closeTimerRef.current = setTimeout(() => setPopoverPosition(null), 80);
-  }, []);
-
-  useEffect(() => () => {
-    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
-  }, []);
-
+  const [open, setOpen] = useState(false);
+  const percentage = typeof usage?.percentage === "number" ? Math.max(0, Math.min(100, Math.round(usage.percentage))) : 0;
   return (
-    <div
-      ref={anchorRef}
-      className="group relative flex size-8 shrink-0 items-center justify-center"
-      onMouseEnter={openPopover}
-      onMouseLeave={closePopover}
-      onFocus={openPopover}
-      onBlur={closePopover}
-    >
-      <span
-        role="img"
-        aria-label={contextUsageLabel(usage)}
-        className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors group-hover:bg-ui-control-hover"
+    <div className="relative">
+      <button
+        type="button"
+        aria-label={usage ? `上下文已使用 ${percentage}%` : "上下文使用量暂不可用"}
+        onClick={() => setOpen((value) => !value)}
+        className="flex size-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-ui-control-hover"
       >
-        <span
-          className="relative block size-[18px] rounded-full"
-          style={{
-            background: `conic-gradient(${ringColor} ${displayPercent * 3.6}deg, color-mix(in srgb, var(--muted-foreground) 26%, transparent) 0deg)`,
-          }}
-        >
-          <span className="absolute inset-[4px] rounded-full bg-[color-mix(in_srgb,var(--ui-surface-raised)_88%,var(--background))]" />
+        <span className="relative block size-[18px] rounded-full" style={{ background: `conic-gradient(currentColor ${percentage * 3.6}deg, color-mix(in srgb, currentColor 20%, transparent) 0deg)` }}>
+          <span className="absolute inset-[4px] rounded-full bg-background" />
         </span>
-      </span>
-      {usage && popoverPosition && typeof document !== "undefined" ? createPortal(
-        <div
-          className="fixed z-[10000] w-[296px] max-w-[calc(100vw-32px)] text-left text-xs"
-          style={{
-            left: popoverPosition.left,
-            top: popoverPosition.top,
-            transform: "translateY(-100%)",
-          }}
-          onMouseEnter={openPopover}
-          onMouseLeave={closePopover}
-        >
-          <div className="rounded-xl border border-ui-border-strong bg-[var(--ui-surface-raised)] p-3.5 shadow-[var(--ui-shadow-elevated)]">
-            <div className="flex items-baseline justify-between gap-3">
-              <span className="text-[15px] font-semibold leading-none text-foreground">上下文用量</span>
-              <span className="font-mono text-[13px] font-semibold leading-none text-muted-foreground">
-                {detail} {displayPercentLabel !== null ? `(${displayPercentLabel}%)` : ""}
-              </span>
-            </div>
-            <div className="mt-4 h-2 rounded-full bg-[color-mix(in_srgb,var(--muted-foreground)_14%,transparent)]">
-              <div
-                className="relative h-2 rounded-full bg-[color-mix(in_srgb,var(--foreground)_45%,var(--ui-surface-raised))]"
-                style={{ width: `${Math.max(1, Math.min(100, displayPercent))}%` }}
-              >
-                <span className="absolute right-0 top-1/2 size-2.5 -translate-y-1/2 translate-x-1/2 rounded-full bg-[color-mix(in_srgb,var(--foreground)_50%,var(--ui-surface-raised))] shadow-[0_0_0_2px_color-mix(in_srgb,var(--ui-surface-raised)_95%,transparent)]" />
-              </div>
-            </div>
-
-            {configuredContextWindow !== null ? (
-              <div className="mt-2 text-[12px] text-muted-foreground">
-                配置上限 {formatTokenCount(configuredContextWindow)}，Codex 预留 5% 后当前可用 {formatTokenCount(usage.max_tokens)}
-              </div>
-            ) : null}
-
-            {categoryRows.length > 0 ? (
-              <div className="mt-4 space-y-2.5">
-                {categoryRows.map((row) => (
-                  <div key={row.label} className="flex items-center gap-2.5">
-                    <span
-                      className="size-2 rounded-full"
-                      style={{ backgroundColor: row.color }}
-                    />
-                    <span className="min-w-0 flex-1 text-[13px] font-medium text-muted-foreground">{row.label}</span>
-                    <span className="font-mono text-[13px] font-semibold text-foreground">{formatCategoryPercent(row.percent)}</span>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            {hasCacheTelemetry ? (
-              <div className="mt-4 border-t border-ui-border pt-3">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-[13px] font-medium text-muted-foreground">平均缓存命中率</span>
-                  <span className="font-mono text-[13px] font-semibold text-foreground">
-                    {cacheHitRate ?? "数据未知"}
-                  </span>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="mt-3">
-              <button
-                type="button"
-                aria-label="压缩当前会话"
-                disabled={!canCompact || isCompacting}
-                onClick={(event) => {
-                  event.preventDefault();
-                  onCompact();
-                }}
-                className="flex h-6 w-full items-center justify-center rounded bg-[color-mix(in_srgb,var(--foreground)_10%,transparent)] px-3 text-[12px] font-semibold text-foreground transition-colors hover:bg-[color-mix(in_srgb,var(--foreground)_14%,transparent)] disabled:cursor-not-allowed disabled:opacity-55"
-              >
-                {isCompacting ? "正在压缩当前会话" : "压缩当前会话"}
-              </button>
-            </div>
-          </div>
-        </div>,
-        document.body,
+      </button>
+      {open ? (
+        <div className="absolute bottom-10 right-0 z-50 w-64 rounded-xl border border-border bg-popover p-3 text-xs shadow-xl">
+          <div className="font-semibold">上下文用量 {usage ? `${percentage}%` : "未知"}</div>
+          <div className="mt-1 text-muted-foreground">{usage?.total_tokens?.toLocaleString() ?? "—"} / {usage?.max_tokens?.toLocaleString() ?? "—"} token</div>
+          <button type="button" disabled={disabled || compacting || !usage} onClick={onCompact} className="mt-3 h-8 w-full rounded-lg bg-muted px-3 font-semibold disabled:opacity-45">
+            {compacting ? "正在压缩…" : "压缩当前会话"}
+          </button>
+        </div>
       ) : null}
     </div>
   );
 }
 
+async function restoreBrowserAnnotations(elements: BrowserElementAttachment[]) {
+  const bridge = getDesktopBrowserBridge();
+  if (!bridge || elements.length === 0) return;
+  const restored = elements.map((element, index) => ({ ...element, markerNumber: index + 1 }));
+  await bridge.setConfirmedMarkers?.(restored.map((element) => ({ markerNumber: element.markerNumber, selector: element.selector, rect: element.rect }))).catch(() => undefined);
+  await bridge.startElementPicker(restored.length + 1).catch(() => undefined);
+}
+
+const EMPTY_MESSAGES: UIMessage[] = [];
+
 export default function LeaderChatPanel({
   flowId,
-  leaderAgentSessionId,
-  initialOptimisticMessages = [],
-  initialPlanModeReturnRiskMode = null,
-  onInitialPlanModeResolved,
+  leaderAgentRunId,
+  activeLeaderAgentRunId = null,
+  initialOptimisticMessages = EMPTY_MESSAGES,
   flowStatus,
-  decisionCardStatuses,
-  decisionCardAnswers,
-  decisionCards,
-  specCards,
+  behaviorMode: serverBehaviorMode = "execute",
+  riskMode: serverRiskMode = "auto_edit",
+  orchestrationMode: serverOrchestrationMode = "approval_required",
+  decisionRequests,
+  planCards,
   orchestrationPlans = [],
-  riskMode: initialRiskMode = "auto_edit",
-  planApproval: initialPlanApproval = "on",
-  workRuns: dashboardWorkRuns = [],
-  agentSessions = EMPTY_AGENT_SESSIONS,
-  onOpenSpecPreview,
+  onOpenPlanPreview,
   onOpenPlan = () => {},
-  reviews,
-  onOpenReview,
   onOpenWorkspaceFile,
   composerOnly = false,
   composerVariant = "default",
@@ -537,1094 +200,366 @@ export default function LeaderChatPanel({
   workspaceRootPath,
   onOpenModelSettings,
 }: LeaderChatPanelProps) {
-  const [status, setStatus] = useState<"idle" | "submitted" | "streaming" | "ready">("idle");
-  const [leaderSessionStatus, setLeaderSessionStatus] = useState<"idle" | "queued" | "streaming">("idle");
-  const [activeLeaderAgentSessionId, setActiveLeaderAgentSessionId] = useState<string | null>(null);
-  const [interruptDialogOpen, setInterruptDialogOpen] = useState(false);
-  const [interruptPending, setInterruptPending] = useState(false);
-  // The project directory is fixed when the task is created.
   const [optimisticMessages, setOptimisticMessages] = useState<UIMessage[]>([]);
-  const [workRuns, setWorkRuns] = useState<WorkRunDisplay[]>([]);
   const [followRequestKey, setFollowRequestKey] = useState(0);
-  const [specRequested, setSpecRequested] = useState(false);
-  const [planModeLocked, setPlanModeLocked] = useState(false);
-  const [riskMode, setRiskMode] = useState<RiskMode>(initialRiskMode);
-  const [planApproval, setPlanApproval] = useState<PlanApproval>(initialPlanApproval);
-  const [settingsUpdating, setSettingsUpdating] = useState(false);
-  const [contextUsage, setContextUsage] = useState<AgentContextUsageDto | null>(null);
-  const [contextCompaction, setContextCompaction] = useState<AgentContextCompactionDto | null>(null);
-  const [isCompactingContext, setIsCompactingContext] = useState(false);
-  const [guidedMessages, setGuidedMessages] = useState<UIMessage[]>([]);
   const [localComposerValue, setLocalComposerValue] = useState("");
   const [leaderModelConfigured, setLeaderModelConfigured] = useState(false);
   const [runtimeSelectionUpdating, setRuntimeSelectionUpdating] = useState(false);
+  const [modeUpdating, setModeUpdating] = useState(false);
+  const [behaviorMode, setBehaviorMode] = useState<BehaviorMode>(serverBehaviorMode);
+  const [riskMode, setRiskMode] = useState<RiskMode>(serverRiskMode);
+  const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>(serverOrchestrationMode);
+  const [contextUsage, setContextUsage] = useState<AgentContextUsageDto | null>(null);
+  const [contextCompaction, setContextCompaction] = useState<AgentContextCompactionDto | null>(null);
+  const [compacting, setCompacting] = useState(false);
+  const [runtimeError, setRuntimeError] = useState<string | null>(null);
+  const [editingQueueMessage, setEditingQueueMessage] = useState<RunningQueuedMessage | null>(null);
   const [nativeContextRefreshKey, setNativeContextRefreshKey] = useState(0);
-  const [sessionRecoveryError, setSessionRecoveryError] = useState<{ message: string; category?: string } | null>(null);
-  const [leaderRuntimeError, setLeaderRuntimeError] = useState<string | null>(null);
-  const browserElementAttachments = useBrowserSelectionStore((state) => state.elements);
-  const clearBrowserElementAttachments = useBrowserSelectionStore((state) => state.clearElements);
-  const setBrowserElementAttachments = useBrowserSelectionStore((state) => state.setElements);
-  const imageAttachments = useComposerImageStore((state) => state.images);
-  const addImageAttachments = useComposerImageStore((state) => state.addImages);
-  const clearImageAttachments = useComposerImageStore((state) => state.clearImages);
-  const planFeedback = usePlanFeedbackStore((state) => state.drafts);
-  const clearPlanFeedback = usePlanFeedbackStore((state) => state.clearDrafts);
-  const setPlanFeedback = usePlanFeedbackStore((state) => state.setDrafts);
-  const dispatchingQueueIdRef = useRef<string | null>(null);
   const pendingMessagesRef = useRef(new Map<string, string>());
-  const pendingGuidesRef = useRef(new Map<string, PendingGuideMessage>());
-  const planModeReturnRiskModeRef = useRef<RiskMode>(initialRiskMode);
-  const planModeReturnRiskModeSetRef = useRef(false);
-  const planModeStartedAtRef = useRef<number | null>(null);
-  const planModeWorkRunIdRef = useRef<string | null>(null);
-  const planModeResolvedRevisionIdRef = useRef<string | null>(null);
-  const planModeResolvedRef = useRef(false);
-  const settingsMutationRef = useRef({ flowId, requestId: 0, pending: false });
-  if (settingsMutationRef.current.flowId !== flowId) {
-    settingsMutationRef.current = {
-      flowId,
-      requestId: settingsMutationRef.current.requestId + 1,
-      pending: false,
-    };
-  }
-  const queuedMessages = useRunningMessageQueueStore((state) =>
-    flowId ? state.queuesByFlow[flowId] ?? EMPTY_RUNNING_QUEUE : EMPTY_RUNNING_QUEUE
-  );
+  const modeRequestRef = useRef(0);
+
+  const browserElements = useBrowserSelectionStore((state) => state.elements);
+  const clearBrowserElements = useBrowserSelectionStore((state) => state.clearElements);
+  const setBrowserElements = useBrowserSelectionStore((state) => state.setElements);
+  const images = useComposerImageStore((state) => state.images);
+  const addImages = useComposerImageStore((state) => state.addImages);
+  const clearImages = useComposerImageStore((state) => state.clearImages);
+  const orchestrationFeedback = useOrchestrationFeedbackStore((state) => state.drafts);
+  const clearOrchestrationFeedback = useOrchestrationFeedbackStore((state) => state.clearDrafts);
+  const setOrchestrationFeedback = useOrchestrationFeedbackStore((state) => state.setDrafts);
+  const queuedMessages = useRunningMessageQueueStore((state) => flowId ? state.queuesByFlow[flowId] ?? EMPTY_RUNNING_QUEUE : EMPTY_RUNNING_QUEUE);
   const updateFlowQueue = useRunningMessageQueueStore((state) => state.updateFlowQueue);
   const setFlowQueue = useRunningMessageQueueStore((state) => state.setFlowQueue);
 
-  const updateQueuedMessages = useCallback((updater: (messages: RunningQueuedMessage[]) => RunningQueuedMessage[]) => {
-    if (!flowId) return;
-    updateFlowQueue(flowId, updater);
-  }, [flowId, updateFlowQueue]);
-
-  const mergedWorkRuns = useMemo(
-    () => workRuns.reduce((merged, turn) => mergeWorkRun(merged, turn), dashboardWorkRuns),
-    [dashboardWorkRuns, workRuns],
-  );
-
-  const enterPlanMode = useCallback((workRunId?: string | null) => {
-    if (!planModeLocked) {
-      planModeResolvedRevisionIdRef.current = null;
-      planModeResolvedRef.current = false;
-    }
-    if (!planModeReturnRiskModeSetRef.current) {
-      planModeReturnRiskModeRef.current = riskMode;
-      planModeReturnRiskModeSetRef.current = true;
-    }
-    if (planModeStartedAtRef.current === null) planModeStartedAtRef.current = Date.now();
-    if (workRunId) planModeWorkRunIdRef.current = workRunId;
-    setSpecRequested(true);
-    setPlanModeLocked(true);
-  }, [planModeLocked, riskMode]);
-
-  const exitPlanMode = useCallback((resolvedRevisionId?: string | null) => {
-    const restoreRiskMode = planModeReturnRiskModeRef.current;
-    setSpecRequested(false);
-    setPlanModeLocked(false);
-    setRiskMode(restoreRiskMode);
-    planModeReturnRiskModeSetRef.current = false;
-    planModeStartedAtRef.current = null;
-    planModeWorkRunIdRef.current = null;
-    planModeResolvedRevisionIdRef.current = resolvedRevisionId ?? null;
-    planModeResolvedRef.current = true;
-    onInitialPlanModeResolved?.();
-  }, [onInitialPlanModeResolved]);
-
-  const handleSpecChange = useCallback((requested: boolean) => {
-    if (requested) {
-      if (!planModeLocked) {
-        planModeResolvedRevisionIdRef.current = null;
-        planModeResolvedRef.current = false;
-      }
-      if (!planModeReturnRiskModeSetRef.current) {
-        planModeReturnRiskModeRef.current = riskMode;
-        planModeReturnRiskModeSetRef.current = true;
-      }
-      setSpecRequested(true);
-      return;
-    }
-    // Before the first plan message is accepted the user may change their mind.
-    // Once it is sent, approval (or an explicit stop) owns the transition back.
-    if (!planModeLocked) {
-      setSpecRequested(false);
-      planModeReturnRiskModeSetRef.current = false;
-      planModeStartedAtRef.current = null;
-      planModeWorkRunIdRef.current = null;
-    }
-  }, [planModeLocked, riskMode]);
+  useEffect(() => {
+    setBehaviorMode(serverBehaviorMode);
+    setRiskMode(serverRiskMode);
+    setOrchestrationMode(serverOrchestrationMode);
+  }, [serverBehaviorMode, serverOrchestrationMode, serverRiskMode]);
 
   useEffect(() => {
     setOptimisticMessages([]);
-    setGuidedMessages([]);
     setLocalComposerValue("");
-    setWorkRuns([]);
-    setStatus("idle");
-    setLeaderSessionStatus("idle");
-    setActiveLeaderAgentSessionId(null);
-    setInterruptDialogOpen(false);
-    setInterruptPending(false);
-    setIsCompactingContext(false);
-    setContextUsage(null);
-    setContextCompaction(null);
-    setSettingsUpdating(false);
-    setRuntimeSelectionUpdating(false);
-    setSpecRequested(false);
-    setPlanModeLocked(false);
-    planModeReturnRiskModeRef.current = initialRiskMode;
-    planModeReturnRiskModeSetRef.current = false;
-    planModeStartedAtRef.current = null;
-    planModeWorkRunIdRef.current = null;
-    planModeResolvedRevisionIdRef.current = null;
-    planModeResolvedRef.current = false;
-    dispatchingQueueIdRef.current = null;
+    setRuntimeError(null);
+    setEditingQueueMessage(null);
     pendingMessagesRef.current.clear();
-    pendingGuidesRef.current.clear();
-  }, [flowId, initialRiskMode]);
-
-  useEffect(() => {
-    setRiskMode(initialRiskMode);
-    if (!planModeLocked) {
-      planModeReturnRiskModeRef.current = initialRiskMode;
-      planModeReturnRiskModeSetRef.current = false;
-    }
-  }, [flowId, initialRiskMode, planModeLocked]);
-
-  useEffect(() => {
-    setPlanApproval(initialPlanApproval);
-  }, [flowId, initialPlanApproval]);
-
-  useEffect(() => {
-    if (!flowId || initialPlanModeReturnRiskMode === null || planModeResolvedRef.current) return;
-    planModeReturnRiskModeRef.current = initialPlanModeReturnRiskMode;
-    planModeReturnRiskModeSetRef.current = true;
-    if (planModeStartedAtRef.current === null) planModeStartedAtRef.current = Date.now();
-    setSpecRequested(true);
-    setPlanModeLocked(true);
-  }, [flowId, initialPlanModeReturnRiskMode]);
+  }, [flowId]);
 
   useEffect(() => {
     if (!flowId) return;
-
-    const pendingSpec = Object.values(specCards).find((card) => card.status === "pending");
-    const pendingPlan = orchestrationPlans.find((plan) => {
-      const approvalStatus = plan.approval?.status;
-      return approvalStatus === "pending"
-        || approvalStatus === "feedback_pending"
-        || pendingPlanRevisionStatuses.has(plan.revision.status);
-    });
-    const pendingWorkflow = hasPendingPlanWorkflow(specCards, orchestrationPlans);
-    const openSpecTurn = mergedWorkRuns.find((turn) =>
-      ["ready", "executing", "waiting_user", "interrupted"].includes(turn.status) && turn.specRequested
-    );
-
-    const pendingPlanWasJustResolved = Boolean(
-      pendingPlan
-      && planModeResolvedRevisionIdRef.current === pendingPlan.revision.plan_revision_id,
-    );
-
-    if (
-      !planModeResolvedRef.current
-      && (initialPlanModeReturnRiskMode !== null || openSpecTurn || pendingWorkflow)
-      && !pendingPlanWasJustResolved
-    ) {
-      if (!planModeReturnRiskModeSetRef.current) {
-        planModeReturnRiskModeRef.current = initialRiskMode;
-        planModeReturnRiskModeSetRef.current = true;
-      }
-      if (planModeStartedAtRef.current === null) {
-        const createdAt = pendingPlan?.revision.created_at || pendingPlan?.approval?.created_at;
-        const parsedCreatedAt = createdAt ? Date.parse(createdAt) : NaN;
-        planModeStartedAtRef.current = Number.isFinite(parsedCreatedAt) ? parsedCreatedAt : Date.now();
-      }
-      if (pendingSpec?.work_run_id) planModeWorkRunIdRef.current = pendingSpec.work_run_id;
-      if (pendingPlan?.work_run_id) planModeWorkRunIdRef.current = pendingPlan.work_run_id;
-      if (openSpecTurn?.id) planModeWorkRunIdRef.current = openSpecTurn.id;
-      setSpecRequested(true);
-      setPlanModeLocked(true);
-      return;
-    }
-
-    if (!planModeLocked) return;
-    const acceptedPlan = orchestrationPlans.find((plan) => {
-      const status = plan.approval?.status;
-      return typeof status === "string"
-        && acceptedPlanApprovalStatuses.has(status)
-        && planApprovalBelongsToSession(
-          {
-            workRunId: plan.work_run_id,
-            createdAt: plan.approval?.created_at ?? plan.revision.created_at,
-          },
-          planModeStartedAtRef.current,
-          planModeWorkRunIdRef.current,
-        );
-    });
-    if (acceptedPlan) exitPlanMode(acceptedPlan.revision.plan_revision_id);
-  }, [
-    exitPlanMode,
-    flowId,
-    initialPlanModeReturnRiskMode,
-    initialRiskMode,
-    mergedWorkRuns,
-    orchestrationPlans,
-    planModeLocked,
-    specCards,
-  ]);
-
-  useEffect(() => {
-    if (!flowId) return;
-
-    const unsubscribe = wsClient.onMessage((msg: WsInMessage) => {
-      if (msg.type === "system:error") {
-        if (msg.flow_id && msg.flow_id !== flowId) return;
-        setInterruptPending(false);
-        if (msg.data?.code === "LEADER_SESSION_RECOVERY_REQUIRED") {
-          setSessionRecoveryError({
-            message: msg.data.message,
-            category: typeof msg.data.category === "string" ? msg.data.category : undefined,
-          });
-          setStatus("ready");
-        } else if (msg.data?.code === "leader_error" && typeof msg.data?.message === "string" && msg.data.message.trim()) {
-          setSessionRecoveryError(null);
-          setLeaderRuntimeError(msg.data.message);
-        }
-        dispatchingQueueIdRef.current = null;
-        if (msg.log_id) {
-          const pendingMessageId = pendingMessagesRef.current.get(msg.log_id);
-          if (pendingMessageId) {
-            pendingMessagesRef.current.delete(msg.log_id);
-            setOptimisticMessages((messages) => messages.filter((message) => message.id !== pendingMessageId));
-            setWorkRuns([]);
-          }
-          const pendingGuide = pendingGuidesRef.current.get(msg.log_id);
-          if (pendingGuide) {
-            pendingGuidesRef.current.delete(msg.log_id);
-            setGuidedMessages((messages) => messages.filter((message) => message.id !== pendingGuide.clientMessageId));
-          }
-        }
-        setStatus((currentStatus) =>
-          currentStatus === "submitted" || currentStatus === "streaming" ? "ready" : currentStatus,
-        );
-        return;
-      }
-
-      if (msg.type === "flow:guide_ack") {
-        if (msg.flow_id !== flowId) return;
-        const logId = msg.log_id;
-        if (!logId) return;
-        const pendingGuide = pendingGuidesRef.current.get(logId);
-        if (pendingGuide) {
-          pendingGuidesRef.current.delete(logId);
-          setGuidedMessages((messages) => messages.filter((message) => message.id !== pendingGuide.clientMessageId));
-        } else {
-          const pendingMessageId = pendingMessagesRef.current.get(logId);
-          if (pendingMessageId) {
-            pendingMessagesRef.current.delete(logId);
-            setOptimisticMessages((messages) => messages.filter((message) => message.id !== pendingMessageId));
+    const unsubscribe = wsClient.onMessage((message: WsInMessage) => {
+      if (message.flow_id && message.flow_id !== flowId) return;
+      if (message.type === "flow:message_ack" || message.type === "flow:guide_ack") {
+        if (message.log_id) {
+          const pendingId = pendingMessagesRef.current.get(message.log_id);
+          if (pendingId) {
+            pendingMessagesRef.current.delete(message.log_id);
+            setOptimisticMessages((items) => items.filter((item) => item.id !== pendingId));
           }
         }
         setFollowRequestKey((value) => value + 1);
         return;
       }
-
-      if (msg.type === "session:event") {
-        if (msg.flow_id !== flowId) return;
-        const data = msg.data as { agent_session_id?: string; expert_id?: string; status?: string } | undefined;
-        if (data?.expert_id !== "exp-leader") return;
-        const sessionId = data.agent_session_id ?? null;
-        if (data.status === "queued" || data.status === "streaming") {
-          setActiveLeaderAgentSessionId(sessionId);
-          setLeaderSessionStatus(data.status);
-          setStatus(data.status === "streaming" ? "streaming" : "submitted");
-        } else if (
-          data.status === "completed"
-          || data.status === "failed"
-          || data.status === "interrupted"
-        ) {
-          setActiveLeaderAgentSessionId((current) => {
-            if (current !== sessionId) return current;
-            setLeaderSessionStatus("idle");
-            setStatus("ready");
-            return null;
-          });
-        }
+      if (message.type === "flow:queue_state") {
+        setFlowQueue(flowId, Array.isArray(message.data.messages) ? message.data.messages as RunningQueuedMessage[] : []);
         return;
       }
-
-      if (msg.type === "flow:status") {
-        if (msg.flow_id !== flowId) return;
-        const activeSessionId = typeof msg.data?.active_leader_agent_session_id === "string"
-          ? msg.data.active_leader_agent_session_id
-          : null;
-        if (activeSessionId) {
-          setActiveLeaderAgentSessionId(activeSessionId);
-          setLeaderSessionStatus("queued");
-        }
+      if (message.type === "flow:state") {
+        setFlowQueue(flowId, Array.isArray(message.data?.queued_messages) ? message.data.queued_messages as RunningQueuedMessage[] : []);
         return;
       }
-
-      if (msg.type === "flow:message_ack") {
-        if (msg.flow_id !== flowId) return;
-        if (msg.log_id) pendingMessagesRef.current.delete(msg.log_id);
-        const clientMessageId = msg.data.client_message_id;
-        if (clientMessageId) {
-          setOptimisticMessages((messages) => messages.filter((message) => message.id !== clientMessageId));
-        }
+      if (message.type === "context_usage:event") {
+        const usage = message.data as AgentContextUsageDto;
+        if (usage.role === "leader") setContextUsage(usage);
         return;
       }
-
-      if (msg.type === "flow:queue_state") {
-        if (msg.flow_id !== flowId) return;
-        const messages = Array.isArray(msg.data?.messages)
-          ? msg.data.messages as RunningQueuedMessage[]
-          : [];
-        setFlowQueue(flowId, messages);
-        if (!dispatchingQueueIdRef.current || !messages.some((item) => item.id === dispatchingQueueIdRef.current)) {
-          dispatchingQueueIdRef.current = null;
-        }
+      if (message.type === "context_compaction:event") {
+        const compaction = message.data as AgentContextCompactionDto;
+        if (compaction.role !== "leader") return;
+        setContextCompaction(compaction);
+        setCompacting(compaction.status === "running");
         return;
       }
-
-      if (msg.type === "flow:state") {
-        if (msg.flow_id !== flowId) return;
-        const rawTurns: unknown[] = Array.isArray(msg.data?.work_runs) ? msg.data.work_runs : [];
-        const turns = rawTurns.length > 0
-          ? rawTurns.map((turn) => normalizeWorkRun(turn)).filter((turn): turn is WorkRunDisplay => turn !== null)
-          : [];
-        setWorkRuns(turns);
-        const activeLeaderSessionId = typeof msg.data?.active_leader_agent_session_id === "string"
-          ? msg.data.active_leader_agent_session_id
-          : null;
-        const activeLeaderSession = Array.isArray(msg.data?.agent_sessions)
-          ? msg.data.agent_sessions.find((session: { agent_session_id?: string; id?: string }) =>
-              (session.agent_session_id ?? session.id) === activeLeaderSessionId
-            )
-          : null;
-        setActiveLeaderAgentSessionId(activeLeaderSessionId);
-        setLeaderSessionStatus(
-          activeLeaderSession?.status === "streaming"
-            ? "streaming"
-            : activeLeaderSessionId
-              ? "queued"
-              : "idle",
-        );
-        const serverQueue = Array.isArray(msg.data?.queued_messages)
-          ? msg.data.queued_messages as RunningQueuedMessage[]
-          : [];
-        setFlowQueue(flowId, serverQueue);
-        if (!dispatchingQueueIdRef.current || !serverQueue.some((item) => item.id === dispatchingQueueIdRef.current)) {
-          dispatchingQueueIdRef.current = null;
-        }
+      if (message.type === "session:transcript_event") {
+        setRuntimeError(null);
+        setFollowRequestKey((value) => value + 1);
         return;
       }
-
-      if (msg.type === "work_run:event") {
-        if (msg.flow_id !== flowId) return;
-        const turn = normalizeWorkRun(msg.data);
-        if (turn) {
-          if (
-            planModeLocked
-            && planModeWorkRunIdRef.current === null
-            && planModeStartedAtRef.current !== null
-            && turn.startedAt
-            && Date.parse(turn.startedAt) >= planModeStartedAtRef.current - 2_000
-          ) {
-            planModeWorkRunIdRef.current = turn.id;
-          }
-          if (turn.status === "interrupted") {
-            setInterruptPending(false);
-            setInterruptDialogOpen(false);
-          }
-          setWorkRuns((prev) => mergeWorkRun(prev, turn));
+      if (message.type === "system:error" && typeof message.data?.message === "string") {
+        setRuntimeError(message.data.message);
+        if (message.log_id) {
+          const pendingId = pendingMessagesRef.current.get(message.log_id);
+          if (pendingId) setOptimisticMessages((items) => items.filter((item) => item.id !== pendingId));
+          pendingMessagesRef.current.delete(message.log_id);
         }
-        return;
-      }
-
-      if (msg.type === "plan_approval:event") {
-        if (msg.flow_id !== flowId) return;
-        const approvalStatus = planApprovalEventField(msg.data, "status", "status");
-        if (
-          planModeLocked
-          && typeof approvalStatus === "string"
-          && acceptedPlanApprovalStatuses.has(approvalStatus)
-          && planApprovalBelongsToSession(
-            msg.data,
-            planModeStartedAtRef.current,
-            planModeWorkRunIdRef.current,
-          )
-        ) {
-          const revisionId = planApprovalEventField(msg.data, "planRevisionId", "plan_revision_id");
-          exitPlanMode(typeof revisionId === "string" ? revisionId : null);
-        }
-        return;
-      }
-
-      if (msg.type === "context_usage:event") {
-        if (msg.flow_id !== flowId) return;
-        const usage = msg.data as AgentContextUsageDto | null;
-        if (usage && (usage.role === "leader" || usage.expert_id === "exp-leader")) {
-          setContextUsage(usage);
-        }
-        return;
-      }
-
-      if (msg.type === "context_compaction:event") {
-        if (msg.flow_id !== flowId) return;
-        const compaction = msg.data as AgentContextCompactionDto | null;
-        if (!isLeaderCompaction(compaction, leaderAgentSessionId)) return;
-        if (compaction?.status === "running") {
-          setContextCompaction(compaction);
-          setIsCompactingContext(true);
-          setFollowRequestKey((value) => value + 1);
-        } else if (compaction?.status === "completed") {
-          setContextCompaction(compaction);
-          setIsCompactingContext(false);
-          setFollowRequestKey((value) => value + 1);
-        } else {
-          setContextCompaction(null);
-          setIsCompactingContext(false);
-        }
-        return;
-      }
-
-      const msgAgentSessionId =
-        "agent_session_id" in msg ? msg.agent_session_id : "flow_expert_id" in msg ? msg.flow_expert_id : undefined;
-      const msgSessionId = "session_id" in msg ? msg.session_id : undefined;
-      if (
-        msgSessionId !== `leader:${flowId}`
-        && msgAgentSessionId !== activeLeaderAgentSessionId
-        && msgAgentSessionId !== leaderAgentSessionId
-      ) return;
-
-      if (msg.type === "session:transcript_event") {
-        const event = msg.data?.event as { type?: string } | undefined;
-        const eventType = event?.type;
-        if (eventType === "turn-started") {
-          setSessionRecoveryError(null);
-          setLeaderRuntimeError(null);
-          if (msgAgentSessionId) setActiveLeaderAgentSessionId(msgAgentSessionId);
-          setLeaderSessionStatus("streaming");
-          setStatus("streaming");
-        } else if (eventType === "turn-finished") {
-          setActiveLeaderAgentSessionId((current) => {
-            // A delayed transcript event from an older Leader execution must not
-            // make a newer AgentSession appear idle.
-            if (current !== msgAgentSessionId) return current;
-            setLeaderSessionStatus("idle");
-            setStatus("ready");
-            return null;
-          });
-        }
-      } else if (msg.type === "session:transcript_snapshot") {
-        setStatus((currentStatus) =>
-          currentStatus === "submitted" || currentStatus === "streaming" ? currentStatus : "ready",
-        );
       }
     });
-
     return unsubscribe;
-  }, [dashboardWorkRuns, exitPlanMode, flowId, leaderAgentSessionId, planModeLocked, setFlowQueue]);
+  }, [flowId, setFlowQueue]);
 
   useEffect(() => {
-    setSessionRecoveryError(null);
-    setLeaderRuntimeError(null);
-  }, [flowId]);
-
-  const transcriptOptimisticMessages = useMemo(
-    () => [...initialOptimisticMessages, ...optimisticMessages, ...guidedMessages],
-    [guidedMessages, initialOptimisticMessages, optimisticMessages],
-  );
-  const isStreaming = leaderSessionStatus === "streaming";
-  const activeWorkRun = mergedWorkRuns.find((turn) =>
-    ["ready", "executing", "waiting_user", "interrupted"].includes(turn.status)
-  ) ?? null;
-  const hasActiveTaskBackedExpertSession = activeWorkRun
-    ? agentSessions.some((session) =>
-        session.flow_id === flowId
-        && session.work_run_id === activeWorkRun.id
-        && session.task_id !== null
-        && session.expert_id !== "exp-leader"
-        && (session.status === "queued" || session.status === "streaming")
-      )
-    : false;
-  const interruptibleWorkRun = activeWorkRun
-    && activeWorkRun.executionStartedAt
-    && (activeWorkRun.status === "executing" || activeWorkRun.status === "waiting_user")
-    && hasActiveTaskBackedExpertSession
-    ? activeWorkRun
-    : null;
-  const isWaiting = Boolean(activeLeaderAgentSessionId) || status === "submitted";
-  // A persisted queue does not make a now-idle Leader busy. New input must go
-  // through the normal Leader message path; queued items can still be dispatched
-  // individually from their own controls.
-  const shouldQueueNewMessage = Boolean(activeLeaderAgentSessionId);
-  const pendingDecisionCards = decisionCards.filter((card) => decisionCardStatuses[card.card_id] === "pending" || card.status === "pending");
-  const hasPendingDecisionCards = pendingDecisionCards.length > 0;
-  useEffect(() => {
-    let cancelled = false;
-
-    async function refreshContextUsage() {
-      if (!flowId || !leaderAgentSessionId) {
-        setContextUsage(null);
-        setContextCompaction(null);
-        return;
-      }
-      try {
-        const flow = await fetchFlowContextState(flowId);
-        if (!cancelled) {
-          const leaderCompaction = flow.context_compactions?.find((item) =>
-            (item.status === "running" || item.status === "completed") && isLeaderCompaction(item, leaderAgentSessionId)
-          ) ?? null;
-          setContextUsage(flow.context_usage?.leader ?? null);
-          setContextCompaction(leaderCompaction);
-          setIsCompactingContext(leaderCompaction?.status === "running");
-        }
-      } catch {
-        if (!cancelled) {
-          setContextUsage(null);
-          setContextCompaction(null);
-        }
-      }
-    }
-
-    void refreshContextUsage();
-    return () => {
-      cancelled = true;
-    };
-  }, [flowId, leaderAgentSessionId]);
-
-  const handleRiskModeChange = useCallback(async (next: RiskMode) => {
-    if (!flowId || planModeLocked || next === riskMode || settingsMutationRef.current.pending) return;
-    const previous = riskMode;
-    const requestId = settingsMutationRef.current.requestId + 1;
-    settingsMutationRef.current = { flowId, requestId, pending: true };
-    setRiskMode(next);
-    setSettingsUpdating(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/flows/${flowId}`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ risk_mode: next }),
-      });
-      if (!response.ok && settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        setRiskMode(previous);
-      }
-    } catch {
-      if (settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        setRiskMode(previous);
-      }
-    } finally {
-      if (settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        settingsMutationRef.current.pending = false;
-        setSettingsUpdating(false);
-      }
-    }
-  }, [flowId, planModeLocked, riskMode]);
-
-  const handlePlanApprovalChange = useCallback(async (next: PlanApproval) => {
-    if (!flowId || next === planApproval || settingsMutationRef.current.pending) return;
-    const previous = planApproval;
-    const requestId = settingsMutationRef.current.requestId + 1;
-    settingsMutationRef.current = { flowId, requestId, pending: true };
-    setPlanApproval(next);
-    setSettingsUpdating(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/flows/${flowId}/orchestration-settings`, {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ plan_approval: next }),
-      });
-      if (!response.ok && settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        setPlanApproval(previous);
-      }
-    } catch {
-      if (settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        setPlanApproval(previous);
-      }
-    } finally {
-      if (settingsMutationRef.current.flowId === flowId && settingsMutationRef.current.requestId === requestId) {
-        settingsMutationRef.current.pending = false;
-        setSettingsUpdating(false);
-      }
-    }
-  }, [flowId, planApproval]);
-
-  const handleCompactContext = useCallback(async () => {
-    if (!flowId || isWaiting || isCompactingContext) return;
-    const agentSessionId = contextUsage?.agent_session_id ?? leaderAgentSessionId;
-    if (agentSessionId) {
-      const now = new Date().toISOString();
-      setContextCompaction({
-        flow_id: flowId,
-        agent_session_id: agentSessionId,
-        sdk_session_id: contextUsage?.sdk_session_id ?? null,
-        role: "leader",
-        expert_id: "exp-leader",
-        flow_expert_id: null,
-        display_name: "Leader",
-        status: "running",
-        started_at: now,
-        updated_at: now,
-        error_message: null,
-      });
-      setFollowRequestKey((value) => value + 1);
-    }
-    setIsCompactingContext(true);
-    try {
-      setContextUsage(await compactFlowContext(flowId));
-      setContextCompaction((current) => {
-        if (current?.status === "completed") return current;
-        if (!agentSessionId) return current;
-        const now = new Date().toISOString();
-        return {
-          flow_id: flowId,
-          agent_session_id: agentSessionId,
-          sdk_session_id: contextUsage?.sdk_session_id ?? current?.sdk_session_id ?? null,
-          role: "leader",
-          expert_id: "exp-leader",
-          flow_expert_id: null,
-          display_name: "Leader",
-          status: "completed",
-          started_at: current?.started_at ?? now,
-          updated_at: now,
-          error_message: null,
-        };
-      });
-      setFollowRequestKey((value) => value + 1);
-    } catch {
+    let stale = false;
+    if (!flowId || !leaderAgentRunId) {
+      setContextUsage(null);
       setContextCompaction(null);
-    } finally {
-      setIsCompactingContext(false);
+      return;
     }
-  }, [contextUsage, flowId, isCompactingContext, isWaiting, leaderAgentSessionId]);
+    void fetchFlowContextState(flowId).then((state) => {
+      if (stale) return;
+      setContextUsage(state.context_usage?.leader ?? null);
+      const current = state.context_compactions?.find((item) => item.role === "leader" && item.status === "running") ?? null;
+      setContextCompaction(current);
+      setCompacting(Boolean(current));
+    }).catch(() => undefined);
+    return () => { stale = true; };
+  }, [flowId, leaderAgentRunId]);
 
-  const sendMessage = useCallback(
-    async (
-      text: string,
-      options: LeaderMessageOptions = {},
-    ): Promise<boolean> => {
-      const hasPlatformContent = Boolean(options.planFeedback?.length || options.browserElementAttachments?.length);
-      if (!flowId || (!text && !hasPlatformContent) || !leaderModelConfigured) return false;
-      const outgoingAttachments = outgoingAttachmentsForMessage(options);
-      const displayText = options.displayText
-        || (options.planFeedback?.length
-          ? `计划评论（${options.planFeedback.length} 条）`
-          : options.browserElementAttachments?.length
-          ? `网页圈选评论（${options.browserElementAttachments.length} 条）`
-          : text);
-
-      // Lock the mode before the WS send so an immediate plan event cannot
-      // race the local transition back to the previous risk mode.
-      if (options.specRequested) enterPlanMode(activeWorkRun?.id);
-
-      const logId = wsClient.genLogId();
-      const clientMessageId = `msg-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const createdAt = new Date();
-      const userMessage = {
-        id: clientMessageId,
-        role: "user",
-        parts: [{ type: "text", text: displayText }],
-        content: displayText,
-        createdAt,
-        metadata: options.browserElementAttachments?.length
-        || options.imageAttachments?.length
-        || options.planFeedback?.length
-          ? {
-            ...(options.browserElementAttachments?.length ? { browserElementAttachments: options.browserElementAttachments } : {}),
-            ...(options.imageAttachments?.length ? { imageAttachments: options.imageAttachments } : {}),
-            ...(options.planFeedback?.length ? { planFeedback: options.planFeedback } : {}),
-          }
-          : undefined,
-      } as UIMessage;
-      setOptimisticMessages((prev) => [...prev, userMessage]);
-      setStatus("submitted");
-      setFollowRequestKey((value) => value + 1);
-
-      pendingMessagesRef.current.set(logId, clientMessageId);
-      wsClient.send({
-        type: "flow:message",
-        flow_id: flowId,
-        content: text,
-        ...(options.specRequested ? { spec_requested: true } : {}),
-        ...(outgoingAttachments.length ? { attachments: outgoingAttachments } : {}),
-        ...(options.planFeedback?.length ? { plan_feedback: options.planFeedback.map((feedback) => ({ id: feedback.id, plan_revision_id: feedback.planRevisionId, plan_node_id: feedback.planNodeId, marker_number: feedback.markerNumber, comment: feedback.comment })) } : {}),
-        client_message_id: clientMessageId,
-        log_id: logId,
-      });
-      return true;
-    },
-    [activeWorkRun, enterPlanMode, flowId, leaderModelConfigured],
-  );
-
-  const enqueueMessage = useCallback((content: string, options: LeaderMessageOptions = {}) => {
+  const updateModes = useCallback(async (next: { behaviorMode?: BehaviorMode; riskMode?: RiskMode; orchestrationMode?: OrchestrationMode }) => {
     if (!flowId) return;
-    const queueId = `msg-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const outgoingAttachments = outgoingAttachmentsForMessage(options);
-    const queuedMessage: RunningQueuedMessage = {
-      id: queueId,
-      content,
-      ...(options.displayText && options.displayText !== content ? { displayContent: options.displayText } : {}),
-      ...(options.browserElementAttachments?.length ? { browserElementAttachments: options.browserElementAttachments } : {}),
-      ...(options.imageAttachments?.length ? { imageAttachments: options.imageAttachments } : {}),
-      ...(options.planFeedback?.length ? { planFeedback: options.planFeedback } : {}),
-      ...(options.specRequested ? { specRequested: true } : {}),
+    const requestId = ++modeRequestRef.current;
+    const previous = { behaviorMode, riskMode, orchestrationMode };
+    const target = {
+      behaviorMode: next.behaviorMode ?? behaviorMode,
+      riskMode: next.riskMode ?? riskMode,
+      orchestrationMode: next.orchestrationMode ?? orchestrationMode,
     };
-    updateQueuedMessages((messages) => [...messages, queuedMessage]);
-    wsClient.send({
-      type: "flow:queue_add",
-      flow_id: flowId,
-      queue_id: queueId,
-      content,
-      ...(queuedMessage.displayContent ? { display_content: queuedMessage.displayContent } : {}),
-      ...(queuedMessage.specRequested ? { spec_requested: true } : {}),
-      ...(outgoingAttachments.length ? { attachments: outgoingAttachments } : {}),
-      ...(options.planFeedback?.length ? {
-        plan_feedback: options.planFeedback.map((feedback) => ({
-          id: feedback.id,
-          plan_revision_id: feedback.planRevisionId,
-          plan_node_id: feedback.planNodeId,
-          marker_number: feedback.markerNumber,
-          comment: feedback.comment,
-        })),
-      } : {}),
-      client_payload: queuedClientPayload(queuedMessage),
-    });
-  }, [flowId, updateQueuedMessages]);
-
-  const handleComposerSend = useCallback((text: string, options: LeaderMessageOptions = {}): Promise<boolean> | boolean => {
-    if (runtimeSelectionUpdating) return false;
-    if (options.specRequested) enterPlanMode(activeWorkRun?.id);
-    if (shouldQueueNewMessage) {
-      enqueueMessage(text, options);
-      return true;
-    }
-    return sendMessage(text, options);
-  }, [activeWorkRun, enqueueMessage, enterPlanMode, runtimeSelectionUpdating, sendMessage, shouldQueueNewMessage]);
-
-  const handleComposerSendWithAttachments = useCallback(async (text: string): Promise<boolean> => {
-    const content = text;
-    const outgoingAttachments = outgoingAttachmentsForMessage({
-      browserElementAttachments,
-      imageAttachments,
-    });
-    const sent = await Promise.resolve(handleComposerSend(content, {
-      displayText: text,
-      browserElementAttachments,
-      imageAttachments,
-      planFeedback,
-      outgoingAttachments,
-      specRequested,
-    }));
-    if (sent !== false && (browserElementAttachments.length > 0 || imageAttachments.length > 0 || planFeedback.length > 0)) {
-      if (browserElementAttachments.length > 0) {
-        clearBrowserElementAttachments();
-        const bridge = getDesktopBrowserBridge();
-        void bridge?.stopElementPicker();
+    setBehaviorMode(target.behaviorMode);
+    setRiskMode(target.riskMode);
+    setOrchestrationMode(target.orchestrationMode);
+    setModeUpdating(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/flows/${encodeURIComponent(flowId)}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ behavior_mode: target.behaviorMode, risk_mode: target.riskMode, orchestration_mode: target.orchestrationMode }),
+      });
+      if (!response.ok) throw new Error("模式更新失败");
+    } catch {
+      if (modeRequestRef.current === requestId) {
+        setBehaviorMode(previous.behaviorMode);
+        setRiskMode(previous.riskMode);
+        setOrchestrationMode(previous.orchestrationMode);
       }
-      if (imageAttachments.length > 0) clearImageAttachments();
-      if (planFeedback.length > 0) clearPlanFeedback();
+    } finally {
+      if (modeRequestRef.current === requestId) setModeUpdating(false);
     }
-    return sent !== false;
-  }, [
-    browserElementAttachments,
-    clearBrowserElementAttachments,
-    clearImageAttachments,
-    clearPlanFeedback,
-    handleComposerSend,
-    imageAttachments,
-    planFeedback,
-    specRequested,
-  ]);
+  }, [behaviorMode, flowId, orchestrationMode, riskMode]);
+
+  const updateQueue = useCallback((updater: (items: RunningQueuedMessage[]) => RunningQueuedMessage[]) => {
+    if (flowId) updateFlowQueue(flowId, updater);
+  }, [flowId, updateFlowQueue]);
 
   const effectiveComposerValue = composerValue ?? localComposerValue;
-  const handleComposerValueChange = useCallback((value: string) => {
+  const setComposerValue = useCallback((value: string) => {
     onComposerValueChange?.(value);
     if (composerValue === undefined) setLocalComposerValue(value);
   }, [composerValue, onComposerValueChange]);
 
-  const handlePasteImages = useCallback(async (files: File[], textOffset: number) => {
-    const attachments = (await Promise.all(files.map((file) => imageAttachmentFromFile(file, textOffset))))
-      .filter((attachment): attachment is MessageImageAttachment => attachment !== null);
-    if (attachments.length > 0) addImageAttachments(attachments);
-  }, [addImageAttachments]);
+  const clearAttachments = useCallback(() => {
+    if (browserElements.length) {
+      clearBrowserElements();
+      void getDesktopBrowserBridge()?.stopElementPicker();
+    }
+    if (images.length) clearImages();
+    if (orchestrationFeedback.length) clearOrchestrationFeedback();
+  }, [browserElements.length, clearBrowserElements, clearImages, clearOrchestrationFeedback, images.length, orchestrationFeedback.length]);
 
-  const handleReorderQueuedMessage = useCallback((fromIndex: number, toIndex: number) => {
-    if (!flowId || fromIndex < 0 || fromIndex >= queuedMessages.length || toIndex < 0 || toIndex >= queuedMessages.length) return;
+  const buildCurrentContent = useCallback((): MessageContent => ({
+    browserElementAttachments: browserElements,
+    imageAttachments: images,
+    orchestrationFeedback,
+  }), [browserElements, images, orchestrationFeedback]);
+
+  const persistQueueItem = useCallback((text: string, content: MessageContent, existing?: RunningQueuedMessage | null) => {
+    if (!flowId) return false;
+    const attachments = outgoingAttachments(content);
+    const visibleText = displayText(text, content);
+    const message: RunningQueuedMessage = {
+      id: existing?.id ?? `queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      content: text,
+      revision: existing?.revision ?? 1,
+      ...(visibleText !== text ? { displayContent: visibleText } : {}),
+      ...(content.browserElementAttachments?.length ? { browserElementAttachments: content.browserElementAttachments } : {}),
+      ...(content.imageAttachments?.length ? { imageAttachments: content.imageAttachments } : {}),
+      ...(content.orchestrationFeedback?.length ? { orchestrationFeedback: content.orchestrationFeedback } : {}),
+    };
+    updateQueue((items) => existing
+      ? items.map((item) => item.id === existing.id ? { ...message, revision: (existing.revision ?? 1) + 1 } : item)
+      : [...items, message]);
+    wsClient.send({
+      type: existing ? "flow:queue_edit" : "flow:queue_add",
+      flow_id: flowId,
+      queue_id: message.id,
+      content: text,
+      ...(message.displayContent ? { display_content: message.displayContent } : {}),
+      ...(attachments.length ? { attachments } : {}),
+      ...(content.orchestrationFeedback?.length ? { orchestration_feedback: orchestrationFeedbackPayload(content.orchestrationFeedback) } : {}),
+      client_payload: queuePayload(message),
+      ...(existing ? { expected_revision: existing.revision ?? 1 } : {}),
+    });
+    setEditingQueueMessage(null);
+    return true;
+  }, [flowId, updateQueue]);
+
+  const sendMessage = useCallback((text: string, content: MessageContent) => {
+    if (!flowId) return false;
+    const attachments = outgoingAttachments(content);
+    const clientMessageId = `msg-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const logId = wsClient.genLogId();
+    setOptimisticMessages((items) => [...items, optimisticUserMessage(clientMessageId, text, content)]);
+    pendingMessagesRef.current.set(logId, clientMessageId);
+    wsClient.send({
+      type: "flow:message",
+      flow_id: flowId,
+      content: text,
+      ...(attachments.length ? { attachments } : {}),
+      ...(content.orchestrationFeedback?.length ? { orchestration_feedback: orchestrationFeedbackPayload(content.orchestrationFeedback) } : {}),
+      client_message_id: clientMessageId,
+      log_id: logId,
+    });
+    setFollowRequestKey((value) => value + 1);
+    return true;
+  }, [flowId]);
+
+  const handleComposerSend = useCallback(async (text: string) => {
+    const content = buildCurrentContent();
+    const hasContent = Boolean(text.trim() || content.browserElementAttachments?.length || content.imageAttachments?.length || content.orchestrationFeedback?.length);
+    if (!hasContent || !leaderModelConfigured || runtimeSelectionUpdating) return false;
+    const sent = editingQueueMessage
+      ? persistQueueItem(text, content, editingQueueMessage)
+      : activeLeaderAgentRunId
+        ? persistQueueItem(text, content)
+        : sendMessage(text, content);
+    if (sent) clearAttachments();
+    return sent;
+  }, [activeLeaderAgentRunId, buildCurrentContent, clearAttachments, editingQueueMessage, leaderModelConfigured, persistQueueItem, runtimeSelectionUpdating, sendMessage]);
+
+  const handlePasteImages = useCallback(async (files: File[], offset: number) => {
+    const attachments = (await Promise.all(files.map((file) => imageAttachmentFromFile(file, offset))))
+      .filter((item): item is MessageImageAttachment => item !== null);
+    if (attachments.length) addImages(attachments);
+  }, [addImages]);
+
+  const reorderQueue = useCallback((fromIndex: number, toIndex: number) => {
+    if (!flowId || fromIndex === toIndex) return;
     const next = [...queuedMessages];
     const [item] = next.splice(fromIndex, 1);
     if (!item) return;
     next.splice(toIndex, 0, item);
-    updateQueuedMessages(() => next);
-    wsClient.send({
-      type: "flow:queue_reorder",
-      flow_id: flowId,
-      queue_ids: next.map((message) => message.id),
-    });
-  }, [flowId, queuedMessages, updateQueuedMessages]);
+    updateQueue(() => next);
+    wsClient.send({ type: "flow:queue_reorder", flow_id: flowId, queue_ids: next.map((message) => message.id) });
+  }, [flowId, queuedMessages, updateQueue]);
 
-  const handleEditQueuedMessage = useCallback((message: RunningQueuedMessage) => {
-    if (flowId) {
-      wsClient.send({ type: "flow:queue_delete", flow_id: flowId, queue_id: message.id });
-    }
-    updateQueuedMessages((messages) => messages.filter((item) => item.id !== message.id));
-    handleComposerValueChange(message.displayContent ?? message.content);
+  const editQueueMessage = useCallback((message: RunningQueuedMessage) => {
+    setEditingQueueMessage(message);
+    setComposerValue(message.displayContent ?? message.content);
     if (message.browserElementAttachments?.length) {
-      setBrowserElementAttachments(message.browserElementAttachments);
-      void restoreBrowserAnnotationsForEditing(message.browserElementAttachments);
+      setBrowserElements(message.browserElementAttachments);
+      void restoreBrowserAnnotations(message.browserElementAttachments);
     }
-    if (message.imageAttachments?.length) addImageAttachments(message.imageAttachments);
-    if (message.planFeedback?.length) setPlanFeedback(message.planFeedback);
-    if (message.specRequested) enterPlanMode();
-    else if (!planModeLocked) setSpecRequested(false);
-  }, [addImageAttachments, enterPlanMode, flowId, handleComposerValueChange, planModeLocked, setBrowserElementAttachments, setPlanFeedback, updateQueuedMessages]);
+    if (message.imageAttachments?.length) addImages(message.imageAttachments);
+    if (message.orchestrationFeedback?.length) setOrchestrationFeedback(message.orchestrationFeedback);
+  }, [addImages, setBrowserElements, setComposerValue, setOrchestrationFeedback]);
 
-  const handleDeleteQueuedMessage = useCallback((messageId: string) => {
-    if (flowId) {
-      wsClient.send({ type: "flow:queue_delete", flow_id: flowId, queue_id: messageId });
-    }
-    updateQueuedMessages((messages) => messages.filter((message) => message.id !== messageId));
-  }, [flowId, updateQueuedMessages]);
+  const deleteQueueMessage = useCallback((id: string) => {
+    if (!flowId) return;
+    updateQueue((items) => items.filter((item) => item.id !== id));
+    wsClient.send({ type: "flow:queue_delete", flow_id: flowId, queue_id: id });
+    if (editingQueueMessage?.id === id) setEditingQueueMessage(null);
+  }, [editingQueueMessage?.id, flowId, updateQueue]);
 
-  const handleStopCurrentTurn = useCallback(() => {
-    if (!flowId || !activeLeaderAgentSessionId) return;
-    wsClient.sendAgentSessionInterrupt(
-      flowId,
-      activeLeaderAgentSessionId,
-      `leader-stop-${Date.now()}`,
-    );
-    setActiveLeaderAgentSessionId(null);
-    setLeaderSessionStatus("idle");
-    setStatus("ready");
-  }, [activeLeaderAgentSessionId, flowId]);
-
-  const handleInterruptWorkRun = useCallback(() => {
-    if (!flowId || !interruptibleWorkRun || interruptPending) return;
-    setInterruptPending(true);
-    wsClient.sendWorkRunInterrupt(
-      flowId,
-      interruptibleWorkRun.id,
-      interruptibleWorkRun.revision ?? 1,
-      `work-run-interrupt-${Date.now()}`,
-    );
-  }, [flowId, interruptPending, interruptibleWorkRun]);
-
-  const handleGuideQueuedMessage = useCallback((message: RunningQueuedMessage) => {
+  const guideQueueMessage = useCallback((message: RunningQueuedMessage) => {
     if (!flowId || !leaderModelConfigured) return;
-    if (isStreaming && message.specRequested) return;
-    if (!isStreaming) {
-      if (dispatchingQueueIdRef.current === message.id) return;
-      dispatchingQueueIdRef.current = message.id;
-      wsClient.send({ type: "flow:queue_dispatch", flow_id: flowId, queue_id: message.id });
-      return;
-    }
-    const logId = wsClient.genLogId();
-    const clientMessageId = `msg-user-guided-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const parsedDisplayText = message.displayContent ?? message.content;
-    const displayText = parsedDisplayText
-      || (message.planFeedback?.length
-        ? `计划评论（${message.planFeedback.length} 条）`
-        : message.browserElementAttachments?.length
-        ? `网页圈选评论（${message.browserElementAttachments.length} 条）`
-        : message.content);
-    pendingGuidesRef.current.set(logId, {
-      clientMessageId,
-      displayText,
-      browserElementAttachments: message.browserElementAttachments,
-      imageAttachments: message.imageAttachments,
-      planFeedback: message.planFeedback,
+    wsClient.send({
+      type: activeLeaderAgentRunId ? "flow:queue_guide" : "flow:queue_dispatch",
+      flow_id: flowId,
+      queue_id: message.id,
+      ...(activeLeaderAgentRunId ? { client_message_id: `guide-${Date.now()}` } : {}),
     });
-    const guideMessage = runningGuideUiMessage(clientMessageId, displayText, {
-      browserElementAttachments: message.browserElementAttachments,
-      imageAttachments: message.imageAttachments,
-    });
-    setGuidedMessages((messages) =>
-      messages.some((item) => item.id === clientMessageId) ? messages : [...messages, guideMessage]
-    );
-    try {
-      wsClient.send({
-        type: "flow:queue_guide",
-        flow_id: flowId,
-        queue_id: message.id,
-        client_message_id: clientMessageId,
-        log_id: logId,
-      });
-      if (message.browserElementAttachments?.length) {
-        const bridge = getDesktopBrowserBridge();
-        void bridge?.stopElementPicker();
-      }
-    } catch {
-      pendingGuidesRef.current.delete(logId);
-      setGuidedMessages((messages) => messages.filter((item) => item.id !== clientMessageId));
-    }
-  }, [flowId, isStreaming, leaderModelConfigured]);
+  }, [activeLeaderAgentRunId, flowId, leaderModelConfigured]);
 
-  const composerDisabled = !flowId || !leaderModelConfigured || runtimeSelectionUpdating || hasPendingDecisionCards;
-  const nativeContextSlashMenu = useNativeContextSlashMenu({
-    flowId,
-    refreshKey: nativeContextRefreshKey,
-  });
-  const placeholder = hasPendingDecisionCards
-    ? "请先完成澄清卡片..."
-    : !leaderModelConfigured
-      ? "请先选择模型"
-      : shouldQueueNewMessage
-      ? "继续输入以排队后续修改"
-      : flowStatus === "idle"
-        ? "输入消息开始新的讨论..."
-        : "输入消息...";
-  const approvePlan = useCallback((plan: OrchestrationPlanView) => {
-    if (!plan.approval || plan.approval.status !== "pending") return;
-    wsClient.send({ type: "flow:plan_approve", flow_id: plan.flow_id, plan_approval_id: plan.approval.plan_approval_id, client_action_id: `plan-approve-${Date.now()}` });
-  }, []);
-  const handleRuntimeSelectionChange = useCallback(() => {
-    setNativeContextRefreshKey((current) => current + 1);
-  }, []);
-  const isCompactComposer = composerVariant === "compactFloating";
-  const modelSelector = (
-    <LeaderModelSelector
-      flowId={flowId}
-      onConfiguredChange={setLeaderModelConfigured}
-      onUpdatingChange={setRuntimeSelectionUpdating}
-      onSelectionChange={handleRuntimeSelectionChange}
-      onOpenModelSettings={onOpenModelSettings}
-      reasoningEffortDisabled={isWaiting}
-      className={isCompactComposer
-        ? "max-w-[280px]"
-        : "max-w-[330px]"}
-    />
-  );
-  const actionControls = (
-    <div className="flex shrink-0 items-center gap-1.5">
-      <ContextUsageIndicator
-        usage={contextUsage}
-        canCompact={Boolean(flowId && !isWaiting && contextUsage && contextCompaction?.status !== "running")}
-        isCompacting={isCompactingContext}
-        onCompact={handleCompactContext}
-      />
-      {modelSelector}
-    </div>
-  );
-  const specControl = (
-    <ComposerModeMenu
-      specRequested={specRequested}
-      riskMode={riskMode}
-      planApproval={planApproval}
-      planModeLocked={planModeLocked}
-      disabled={!flowId || settingsUpdating}
-      onSpecChange={handleSpecChange}
-      onRiskModeChange={handleRiskModeChange}
-      onPlanApprovalChange={handlePlanApprovalChange}
-      onAddImages={(files) => handlePasteImages(files, effectiveComposerValue.length)}
-    />
-  );
-  const interruptControl = interruptibleWorkRun ? (
-    <>
-      <div aria-hidden="true" className="mx-1 h-4 w-px shrink-0 bg-ui-border-subtle" />
-      <button
-        type="button"
-        data-testid="interrupt-work-run-button"
-        onClick={() => setInterruptDialogOpen(true)}
-        disabled={interruptPending}
-        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-muted-foreground transition-colors hover:bg-ui-control-hover hover:text-foreground disabled:cursor-wait disabled:opacity-50"
-      >
-        <Square aria-hidden="true" className="size-3 fill-current" />
-        <span>中断协作</span>
-      </button>
-    </>
-  ) : null;
-  const toolbarControl = (
-    <div className="flex min-w-0 items-center">
-      {specControl}
-      {interruptControl}
-    </div>
-  );
+  const stopLeader = useCallback(() => {
+    if (flowId && activeLeaderAgentRunId) wsClient.sendAgentRunCancel(flowId, activeLeaderAgentRunId, `leader-cancel-${Date.now()}`);
+  }, [activeLeaderAgentRunId, flowId]);
+
+  const handleCompact = useCallback(async () => {
+    if (!flowId || activeLeaderAgentRunId || compacting) return;
+    setCompacting(true);
+    try {
+      setContextUsage(await compactFlowContext(flowId));
+    } finally {
+      setCompacting(false);
+    }
+  }, [activeLeaderAgentRunId, compacting, flowId]);
+
+  const pendingDecisionRequests = useMemo(() => decisionRequests.filter((request) => request.status === "pending"), [decisionRequests]);
+  const transcriptOptimisticMessages = useMemo(() => [...initialOptimisticMessages, ...optimisticMessages], [initialOptimisticMessages, optimisticMessages]);
+  const isCompact = composerVariant === "compactFloating";
+  const isWaiting = Boolean(activeLeaderAgentRunId);
+  const nativeContextSlashMenu = useNativeContextSlashMenu({ flowId, refreshKey: nativeContextRefreshKey });
+  const composerDisabled = !flowId || !leaderModelConfigured || runtimeSelectionUpdating || pendingDecisionRequests.length > 0;
+  const placeholder = editingQueueMessage
+    ? "编辑这条排队消息…"
+    : pendingDecisionRequests.length
+      ? "请先处理待用户动作…"
+      : !leaderModelConfigured
+        ? "请先选择模型"
+        : isWaiting
+          ? "继续输入，消息会进入队列"
+          : flowStatus === "idle" ? "输入消息开始新的讨论…" : "输入消息…";
+
   const composer = (
-    <div
-      data-testid="leader-chat-composer"
-      data-layout={hasPendingDecisionCards && !isCompactComposer ? "docked" : "overlay"}
-      className={isCompactComposer
-        ? "pointer-events-auto mx-auto w-full max-w-full"
-        : hasPendingDecisionCards
-          ? "pointer-events-none relative z-20 shrink-0 pb-4"
-          : "pointer-events-none absolute inset-x-0 bottom-4 z-20"}
-    >
-      <div className={isCompactComposer ? "mx-auto w-full" : "pointer-events-auto mx-auto w-full max-w-full space-y-3"}>
-        {hasPendingDecisionCards ? (
-          <PendingDecisionDock
-            flowId={flowId}
-            cards={pendingDecisionCards}
-            onStopCurrentTurn={activeLeaderAgentSessionId ? handleStopCurrentTurn : undefined}
-            className={isCompactComposer
-              ? "mx-auto w-full rounded-[20px] shadow-[var(--ui-shadow-elevated)]"
-              : "mx-auto w-[min(880px,calc(100%-128px))] max-w-full max-[760px]:w-[calc(100%-40px)]"}
-          />
+    <div data-testid="leader-chat-composer" className={isCompact ? "pointer-events-auto mx-auto w-full" : "pointer-events-none absolute inset-x-0 bottom-4 z-20"}>
+      <div className={isCompact ? "mx-auto w-full" : "pointer-events-auto mx-auto w-[min(880px,calc(100%-128px))] max-w-full space-y-3 max-[760px]:w-[calc(100%-40px)]"}>
+        {pendingDecisionRequests.length ? (
+          <PendingDecisionRequestDock flowId={flowId} cards={pendingDecisionRequests} onStopCurrentTurn={activeLeaderAgentRunId ? stopLeader : undefined} />
         ) : (
           <>
-            {queuedMessages.length > 0 ? (
-              <div className={isCompactComposer
-                ? "mx-auto w-full overflow-visible"
-                : "mx-auto w-[min(880px,calc(100%-128px))] max-w-full overflow-visible max-[760px]:w-[calc(100%-40px)]"}
-              >
-                <RunningMessageQueue
-                  messages={queuedMessages}
-                  onReorder={handleReorderQueuedMessage}
-                  onEdit={handleEditQueuedMessage}
-                  onDelete={handleDeleteQueuedMessage}
-                  onGuide={handleGuideQueuedMessage}
-                  actionLabel={isStreaming ? "引导" : "发送给 Leader"}
-                />
-              </div>
+            {queuedMessages.length ? (
+              <RunningMessageQueue messages={queuedMessages} onReorder={reorderQueue} onEdit={editQueueMessage} onDelete={deleteQueueMessage} onGuide={guideQueueMessage} actionLabel={isWaiting ? "引导" : "发送给 Leader"} />
             ) : null}
-            <div className={isCompactComposer
-              ? "mx-auto w-full overflow-visible"
-              : "mx-auto w-[min(880px,calc(100%-128px))] max-w-full overflow-visible max-[760px]:w-[calc(100%-40px)]"}
-            >
-              <PromptInput
-                onSend={handleComposerSendWithAttachments}
-                disabled={composerDisabled}
-                allowEmptySend={planFeedback.length > 0 || browserElementAttachments.length > 0}
-                placeholder={placeholder}
-                value={effectiveComposerValue}
-                onValueChange={handleComposerValueChange}
-                onPasteImages={handlePasteImages}
-                slashMenu={nativeContextSlashMenu}
-                attachmentSlot={(
-                  <>
-                    <MessageImageAttachments />
-                    <BrowserElementAttachments />
-                    <PlanFeedbackAttachments />
-                  </>
-                )}
-                toolbarSlot={toolbarControl}
-                actionSlot={actionControls}
-                stopActive={Boolean(flowId && activeLeaderAgentSessionId)}
-                onStop={handleStopCurrentTurn}
-                className={!isCompactComposer ? "shadow-[var(--ui-shadow-elevated)]" : undefined}
-              />
-            </div>
+            <PromptInput
+              onSend={handleComposerSend}
+              disabled={composerDisabled}
+              allowEmptySend={Boolean(browserElements.length || images.length || orchestrationFeedback.length)}
+              placeholder={placeholder}
+              value={effectiveComposerValue}
+              onValueChange={setComposerValue}
+              onPasteImages={(files) => handlePasteImages(files, effectiveComposerValue.length)}
+              slashMenu={nativeContextSlashMenu}
+              attachmentSlot={<><MessageImageAttachments /><BrowserElementAttachments /><OrchestrationFeedbackAttachments /></>}
+              toolbarSlot={(
+                <ComposerModeMenu
+                  behaviorMode={behaviorMode}
+                  riskMode={riskMode}
+                  orchestrationMode={orchestrationMode}
+                  disabled={!flowId || modeUpdating}
+                  onModeChange={(mode) => void updateModes(mode)}
+                  onOrchestrationModeChange={(mode) => void updateModes({ orchestrationMode: mode })}
+                  onAddImages={(files) => handlePasteImages(files, effectiveComposerValue.length)}
+                />
+              )}
+              actionSlot={(
+                <div className="flex items-center gap-1.5">
+                  <ContextUsageIndicator usage={contextUsage} compacting={compacting || contextCompaction?.status === "running"} disabled={isWaiting} onCompact={handleCompact} />
+                  <LeaderModelSelector
+                    flowId={flowId}
+                    onConfiguredChange={setLeaderModelConfigured}
+                    onUpdatingChange={setRuntimeSelectionUpdating}
+                    onSelectionChange={() => setNativeContextRefreshKey((value) => value + 1)}
+                    onOpenModelSettings={onOpenModelSettings}
+                    reasoningEffortDisabled={isWaiting}
+                    className={isCompact ? "max-w-[280px]" : "max-w-[330px]"}
+                  />
+                </div>
+              )}
+              stopActive={Boolean(activeLeaderAgentRunId)}
+              onStop={stopLeader}
+              className={!isCompact ? "shadow-[var(--ui-shadow-elevated)]" : undefined}
+            />
           </>
         )}
       </div>
-      <AlertDialog open={interruptDialogOpen} onOpenChange={setInterruptDialogOpen}>
-        <AlertDialogContent size="sm">
-          <AlertDialogHeader>
-            <AlertDialogTitle>中断协作？</AlertDialogTitle>
-            <AlertDialogDescription>
-              正在运行的 Agent 会停止；任务进度和上下文将保留，之后可以让 Leader 恢复。
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel disabled={interruptPending}>返回</AlertDialogCancel>
-            <AlertDialogAction
-              data-testid="confirm-interrupt-work-run"
-              disabled={interruptPending}
-              onClick={handleInterruptWorkRun}
-            >
-              {interruptPending ? "正在中断…" : "中断协作"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 
@@ -1632,56 +567,34 @@ export default function LeaderChatPanel({
 
   return (
     <div data-testid="leader-chat-panel" className="relative flex h-full flex-col">
-      {sessionRecoveryError ? (
-        <div
-          data-testid="leader-session-recovery-error"
-          role="alert"
-          className="mx-auto mt-3 w-[min(880px,calc(100%-128px))] rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-sm text-amber-100 max-[760px]:w-[calc(100%-40px)]"
-        >
-          <div className="font-medium">原 Leader 会话无法继续</div>
-          <div className="mt-1 text-amber-100/80">{sessionRecoveryError.message}</div>
-          <div className="mt-1 text-xs text-amber-100/60">系统不会创建新会话；确认 provider 可用后重新发送即可继续恢复。</div>
-        </div>
-      ) : null}
-      {leaderRuntimeError && !sessionRecoveryError ? (
-        <div
-          data-testid="leader-runtime-error"
-          role="alert"
-          className="mx-auto mt-3 w-[min(880px,calc(100%-128px))] rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-foreground max-[760px]:w-[calc(100%-40px)]"
-        >
-          <div className="font-medium">请求失败</div>
-          <div className="mt-1 text-muted-foreground">{leaderRuntimeError}</div>
-        </div>
-      ) : null}
+      {runtimeError ? <div role="alert" className="mx-auto mt-3 w-[min(880px,calc(100%-128px))] rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm">{runtimeError}</div> : null}
       <div data-testid="leader-chat-transcript-shell" className="relative min-h-0 flex-1">
         <SessionTranscriptPanel
           flowId={flowId}
-          agentSessionId={leaderAgentSessionId}
+          agentRunId={leaderAgentRunId}
           readonly={false}
-          decisionCards={decisionCards}
-          decisionCardStatuses={decisionCardStatuses}
-          decisionCardAnswers={decisionCardAnswers}
-          specCards={specCards}
+          decisionRequests={decisionRequests}
+          planCards={planCards}
           orchestrationPlans={orchestrationPlans}
           optimisticMessages={transcriptOptimisticMessages}
           followRequestKey={followRequestKey}
           isAwaitingResponse={isWaiting}
-          reviews={reviews}
-          onOpenReview={onOpenReview}
-          onOpenWorkspaceFile={onOpenWorkspaceFile}
-          allowInferredAgentSessionId
+          allowInferredAgentRunId
           stableTranscriptChannel
-          onOpenSpec={onOpenSpecPreview}
-          onOpenPlan={onOpenPlan}
-          onApprovePlan={approvePlan}
+          onOpenPlan={onOpenPlanPreview}
+          onOpenOrchestration={onOpenPlan}
+          onApproveOrchestration={(plan) => {
+            if (!plan.approval || plan.approval.status !== "pending") return;
+            wsClient.send({ type: "orchestration:resolve", flow_id: plan.flow_id, orchestration_approval_id: plan.approval.orchestration_approval_id, resolution: "approved", client_action_id: `orchestration-approve-${Date.now()}` });
+          }}
+          onOpenWorkspaceFile={onOpenWorkspaceFile}
           className="relative h-full overflow-y-hidden"
-          bottomOverlayHeight={hasPendingDecisionCards ? 0 : queuedMessages.length > 0 ? 296 : 132}
+          bottomOverlayHeight={pendingDecisionRequests.length ? 0 : queuedMessages.length ? 296 : 132}
           emptyTitle="开始对话"
           emptyDescription="发送消息开始与 AI 助手对话"
           workspaceRootPath={workspaceRootPath}
         />
       </div>
-
       {composer}
     </div>
   );

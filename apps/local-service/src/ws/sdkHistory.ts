@@ -269,11 +269,11 @@ export function platformMessageToUiProjection(text: string, flowId: string): Pla
     .join("\n\n");
   const guide = eventSegments(segments, "guide").at(0);
   const leaderMessage = eventSegments(segments, "leader_message").at(0);
-  const planFeedback = eventSegments(segments, "plan_feedback").at(0);
+  const orchestrationFeedback = eventSegments(segments, "orchestration_feedback").at(0);
   const visibleText = userText
     || (guide?.kind === "event" ? guide.body : "")
     || (leaderMessage?.kind === "event" ? leaderMessage.body : "")
-    || (planFeedback ? "计划评论" : "");
+    || (orchestrationFeedback ? "计划评论" : "");
   return {
     text: visibleText,
     metadata: guide

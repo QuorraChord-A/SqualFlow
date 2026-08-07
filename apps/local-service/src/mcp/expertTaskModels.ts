@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 /**
- * User-facing Task states. Runtime transport states belong to AgentSession,
+ * User-facing Task states. Runtime transport states belong to AgentRun,
  * not to the Expert Task MCP contract.
  */
 export const ExpertTaskStatus = z.enum([

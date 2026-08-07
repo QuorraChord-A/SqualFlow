@@ -45,7 +45,6 @@ function flow(
     description: '',
     type: 'full',
     status: 'idle',
-    current_stage: null,
     project_id: projectId,
     created_at: '2026-06-20T10:00:00.000Z',
     updated_at: '2026-06-20T10:00:00.000Z',

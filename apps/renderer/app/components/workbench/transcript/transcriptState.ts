@@ -71,8 +71,8 @@ export type TranscriptAction =
   | { type: "apply-events"; events: TranscriptCommittedEvent[] }
   | { type: "upsert-timeline-item"; item: TranscriptTimelineItem }
   | {
-      type: "decision-card-resolved";
-      cardId: string;
+      type: "decision-request-resolved";
+      requestId: string;
       messageId: string;
       status: "resolved" | "cancelled";
       createdAt: Date;
@@ -129,7 +129,7 @@ function messagePresentationTurnId(message: UIMessage): string | null {
 
 function messageKind(message: UIMessage): TranscriptTimelineItem["message_kind"] {
   const value = messageMetadata(message).messageKind;
-  if (value === "assistant-continuation" || value === "running-guide" || value === "work-run-terminal"
+  if (value === "assistant-continuation" || value === "running-guide" || value === "agent-run-terminal"
     || value === "assistant" || value === "user") return value;
   return message.role === "assistant" ? "assistant" : "user";
 }
@@ -146,10 +146,9 @@ function syntheticMessageItem(message: UIMessage, position: number): TranscriptT
     lifecycle: "complete",
     message_id: message.id,
     session_id: null,
-    agent_session_id: typeof messageMetadata(message).agentSessionId === "string"
-      ? messageMetadata(message).agentSessionId as string
+    agent_run_id: typeof messageMetadata(message).agentRunId === "string"
+      ? messageMetadata(message).agentRunId as string
       : null,
-    work_run_id: null,
     presentation_turn_id: messagePresentationTurnId(message),
     message_kind: messageKind(message),
     payload: cloneUiMessage(message),
@@ -435,8 +434,8 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
     const activeTurn = state.activeTurn && isRunningGuideMessage(message)
       ? { ...state.activeTurn, pendingGuideMessageIds: [...state.activeTurn.pendingGuideMessageIds, message.id] }
       : state.activeTurn;
-    const decisionCardId = message.role === "user"
-      ? (message as { metadata?: { decisionCardId?: unknown } }).metadata?.decisionCardId
+    const decisionRequestId = message.role === "user"
+      ? (message as { metadata?: { decisionRequestId?: unknown } }).metadata?.decisionRequestId
       : undefined;
     return {
       ...state,
@@ -445,8 +444,8 @@ function applyEvent(state: TranscriptState, event: TranscriptEvent): TranscriptS
         ? new Set([...state.optimisticMessageIds].filter((messageId) => messageId !== message.id))
         : state.optimisticMessageIds,
       activeTurn,
-      expandedDecisionResultIds: typeof decisionCardId === "string"
-        ? new Set([...state.expandedDecisionResultIds, decisionCardId])
+      expandedDecisionResultIds: typeof decisionRequestId === "string"
+        ? new Set([...state.expandedDecisionResultIds, decisionRequestId])
         : state.expandedDecisionResultIds,
     };
   }
@@ -785,11 +784,11 @@ function reduceTranscriptState(state: TranscriptState, action: TranscriptAction)
           finishedAt: action.finishedAt,
         })
         : state;
-    case "decision-card-resolved": {
+    case "decision-request-resolved": {
       if (state.messages.some((message) => message.id === action.messageId)) return state;
       const text = action.status === "cancelled"
-        ? `clarification_card_id: ${action.cardId}\n用户取消了本次澄清卡片。`
-        : `clarification_card_id: ${action.cardId}\n用户已回答澄清卡片。`;
+        ? `decision_request_id: ${action.requestId}\n用户取消了本次澄清请求。`
+        : `decision_request_id: ${action.requestId}\n用户已回答澄清请求。`;
       return {
         ...state,
         messages: [...state.messages, {
@@ -799,7 +798,7 @@ function reduceTranscriptState(state: TranscriptState, action: TranscriptAction)
           content: text,
           createdAt: action.createdAt,
         } as UIMessage],
-        expandedDecisionResultIds: new Set([...state.expandedDecisionResultIds, action.cardId]),
+        expandedDecisionResultIds: new Set([...state.expandedDecisionResultIds, action.requestId]),
       };
     }
     case "resync-requested":

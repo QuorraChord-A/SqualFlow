@@ -30,7 +30,7 @@ import { useProjectStore } from '../stores/useProjectStore';
 import type { Project } from '../types';
 import { wsClient } from '../lib/ws';
 import LeaderModelSelector from './LeaderModelSelector';
-import ComposerModeMenu, { type PlanApproval, type RiskMode } from './ComposerModeMenu';
+import ComposerModeMenu, { type BehaviorMode, type OrchestrationMode, type RiskMode } from './ComposerModeMenu';
 import BrowserElementAttachments from './BrowserElementAttachments';
 import MessageImageAttachments from './MessageImageAttachments';
 import { PromptInput } from '@/components/ai-elements-official/prompt-input';
@@ -50,7 +50,6 @@ interface NewTaskViewProps {
   onTaskCreated?: (
     flowId: string,
     initialMessage: UIMessage,
-    initialPlanModeReturnRiskMode: RiskMode | null,
   ) => void;
   onOpenModelSettings?: () => void;
 }
@@ -66,19 +65,19 @@ type NewTaskLeaderRuntimeSelection = {
 
 type NewTaskModeDefaults = {
   riskMode: RiskMode;
-  planApproval: PlanApproval;
+  orchestrationMode: OrchestrationMode;
 };
 
 function readNewTaskModeDefaults(): NewTaskModeDefaults {
-  if (typeof window === 'undefined') return { riskMode: 'auto_edit', planApproval: 'on' };
+  if (typeof window === 'undefined') return { riskMode: 'auto_edit', orchestrationMode: 'approval_required' };
   try {
     const parsed = JSON.parse(window.localStorage.getItem(NEW_TASK_MODE_DEFAULTS_STORAGE_KEY) ?? 'null') as Partial<NewTaskModeDefaults> | null;
     return {
       riskMode: parsed?.riskMode === 'full_access' ? 'full_access' : 'auto_edit',
-      planApproval: parsed?.planApproval === 'off' ? 'off' : 'on',
+      orchestrationMode: parsed?.orchestrationMode === 'automatic' ? 'automatic' : 'approval_required',
     };
   } catch {
-    return { riskMode: 'auto_edit', planApproval: 'on' };
+    return { riskMode: 'auto_edit', orchestrationMode: 'approval_required' };
   }
 }
 
@@ -152,9 +151,9 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
   const addImageAttachments = useComposerImageStore((state) => state.addImages);
   const clearImageAttachments = useComposerImageStore((state) => state.clearImages);
   const [prompt, setPrompt] = useState('');
-  const [specRequested, setSpecRequested] = useState(false);
+  const [behaviorMode, setBehaviorMode] = useState<BehaviorMode>('execute');
   const [riskMode, setRiskMode] = useState<RiskMode>('auto_edit');
-  const [planApproval, setPlanApproval] = useState<PlanApproval>('on');
+  const [orchestrationMode, setOrchestrationMode] = useState<OrchestrationMode>('approval_required');
   const [newTaskPreferencesHydrated, setNewTaskPreferencesHydrated] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -173,7 +172,7 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
     setLeaderRuntimeSelection(readNewTaskLeaderRuntimeSelection());
     const modeDefaults = readNewTaskModeDefaults();
     setRiskMode(modeDefaults.riskMode);
-    setPlanApproval(modeDefaults.planApproval);
+    setOrchestrationMode(modeDefaults.orchestrationMode);
     setNewTaskPreferencesHydrated(true);
   }, []);
 
@@ -215,14 +214,15 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
     });
   }, []);
 
-  const handleNewTaskRiskModeChange = useCallback((next: RiskMode) => {
-    setRiskMode(next);
-    writeNewTaskModeDefaults({ riskMode: next, planApproval });
-  }, [planApproval]);
+  const handleNewTaskModeChange = useCallback((next: { behaviorMode: BehaviorMode; riskMode: RiskMode }) => {
+    setBehaviorMode(next.behaviorMode);
+    setRiskMode(next.riskMode);
+    writeNewTaskModeDefaults({ riskMode: next.riskMode, orchestrationMode });
+  }, [orchestrationMode]);
 
-  const handleNewTaskPlanApprovalChange = useCallback((next: PlanApproval) => {
-    setPlanApproval(next);
-    writeNewTaskModeDefaults({ riskMode, planApproval: next });
+  const handleNewTaskOrchestrationModeChange = useCallback((next: OrchestrationMode) => {
+    setOrchestrationMode(next);
+    writeNewTaskModeDefaults({ riskMode, orchestrationMode: next });
   }, [riskMode]);
 
   const filteredProjects = useMemo(() => {
@@ -317,7 +317,8 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
         leader_runtime_model_id: leaderRuntimeSelection?.modelId ?? null,
         leader_runtime_reasoning_effort: leaderRuntimeSelection?.reasoningEffort ?? undefined,
         risk_mode: riskMode,
-        plan_approval: planApproval,
+        behavior_mode: behaviorMode,
+        orchestration_mode: orchestrationMode,
       }, selectedProjectId);
       if (!flow) {
         setError('创建任务失败，请稍后重试');
@@ -341,14 +342,13 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
         type: 'flow:message',
         flow_id: flow.id,
         content,
-        spec_requested: specRequested,
         ...(outgoingAttachments.length > 0 ? { attachments: outgoingAttachments } : {}),
         client_message_id: clientMessageId,
       });
       setPrompt('');
       if (browserElementAttachments.length > 0) clearBrowserElementAttachments();
       if (imageAttachments.length > 0) clearImageAttachments();
-      onTaskCreated?.(flow.id, initialMessage, specRequested ? riskMode : null);
+      onTaskCreated?.(flow.id, initialMessage);
       return true;
     } finally {
       setIsCreatingTask(false);
@@ -390,13 +390,12 @@ export default function NewTaskView({ onTaskCreated, onOpenModelSettings }: NewT
             toolbarSlot={(
               newTaskPreferencesHydrated ? (
                 <ComposerModeMenu
-                  specRequested={specRequested}
+                  behaviorMode={behaviorMode}
                   riskMode={riskMode}
-                  planApproval={planApproval}
+                  orchestrationMode={orchestrationMode}
                   disabled={isCreatingTask}
-                  onSpecChange={setSpecRequested}
-                  onRiskModeChange={handleNewTaskRiskModeChange}
-                  onPlanApprovalChange={handleNewTaskPlanApprovalChange}
+                  onModeChange={handleNewTaskModeChange}
+                  onOrchestrationModeChange={handleNewTaskOrchestrationModeChange}
                   onAddImages={(files) => handlePasteImages(files, prompt.length)}
                 />
               ) : (

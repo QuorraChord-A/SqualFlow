@@ -1,7 +1,7 @@
 /**
  * Fix nested code fences for correct markdown rendering.
  *
- * CommonMark spec: a closing fence must have "at least as many" backticks
+ * CommonMark plan: a closing fence must have "at least as many" backticks
  * as the opening fence. When AI wraps content in ```markdown that itself
  * contains inner ``` blocks, the inner fence prematurely closes the outer.
  *

@@ -55,11 +55,11 @@ export function mergeContextCacheUsage(
 }
 
 export type AgentContextUsagePayload = {
-  agent_session_id: string;
-  sdk_session_id: string | null;
+  agent_run_id: string;
+  provider_session_id: string | null;
   role: string;
-  expert_id: string | null;
-  flow_expert_id: string | null;
+  agent_definition_id: string | null;
+  agent_session_id: string | null;
   display_name: string;
   total_tokens: number | null;
   max_tokens: number | null;
@@ -160,20 +160,20 @@ export function overallContextUsageFromResultCache(
 export function contextUsageSnapshotToPayload(
   snapshot: ContextUsageSnapshot,
   input: {
-    agentSessionId: string;
-    sdkSessionId: string | null;
+    agentRunId: string;
+    providerSessionId: string | null;
     role: string;
-    expertId: string | null;
-    flowExpertId: string | null;
+    agentDefinitionId: string | null;
+    agentSessionId: string | null;
     displayName: string;
   },
 ): AgentContextUsagePayload {
   return {
-    agent_session_id: input.agentSessionId,
-    sdk_session_id: input.sdkSessionId,
+    agent_run_id: input.agentRunId,
+    provider_session_id: input.providerSessionId,
     role: input.role,
-    expert_id: input.expertId,
-    flow_expert_id: input.flowExpertId,
+    agent_definition_id: input.agentDefinitionId,
+    agent_session_id: input.agentSessionId,
     display_name: input.displayName,
     total_tokens: snapshot.totalTokens,
     max_tokens: snapshot.maxTokens,

@@ -14,7 +14,7 @@ export function parsePersonNameCandidates(value: string | null | undefined): str
 }
 
 /**
- * Pick a person display name for a new FlowExpert.
+ * Pick a person display name for a new AgentSession.
  * Prefers unused candidates within the Flow; falls back to suffixing.
  */
 export function pickPersonDisplayName(input: {

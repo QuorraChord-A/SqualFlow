@@ -37,7 +37,20 @@ export type BaselineChange = {
   detailStatus: "ready" | "binary" | "large" | "unavailable";
 };
 
-export type StoredChangeBaseline = NonNullable<ReturnType<Store["getChangeBaselineByAgentSession"]>>;
+export type StoredChangeBaseline = {
+  id: string;
+  flowId: string;
+  agentRunId: string;
+  taskId: string | null;
+  rootPath: string;
+  snapshotPath: string;
+  baselineJson: string;
+  baselineKind: string;
+  baselineRef: string | null;
+  status: "ready" | "skipped" | "failed";
+  errorMessage: string | null;
+  createdAt: string;
+};
 
 function hashBuffer(buffer: Buffer) {
   return crypto.createHash("sha256").update(buffer).digest("hex");
@@ -168,40 +181,39 @@ function captureManifest(rootPath: string, snapshotPath: string): ChangeBaseline
 export function capturePersistentChangeBaseline(input: {
   store: Store;
   flowId: string;
-  sourceAgentSessionId: string;
-  workRunId?: string | null;
+  agentRunId: string;
+  taskId?: string | null;
   rootPath: string;
-}) {
-  const existing = input.store.getChangeBaselineByAgentSession(input.sourceAgentSessionId);
+}): StoredChangeBaseline | undefined {
+  const existing = input.store.getChangeBaselineCandidate(input.agentRunId) as StoredChangeBaseline | undefined;
   if (existing) return existing;
-  if (input.workRunId) {
-    const workRunBaseline = input.store.getChangeBaselineForWorkRun(input.workRunId);
-    if (workRunBaseline) return workRunBaseline;
-  }
-  const snapshotPath = path.join(config.runtimeScratchRoot, input.flowId, "change-baselines", input.sourceAgentSessionId);
+  const snapshotPath = path.join(config.runtimeScratchRoot, input.flowId, "change-baselines", input.agentRunId);
   try {
     const manifest = captureManifest(input.rootPath, snapshotPath);
-    return input.store.createChangeBaseline({
+    return input.store.createChangeBaselineCandidate({
       flowId: input.flowId,
-      sourceAgentSessionId: input.sourceAgentSessionId,
-      workRunId: input.workRunId,
+      agentRunId: input.agentRunId,
+      taskId: input.taskId,
       rootPath: input.rootPath,
       snapshotPath,
-      manifestJson: JSON.stringify(manifest),
+      baselineJson: JSON.stringify(manifest),
+      baselineKind: manifest.kind,
+      baselineRef: manifest.base_commit ?? null,
       status: manifest.skipped ? "skipped" : "ready",
       ...(manifest.skipped ? { errorMessage: `项目文件超过 ${MAX_FILES} 个，未生成完整 Diff。` } : {}),
-    });
+    }) as StoredChangeBaseline | undefined;
   } catch (error) {
-    return input.store.createChangeBaseline({
+    return input.store.createChangeBaselineCandidate({
       flowId: input.flowId,
-      sourceAgentSessionId: input.sourceAgentSessionId,
-      workRunId: input.workRunId,
+      agentRunId: input.agentRunId,
+      taskId: input.taskId,
       rootPath: input.rootPath,
       snapshotPath,
-      manifestJson: JSON.stringify({ version: 1, kind: "snapshot", root_path: input.rootPath, files: {} }),
+      baselineJson: JSON.stringify({ version: 1, kind: "snapshot", root_path: input.rootPath, files: {} }),
+      baselineKind: "snapshot",
       status: "failed",
       errorMessage: error instanceof Error ? error.message : String(error),
-    });
+    }) as StoredChangeBaseline | undefined;
   }
 }
 
@@ -248,7 +260,7 @@ export function changesFromBaseline(row: StoredChangeBaseline): {
   if (row.status !== "ready") return { status: row.status, ...(row.errorMessage ? { reason: row.errorMessage } : {}), changes: [] };
   let manifest: ChangeBaselineManifest;
   try {
-    manifest = JSON.parse(row.manifestJson) as ChangeBaselineManifest;
+    manifest = JSON.parse(row.baselineJson) as ChangeBaselineManifest;
   } catch (error) {
     return { status: "failed", reason: error instanceof Error ? error.message : String(error), changes: [] };
   }
@@ -306,25 +318,25 @@ export function cleanupChangeBaseline(store: Store, row: StoredChangeBaseline) {
   } catch {
     // Best-effort cleanup; orphan recovery will retry later.
   }
-  store.deleteChangeBaseline(row.id);
+  store.deleteChangeBaselineCandidate(row.agentRunId);
 }
 
 export function cleanupOrphanChangeBaselines(store: Store) {
   let removed = 0;
-  const baselines = store.listChangeBaselines();
+  const baselines = store.listChangeBaselineCandidates() as StoredChangeBaseline[];
   for (const baseline of baselines) {
-    const session = store.getAgentSession(baseline.sourceAgentSessionId);
-    const turn = baseline.workRunId ? store.getWorkRun(baseline.workRunId) : undefined;
-    const terminalTurn = turn && ["completed", "failed", "cancelled"].includes(turn.status);
-    const abandonedCandidate = !baseline.workRunId
-      && (!session || !["queued", "streaming"].includes(session.status));
-    const missingBoundWorkRun = Boolean(baseline.workRunId && !turn);
-    if (!store.getFlow(baseline.flowId) || !session || missingBoundWorkRun || terminalTurn || abandonedCandidate) {
+    const run = store.getAgentRun(baseline.agentRunId);
+    const changeSet = store.getOpenChangeSetForRun(baseline.agentRunId);
+    const terminalCandidate = run && ["completed", "failed", "cancelled", "interrupted"].includes(run.status);
+    if (!store.getFlow(baseline.flowId) || !run || (terminalCandidate && !changeSet)) {
       cleanupChangeBaseline(store, baseline);
       removed += 1;
     }
   }
-  const registeredPaths = new Set(store.listChangeBaselines().map((baseline) => path.resolve(baseline.snapshotPath)));
+  const registeredPaths = new Set(
+    (store.listChangeBaselineCandidates() as StoredChangeBaseline[])
+      .map((baseline) => path.resolve(baseline.snapshotPath)),
+  );
   let orphanDirectoriesRemoved = 0;
   try {
     for (const flowEntry of fs.readdirSync(config.runtimeScratchRoot, { withFileTypes: true })) {

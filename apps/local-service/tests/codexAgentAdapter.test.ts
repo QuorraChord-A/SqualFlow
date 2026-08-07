@@ -783,6 +783,11 @@ describe("Codex runtime adapter", () => {
 
     const turnStart = requests.find((request) => request.method === "turn/start")?.params as { input?: Array<Record<string, unknown>> };
     expect(parseMessageSegments(String(turnStart.input?.[0]?.text ?? ""), "flow-guide")).toEqual([
+      expect.objectContaining({ kind: "event", type: "flow_mode", attrs: {
+        behavior: "execute",
+        risk: "auto_edit",
+        orchestration: "approval_required",
+      } }),
       expect.objectContaining({ kind: "event", type: "guide", body: "Check this element" }),
       expect.objectContaining({
         kind: "event",
@@ -812,7 +817,7 @@ describe("Codex runtime adapter", () => {
       text: expect.stringContaining("<squadflow type=\"attachment\""),
     }));
     expect(parseMessageSegments(String(turnStart.input?.[1]?.text ?? "").trim(), "flow-guide")).toEqual([
-      expect.objectContaining({ kind: "event", type: "attachment", body: expect.stringContaining("Comment 3") }),
+      expect.objectContaining({ kind: "event", type: "attachment", body: expect.stringContaining("评论 3") }),
     ]);
     expect(turnStart.input?.[2]).toEqual(expect.objectContaining({
       type: "image",

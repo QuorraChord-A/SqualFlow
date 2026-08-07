@@ -33,8 +33,8 @@ export type RoleRuntimeBindingDto = {
   reasoningEffort: string;
 };
 
-export type ExpertDto = {
-  id: string;
+export type AgentDefinitionDto = {
+  agent_definition_id: string;
   role: string;
   name: string;
   system_prompt: string;
@@ -93,11 +93,11 @@ export type RuntimeAvailableModelsResultDto = {
 };
 
 export type AgentContextUsageDto = {
-  agent_session_id: string;
-  sdk_session_id: string | null;
+  agent_run_id: string;
+  provider_session_id: string | null;
   role: string;
-  expert_id: string | null;
-  flow_expert_id: string | null;
+  agent_definition_id: string | null;
+  agent_session_id: string | null;
   display_name: string;
   total_tokens: number | null;
   max_tokens: number | null;
@@ -125,11 +125,11 @@ export type FlowContextUsageDto = {
 
 export type AgentContextCompactionDto = {
   flow_id: string;
-  agent_session_id: string;
-  sdk_session_id: string | null;
+  agent_run_id: string;
+  provider_session_id: string | null;
   role: string;
-  expert_id: string | null;
-  flow_expert_id: string | null;
+  agent_definition_id: string | null;
+  agent_session_id: string | null;
   display_name: string;
   status: "running" | "completed" | "failed";
   started_at: string;
@@ -169,9 +169,9 @@ export async function fetchAgentRuntimeConfig(): Promise<AgentRuntimeConfigSnaps
   return parseJsonResponse<AgentRuntimeConfigSnapshotDto>(res);
 }
 
-export async function fetchExperts(): Promise<ExpertDto[]> {
-  const res = await fetch(`${API_BASE}/api/experts`);
-  return parseJsonResponse<ExpertDto[]>(res);
+export async function fetchAgentDefinitions(): Promise<AgentDefinitionDto[]> {
+  const res = await fetch(`${API_BASE}/api/agent-definitions`);
+  return parseJsonResponse<AgentDefinitionDto[]>(res);
 }
 
 export async function fetchNativeContext(input: {

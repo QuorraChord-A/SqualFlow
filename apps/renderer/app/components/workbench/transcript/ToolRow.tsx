@@ -15,7 +15,7 @@ const ICONS: Record<ToolPresentation["icon"], React.ComponentType<{ size?: numbe
   edit: Edit3,
   terminal: Terminal,
   question: HelpCircle,
-  spec: FileQuestion,
+  plan: FileQuestion,
   task: FileText,
   agent: FileQuestion,
   message: FileQuestion,

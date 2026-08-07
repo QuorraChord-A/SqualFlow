@@ -2,11 +2,11 @@ export type ContextCompactionStatus = "running" | "completed" | "failed";
 
 export type ContextCompactionSnapshot = {
   flow_id: string;
-  agent_session_id: string;
-  sdk_session_id: string | null;
+  agent_run_id: string;
+  provider_session_id: string | null;
   role: string;
-  expert_id: string | null;
-  flow_expert_id: string | null;
+  agent_definition_id: string | null;
+  agent_session_id: string | null;
   display_name: string;
   status: ContextCompactionStatus;
   started_at: string;
@@ -26,12 +26,12 @@ export class ContextCompactionState {
     return [...this.items.values()].filter((item) => item.flow_id === flowId);
   }
 
-  get(agentSessionId: string): ContextCompactionSnapshot | null {
-    return this.items.get(agentSessionId) ?? null;
+  get(agentRunId: string): ContextCompactionSnapshot | null {
+    return this.items.get(agentRunId) ?? null;
   }
 
   start(input: StartContextCompactionInput): ContextCompactionSnapshot {
-    const existing = this.items.get(input.agent_session_id);
+    const existing = this.items.get(input.agent_run_id);
     if (existing?.status === "running") return existing;
     const now = new Date().toISOString();
     const snapshot: ContextCompactionSnapshot = {
@@ -41,24 +41,24 @@ export class ContextCompactionState {
       updated_at: now,
       error_message: null,
     };
-    this.items.set(input.agent_session_id, snapshot);
+    this.items.set(input.agent_run_id, snapshot);
     return snapshot;
   }
 
-  complete(agentSessionId: string): ContextCompactionSnapshot | null {
-    return this.finish(agentSessionId, "completed");
+  complete(agentRunId: string): ContextCompactionSnapshot | null {
+    return this.finish(agentRunId, "completed");
   }
 
-  fail(agentSessionId: string, error: string): ContextCompactionSnapshot | null {
-    return this.finish(agentSessionId, "failed", error);
+  fail(agentRunId: string, error: string): ContextCompactionSnapshot | null {
+    return this.finish(agentRunId, "failed", error);
   }
 
   private finish(
-    agentSessionId: string,
+    agentRunId: string,
     status: "completed" | "failed",
     errorMessage: string | null = null,
   ): ContextCompactionSnapshot | null {
-    const current = this.items.get(agentSessionId);
+    const current = this.items.get(agentRunId);
     if (!current) return null;
     const snapshot = {
       ...current,
@@ -66,7 +66,7 @@ export class ContextCompactionState {
       updated_at: new Date().toISOString(),
       error_message: errorMessage,
     };
-    this.items.set(agentSessionId, snapshot);
+    this.items.set(agentRunId, snapshot);
     return snapshot;
   }
 }

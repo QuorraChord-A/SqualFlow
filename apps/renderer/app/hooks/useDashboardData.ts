@@ -1,335 +1,202 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { API_BASE } from "../lib/api";
 import { wsClient } from "../lib/ws";
-import type { AgentSession } from "./useFlowExperts";
+import type { AgentRun } from "./useAgentSessions";
+import type { BehaviorMode, OrchestrationMode, RiskMode } from "../types";
 import type { OrchestrationPlanView } from "../types/orchestration";
 
-export interface TaskData {
-  id: string;
-  flow_id?: string;
-  work_run_id: string;
-  title: string;
-  description: string;
-  expert_id: string | null;
-  status: string;
-  agent_session_id?: string | null;
-  depends_on_task_ids: string[];
-  acceptance_criteria?: string[];
-  result_artifact_ids?: string[];
-  result_json?: string | null;
-  error_message?: string | null;
-}
-
-export interface QuestionOption { label: string; description: string; }
-export interface Question { question: string; header: string; multiSelect: boolean; options: QuestionOption[]; }
+export interface QuestionOption { label: string; description: string }
+export interface Question { question: string; header?: string; multiSelect: boolean; options: QuestionOption[] }
 export type DecisionAnswer = string | string[];
 export type DecisionAnswers = Record<string, DecisionAnswer>;
 
-export interface DecisionCardData {
-  card_id: string;
-  card_type?: string;
-  work_run_id?: string | null;
+export interface DecisionRequestCardData {
+  decision_request_id: string;
+  request_type: "clarification" | "tool_permission";
   questions: Question[];
-  status: "pending" | "resolved" | "cancelled";
+  status: "pending" | "approved" | "rejected" | "cancelled";
   answers?: DecisionAnswers;
+  source_agent_run_id?: string | null;
+  tool_name?: string;
+  tool_arguments?: Record<string, unknown>;
 }
 
-export interface ArtifactData {
-  id: string;
-  flow_id: string;
-  work_run_id?: string | null;
-  task_id?: string | null;
-  artifact_type: string;
-  title: string;
-  content?: string;
-  source_agent_session_id?: string;
-  created_at?: string;
-}
-
-export interface SpecRevisionData {
-  id: string;
+export interface PlanCardState {
+  plan_approval_id: string;
+  plan_revision_id: string;
   revision_number: number;
-  status: "draft" | "approved" | "executed" | "superseded" | string;
+  status: "pending" | "approved" | "rejected" | "cancelled";
   title: string;
-  content: string;
-  source_agent_session_id?: string;
-  created_at?: string;
-  approved_at?: string | null;
-  executed_at?: string | null;
-}
-
-export interface EventLogData {
-  id: string;
-  sequence: number;
-  event_type: string;
-  work_run_id?: string | null;
-  task_id?: string | null;
-  agent_session_id?: string | null;
-  payload?: Record<string, unknown>;
-  created_at?: string;
-}
-
-export interface WorkRunData {
-  id: string;
-  triggerMessageId: string;
-  status: "ready" | "executing" | "waiting_user" | "interrupted" | "completed" | "failed" | "cancelled" | string;
-  startedAt: string | null;
-  activeStartedAt: string | null;
-  activeDurationMs: number;
-  completedAt: string | null;
-  workSource: "spec" | "direct_message" | null;
-  specRevisionId: string | null;
-  targetProjectId: string | null;
-  workRootPath: string | null;
-  revision: number;
-  executionStartedAt: string | null;
-}
-
-type SpecCardState = {
-  spec_approval_id: string;
-  spec_revision_id: string;
-  work_run_id?: string | null;
-  status: "pending" | "approved" | "cancelled";
-  file_name: string;
   overview: string;
-  actions: string[];
-};
-export type { SpecCardState };
+  content: string;
+  feedback?: string | null;
+  created_at: string;
+  resolved_at?: string | null;
+}
 
 export interface DashboardData {
   isFlowStateLoaded: boolean;
   flowStateLoadedFlowId: string | null;
-  activeWorkRunId: string | null;
-  tasks: TaskData[];
   flowStatus: string;
-  riskMode: "auto_edit" | "full_access";
-  planApproval: "on" | "off";
-  legacySpecFlow: boolean;
-  leaderSessionId: string | null;
-  leaderSessionFlowId: string | null;
+  behaviorMode: BehaviorMode;
+  riskMode: RiskMode;
+  orchestrationMode: OrchestrationMode;
   leaderAgentSessionId: string | null;
-  activeLeaderAgentSessionId: string | null;
+  leaderAgentRunId: string | null;
+  activeLeaderAgentRunId: string | null;
   leaderTranscriptReadyFlowId: string | null;
-  leaderTranscriptReadyAgentSessionId: string | null;
-  decisionCards: DecisionCardData[];
-  specCards: Record<string, SpecCardState>;
-  artifacts: ArtifactData[];
-  specRevisions: SpecRevisionData[];
-  workRuns: WorkRunData[];
-  recentEvents: EventLogData[];
-  experts: AgentSession[];
+  leaderTranscriptReadyAgentRunId: string | null;
+  decisionRequests: DecisionRequestCardData[];
+  planCards: Record<string, PlanCardState>;
   orchestrationPlans: OrchestrationPlanView[];
+  agentRuns: AgentRun[];
 }
 
-function mergeById<T extends { id: string }>(existing: T[], incoming: T[]) {
-  const byId = new Map(existing.map((item) => [item.id, item]));
-  for (const item of incoming) byId.set(item.id, { ...byId.get(item.id), ...item });
-  return [...byId.values()];
-}
+type Snapshot = Record<string, any>;
 
-function normalizeWorkRun(value: unknown): WorkRunData | null {
-  if (!value || typeof value !== "object") return null;
-  const turn = value as Record<string, unknown>;
-  const id = typeof turn.work_run_id === "string" ? turn.work_run_id : typeof turn.id === "string" ? turn.id : "";
-  const triggerMessageId = typeof turn.trigger_message_id === "string" ? turn.trigger_message_id : "";
-  if (!id || !triggerMessageId) return null;
+function normalizeAgentRun(value: Record<string, unknown>): AgentRun | null {
+  const id = typeof value.agent_run_id === "string" ? value.agent_run_id : "";
+  const flowId = typeof value.flow_id === "string" ? value.flow_id : "";
+  const sessionId = typeof value.agent_session_id === "string" ? value.agent_session_id : "";
+  if (!id || !flowId || !sessionId) return null;
   return {
-    id,
-    triggerMessageId,
-    status: typeof turn.status === "string" ? turn.status : "ready",
-    startedAt: typeof turn.started_at === "string" ? turn.started_at : null,
-    activeStartedAt: typeof turn.active_started_at === "string" ? turn.active_started_at : null,
-    activeDurationMs: typeof turn.active_duration_ms === "number" ? turn.active_duration_ms : 0,
-    completedAt: typeof turn.completed_at === "string" ? turn.completed_at : null,
-    workSource: turn.work_source === "spec" || turn.work_source === "direct_message" ? turn.work_source : null,
-    specRevisionId: typeof turn.spec_revision_id === "string" ? turn.spec_revision_id : null,
-    targetProjectId: typeof turn.target_project_id === "string" ? turn.target_project_id : null,
-    workRootPath: typeof turn.work_root_path === "string" && turn.work_root_path.trim().length > 0
-      ? turn.work_root_path
-      : null,
-    revision: typeof turn.revision === "number" ? turn.revision : 1,
-    executionStartedAt: typeof turn.execution_started_at === "string" ? turn.execution_started_at : null,
+    agent_run_id: id,
+    flow_id: flowId,
+    agent_session_id: sessionId,
+    task_id: typeof value.task_id === "string" ? value.task_id : null,
+    trigger_kind: typeof value.trigger_kind === "string" ? value.trigger_kind : "user_message",
+    trigger_message_id: typeof value.trigger_message_id === "string" ? value.trigger_message_id : null,
+    status: typeof value.status === "string" ? value.status : "queued",
+    error_message: typeof value.error_message === "string" ? value.error_message : null,
+    created_at: typeof value.created_at === "string" ? value.created_at : "",
+    started_at: typeof value.started_at === "string" ? value.started_at : null,
+    finished_at: typeof value.finished_at === "string" ? value.finished_at : null,
+    updated_at: typeof value.updated_at === "string" ? value.updated_at : "",
   };
 }
 
-function normalizeTask(value: Record<string, unknown>): TaskData | null {
-  const id = typeof value.task_id === "string" ? value.task_id : typeof value.id === "string" ? value.id : "";
-  const workRunId = typeof value.work_run_id === "string" ? value.work_run_id : "";
-  if (!id || !workRunId) return null;
+function decisionRequests(snapshot: Snapshot): DecisionRequestCardData[] {
+  return (Array.isArray(snapshot.decision_requests) ? snapshot.decision_requests : [])
+    .map((request: any) => ({
+      decision_request_id: String(request.decision_request_id),
+      request_type: request.request_type === "tool_permission" ? "tool_permission" as const : "clarification" as const,
+      questions: Array.isArray(request.payload?.questions) ? request.payload.questions : [],
+      status: request.status === "pending" ? "pending" as const
+        : request.status === "rejected" ? "rejected" as const
+          : request.status === "cancelled" ? "cancelled" as const
+            : "approved" as const,
+      answers: request.response?.answers,
+      source_agent_run_id: typeof request.agent_run_id === "string" ? request.agent_run_id : null,
+      tool_name: typeof request.payload?.provider_tool_name === "string" ? request.payload.provider_tool_name : undefined,
+      tool_arguments: request.payload?.provider_input && typeof request.payload.provider_input === "object" ? request.payload.provider_input : undefined,
+    }));
+}
+
+function planCards(snapshot: Snapshot): Record<string, PlanCardState> {
+  const revisions = new Map((snapshot.plan?.revisions ?? []).map((revision: any) => [revision.plan_revision_id, revision]));
+  return Object.fromEntries((snapshot.plan?.approvals ?? []).flatMap((approval: any) => {
+    const revision = revisions.get(approval.plan_revision_id) as any;
+    if (!revision) return [];
+    const card: PlanCardState = {
+      plan_approval_id: approval.plan_approval_id,
+      plan_revision_id: approval.plan_revision_id,
+      revision_number: revision.revision_number,
+      status: approval.status,
+      title: revision.title,
+      overview: revision.overview,
+      content: revision.content,
+      feedback: approval.feedback ?? null,
+      created_at: approval.created_at,
+      resolved_at: approval.resolved_at ?? null,
+    };
+    return [[card.plan_approval_id, card]];
+  }));
+}
+
+const empty: DashboardData = {
+  isFlowStateLoaded: false,
+  flowStateLoadedFlowId: null,
+  flowStatus: "",
+  behaviorMode: "execute",
+  riskMode: "auto_edit",
+  orchestrationMode: "approval_required",
+  leaderAgentSessionId: null,
+  leaderAgentRunId: null,
+  activeLeaderAgentRunId: null,
+  leaderTranscriptReadyFlowId: null,
+  leaderTranscriptReadyAgentRunId: null,
+  decisionRequests: [],
+  planCards: {},
+  orchestrationPlans: [],
+  agentRuns: [],
+};
+
+function fromSnapshot(snapshot: Snapshot, flowId: string, current: DashboardData): DashboardData {
   return {
-    id,
-    flow_id: typeof value.flow_id === "string" ? value.flow_id : undefined,
-    work_run_id: workRunId,
-    title: typeof value.title === "string" ? value.title : typeof value.subject === "string" ? value.subject : id,
-    description: typeof value.description === "string" ? value.description : "",
-    expert_id: typeof value.expert_id === "string" ? value.expert_id : null,
-    status: typeof value.status === "string" ? value.status : "pending",
-    agent_session_id: typeof value.agent_session_id === "string" ? value.agent_session_id : null,
-    depends_on_task_ids: Array.isArray(value.depends_on_task_ids) ? value.depends_on_task_ids.filter((id): id is string => typeof id === "string") : [],
-    acceptance_criteria: Array.isArray(value.acceptance_criteria) ? value.acceptance_criteria.filter((item): item is string => typeof item === "string") : [],
-    result_artifact_ids: Array.isArray(value.result_artifact_ids) ? value.result_artifact_ids.filter((id): id is string => typeof id === "string") : [],
-    result_json: typeof value.result_json === "string" ? value.result_json : null,
-    error_message: typeof value.error_message === "string" ? value.error_message : null,
+    ...current,
+    isFlowStateLoaded: true,
+    flowStateLoadedFlowId: flowId,
+    flowStatus: typeof snapshot.status === "string" ? snapshot.status : "idle",
+    behaviorMode: snapshot.behavior_mode === "plan" ? "plan" : "execute",
+    riskMode: snapshot.risk_mode === "full_access" ? "full_access" : "auto_edit",
+    orchestrationMode: snapshot.orchestration_mode === "automatic" ? "automatic" : "approval_required",
+    leaderAgentSessionId: typeof snapshot.leader_agent_session_id === "string" ? snapshot.leader_agent_session_id : null,
+    leaderAgentRunId: typeof snapshot.latest_leader_agent_run_id === "string" ? snapshot.latest_leader_agent_run_id : null,
+    activeLeaderAgentRunId: typeof snapshot.active_leader_agent_run_id === "string" ? snapshot.active_leader_agent_run_id : null,
+    decisionRequests: decisionRequests(snapshot),
+    planCards: planCards(snapshot),
+    orchestrationPlans: Array.isArray(snapshot.orchestration_history) ? snapshot.orchestration_history : [],
+    agentRuns: (Array.isArray(snapshot.agent_runs) ? snapshot.agent_runs : []).map(normalizeAgentRun).filter(Boolean) as AgentRun[],
   };
 }
 
 export function useDashboardData(flowId: string | null): DashboardData {
-  const [tasks, setTasks] = useState<TaskData[]>([]);
-  const [activeWorkRunId, setActiveWorkRunId] = useState<string | null>(null);
-  const [flowStatus, setFlowStatus] = useState("");
-  const [isFlowStateLoaded, setIsFlowStateLoaded] = useState(false);
-  const [flowStateLoadedFlowId, setFlowStateLoadedFlowId] = useState<string | null>(null);
-  const [leaderSessionId, setLeaderSessionId] = useState<string | null>(null);
-  const [leaderSessionFlowId, setLeaderSessionFlowId] = useState<string | null>(null);
-  const [leaderAgentSessionId, setLeaderAgentSessionId] = useState<string | null>(null);
-  const [activeLeaderAgentSessionId, setActiveLeaderAgentSessionId] = useState<string | null>(null);
-  const [leaderTranscriptReadyFlowId, setLeaderTranscriptReadyFlowId] = useState<string | null>(null);
-  const [leaderTranscriptReadyAgentSessionId, setLeaderTranscriptReadyAgentSessionId] = useState<string | null>(null);
-  const [decisionCards, setDecisionCards] = useState<DecisionCardData[]>([]);
-  const [artifacts, setArtifacts] = useState<ArtifactData[]>([]);
-  const [specRevisions, setSpecRevisions] = useState<SpecRevisionData[]>([]);
-  const [workRuns, setWorkRuns] = useState<WorkRunData[]>([]);
-  const [recentEvents, setRecentEvents] = useState<EventLogData[]>([]);
-  const [experts, setExperts] = useState<AgentSession[]>([]);
-  const [riskMode, setRiskMode] = useState<"auto_edit" | "full_access">("auto_edit");
-  const [planApproval, setPlanApproval] = useState<"on" | "off">("on");
-  const [legacySpecFlow, setLegacySpecFlow] = useState(false);
-  const [specCards, setSpecCards] = useState<Record<string, SpecCardState>>({});
-  const [orchestrationPlans, setOrchestrationPlans] = useState<OrchestrationPlanView[]>([]);
+  const [data, setData] = useState<DashboardData>(empty);
 
   useEffect(() => {
-    const reset = () => {
-      setTasks([]); setActiveWorkRunId(null); setFlowStatus(""); setIsFlowStateLoaded(false); setFlowStateLoadedFlowId(null);
-      setLeaderSessionId(null); setLeaderSessionFlowId(null); setLeaderAgentSessionId(null); setActiveLeaderAgentSessionId(null);
-      setLeaderTranscriptReadyFlowId(null); setLeaderTranscriptReadyAgentSessionId(null);
-      setDecisionCards([]); setArtifacts([]); setSpecRevisions([]); setWorkRuns([]); setRecentEvents([]); setExperts([]);
-      setRiskMode("auto_edit"); setPlanApproval("on"); setLegacySpecFlow(false); setSpecCards({}); setOrchestrationPlans([]);
-    };
-    reset();
+    setData(empty);
     if (!flowId) return;
     let stale = false;
+    let loading: Promise<void> | null = null;
+    const apply = (snapshot: Snapshot) => {
+      if (!stale) setData((current) => fromSnapshot(snapshot, flowId, current));
+    };
+    const load = () => {
+      if (loading) return loading;
+      loading = fetch(`${API_BASE}/api/flows/${encodeURIComponent(flowId)}`)
+        .then(async (response) => { if (response.ok) apply(await response.json()); })
+        .catch(() => undefined)
+        .finally(() => { loading = null; });
+      return loading;
+    };
+
+    const reload = (message: { flow_id?: string }) => { if (message.flow_id === flowId) void load(); };
     const unsubs = [
-      wsClient.onEvent("flow:state", (msg) => {
-        if (stale || msg.flow_id !== flowId) return;
-        const data = msg.data || {};
-        setTasks((data.tasks || []).map((task: Record<string, unknown>) => normalizeTask(task)).filter((task: TaskData | null): task is TaskData => task !== null));
-        setActiveWorkRunId(data.current_work_run_id || null);
-        setFlowStatus(data.status || ""); setIsFlowStateLoaded(true); setFlowStateLoadedFlowId(msg.flow_id);
-        setRiskMode(data.risk_mode === "full_access" ? "full_access" : "auto_edit");
-        setPlanApproval(data.plan_approval === "off" ? "off" : "on");
-        setLegacySpecFlow(Boolean(data.legacy_spec_flow));
-        setLeaderSessionId(data.leader_session_id || null); setLeaderSessionFlowId(data.leader_session_id ? msg.flow_id : null);
-        setLeaderAgentSessionId(data.latest_leader_agent_session_id || null);
-        setActiveLeaderAgentSessionId(data.active_leader_agent_session_id || null);
-        setDecisionCards(data.decision_cards || []); setArtifacts(data.artifacts || []); setSpecRevisions(data.spec_revisions || []);
-        setWorkRuns((data.work_runs || []).map(normalizeWorkRun).filter((turn: WorkRunData | null): turn is WorkRunData => turn !== null));
-        setRecentEvents(data.recent_events || []); setExperts(data.agent_sessions || []);
-        setOrchestrationPlans(Array.isArray(data.orchestration_plan_history) ? data.orchestration_plan_history : data.current_orchestration_plan ? [data.current_orchestration_plan] : []);
-        if (data.pending_spec_approval) setSpecCards((current) => ({ ...current, [data.pending_spec_approval.spec_approval_id]: data.pending_spec_approval }));
-      }),
-      wsClient.onEvent("flow:status", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        setFlowStatus(msg.data?.status || "");
-        if ("current_work_run_id" in (msg.data || {})) setActiveWorkRunId(msg.data.current_work_run_id || null);
-        if (msg.data?.leader_session_id) { setLeaderSessionId(msg.data.leader_session_id); setLeaderSessionFlowId(msg.flow_id); }
-        if ("active_leader_agent_session_id" in (msg.data || {})) {
-          setActiveLeaderAgentSessionId(msg.data.active_leader_agent_session_id || null);
-        }
-      }),
-      wsClient.onEvent("task:event", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        const incoming = msg.data?.task || msg.data || {};
-        const taskId = typeof incoming.task_id === "string"
-          ? incoming.task_id
-          : typeof incoming.id === "string"
-            ? incoming.id
-            : "";
-        if (!taskId) return;
-        setTasks((prev) => {
-          const existing = prev.find((task) => task.id === taskId);
-          const task = normalizeTask({ ...existing, ...msg.data, ...incoming });
-          return task ? mergeById(prev, [task]) : prev;
-        });
-        setOrchestrationPlans((current) => current.map((plan) => ({
-          ...plan,
-          nodes: plan.nodes.map((node) => {
-            const linkedTask = node.task;
-            if (!linkedTask || linkedTask.task_id !== taskId) return node;
-            return { ...node, task: { ...linkedTask, status: typeof incoming.status === "string" ? incoming.status : linkedTask.status, agent_session_id: typeof incoming.agent_session_id === "string" ? incoming.agent_session_id : linkedTask.agent_session_id, error_message: typeof incoming.error_message === "string" ? incoming.error_message : linkedTask.error_message } };
-          }),
-        })));
-      }),
-      wsClient.onEvent("work_run:event", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        const turn = normalizeWorkRun(msg.data);
-        if (!turn) return;
-        setWorkRuns((prev) => mergeById(prev, [turn]));
-        if (["completed", "failed", "cancelled"].includes(turn.status)) { setActiveWorkRunId((current) => current === turn.id ? null : current); setFlowStatus("idle"); }
-      }),
-      wsClient.onEvent("session:event", (msg) => {
-        if (msg.flow_id !== flowId || !msg.data?.agent_session_id) return;
-        setExperts((prev) => prev.map((session) => session.id === msg.data.agent_session_id ? { ...session, status: msg.data.status || session.status } : session));
-        if (msg.data.expert_id === "exp-leader") {
-          setLeaderAgentSessionId(msg.data.agent_session_id);
-          setActiveLeaderAgentSessionId(
-            msg.data.status === "queued" || msg.data.status === "streaming"
-              ? msg.data.agent_session_id
-              : null,
-          );
-        }
-      }),
-      wsClient.onEvent("flow:decision_card", (msg) => { if (msg.flow_id === flowId) setDecisionCards((prev) => mergeById(prev.map((card) => ({ ...card, id: card.card_id })), [{ ...msg.data, id: msg.data.card_id }]).map(({ id: _id, ...card }) => card)); }),
-      wsClient.onEvent("flow:decision_card_resolved", (msg) => { if (msg.flow_id === flowId) setDecisionCards((prev) => prev.map((card) => card.card_id === msg.data.card_id ? { ...card, status: msg.data.status, answers: msg.data.answers } : card)); }),
-      wsClient.onEvent("artifact:event", (msg) => { if (msg.flow_id === flowId && msg.data?.id) setArtifacts((prev) => mergeById(prev, [msg.data])); }),
-      wsClient.onEvent("flow:spec_card", (msg) => { if (msg.flow_id === flowId) setSpecCards((current) => ({ ...current, [msg.data.spec_approval_id]: msg.data })); }),
-      wsClient.onEvent("flow:spec_card_resolved", (msg) => { if (msg.flow_id === flowId) setSpecCards((current) => current[msg.data.spec_approval_id] ? { ...current, [msg.data.spec_approval_id]: { ...current[msg.data.spec_approval_id], status: msg.data.status } } : current); }),
-      wsClient.onEvent("plan:event", (msg) => {
-        if (msg.flow_id !== flowId || !msg.data?.revision?.plan_revision_id) return;
-        setOrchestrationPlans((current) => mergeById(current.map((plan) => ({ ...plan, id: plan.revision.plan_revision_id })), [{ ...msg.data, id: msg.data.revision.plan_revision_id }]).map(({ id: _id, ...plan }) => plan as OrchestrationPlanView));
-      }),
-      wsClient.onEvent("plan_approval:event", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        const revisionId = msg.data?.planRevisionId ?? msg.data?.plan_revision_id;
-        setOrchestrationPlans((current) => current.map((plan) => plan.revision.plan_revision_id === revisionId ? { ...plan, approval: plan.approval ? { ...plan.approval, status: msg.data.status } : plan.approval } : plan));
-      }),
-      wsClient.onEvent("plan_run:event", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        setOrchestrationPlans((current) => current.map((plan) => plan.revision.plan_revision_id === msg.data?.plan_revision_id ? { ...plan, run: { plan_run_id: msg.data.plan_run_id, status: msg.data.status } } : plan));
-      }),
-      wsClient.onEvent("session:transcript_snapshot", (msg) => {
-        if (msg.flow_id !== flowId) return;
-        setDecisionCards(msg.decision_cards || msg.pending_cards || []);
-        if (!msg.flow_expert_id) { setLeaderTranscriptReadyFlowId(msg.flow_id); setLeaderTranscriptReadyAgentSessionId(msg.agent_session_id || null); }
+      wsClient.onEvent("flow:state", (message) => { if (message.flow_id === flowId) apply(message.data ?? {}); }),
+      ...[
+        "agent_session:event", "agent_run:event", "tool_call:event", "decision_request:event",
+        "plan:event", "plan_approval:event", "orchestration:event", "orchestration_approval:event",
+        "task:event", "change_set:event", "artifact:event",
+      ].map((event) => wsClient.onEvent(event, reload)),
+      wsClient.onEvent("session:transcript_snapshot", (message) => {
+        if (message.flow_id !== flowId) return;
+        setData((current) => ({
+          ...current,
+          leaderTranscriptReadyFlowId: flowId,
+          leaderTranscriptReadyAgentRunId: message.agent_run_id ?? null,
+        }));
       }),
     ];
     wsClient.sendFlowSubscribe(flowId);
-    return () => { stale = true; unsubs.forEach((unsubscribe) => unsubscribe()); wsClient.sendFlowUnsubscribe(flowId); };
+    void load();
+    return () => {
+      stale = true;
+      unsubs.forEach((unsubscribe) => unsubscribe());
+      wsClient.sendFlowUnsubscribe(flowId);
+    };
   }, [flowId]);
 
-  const isCurrentFlowState = flowStateLoadedFlowId === flowId;
-  return {
-    isFlowStateLoaded,
-    flowStateLoadedFlowId: isCurrentFlowState ? flowStateLoadedFlowId : null,
-    activeWorkRunId,
-    tasks,
-    flowStatus,
-    riskMode: isCurrentFlowState ? riskMode : "auto_edit",
-    planApproval: isCurrentFlowState ? planApproval : "on",
-    legacySpecFlow,
-    leaderSessionId: isCurrentFlowState ? leaderSessionId : null,
-    leaderSessionFlowId: isCurrentFlowState ? leaderSessionFlowId : null,
-    leaderAgentSessionId: isCurrentFlowState ? leaderAgentSessionId : null,
-    activeLeaderAgentSessionId: isCurrentFlowState ? activeLeaderAgentSessionId : null,
-    leaderTranscriptReadyFlowId: isCurrentFlowState ? leaderTranscriptReadyFlowId : null,
-    leaderTranscriptReadyAgentSessionId: isCurrentFlowState ? leaderTranscriptReadyAgentSessionId : null,
-    decisionCards,
-    specCards,
-    artifacts,
-    specRevisions,
-    workRuns,
-    recentEvents,
-    experts,
-    orchestrationPlans,
-  };
+  return data.flowStateLoadedFlowId === flowId ? data : empty;
 }

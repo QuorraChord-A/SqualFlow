@@ -26,6 +26,9 @@ export class MessageQueueCoordinator {
 
     const recovered = this.deps.store.recoverDanglingSubmissions();
     for (const flow of this.deps.store.listFlows()) {
+      for (const trigger of this.deps.store.listLeaderRunTriggers(flow.id).filter((item) => item.status === "dispatching")) {
+        this.deps.store.releaseLeaderRunTrigger(trigger.id, "Recovered after service restart");
+      }
       for (const queued of this.deps.store.listQueuedMessages(flow.id).filter((item) => item.status === "dispatching")) {
         const submission = this.deps.store.getSubmission(flow.id, queued.id);
         if (submission?.receiptState === "materialized") {
@@ -43,7 +46,9 @@ export class MessageQueueCoordinator {
 
   request = (flowId: string) => {
     if (!this.started || this.drains.has(flowId)) return;
-    if (!this.deps.store.listQueuedMessages(flowId).some((item) => item.status === "accepted")) return;
+    const hasQueuedMessage = this.deps.store.listQueuedMessages(flowId).some((item) => item.status === "accepted");
+    const hasLeaderTrigger = this.deps.store.listLeaderRunTriggers(flowId).some((item) => item.status === "pending");
+    if (!hasQueuedMessage && !hasLeaderTrigger) return;
     const drain = Promise.resolve()
       .then(() => (this.deps.drain ?? drainNextQueuedMessage)(flowId, this.deps.connectionForFlow(flowId)))
       .then(() => undefined)
@@ -67,9 +72,9 @@ export class MessageQueueCoordinator {
   }
 
   private readonly onEvent = (message: ServerWsMessage) => {
-    if (message.type !== "work_run:event") return;
+    if (message.type !== "agent_run:event") return;
     const status = (message.data as { status?: unknown } | null)?.status;
-    if (["completed", "failed", "cancelled"].includes(String(status ?? ""))) {
+    if (["completed", "failed", "cancelled", "interrupted"].includes(String(status ?? ""))) {
       this.request(message.flow_id);
     }
   };

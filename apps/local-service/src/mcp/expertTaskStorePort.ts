@@ -31,17 +31,16 @@ function parseJsonValue(value: string | null): unknown | null {
 }
 
 function toExpertTask(store: Store, task: NonNullable<ReturnType<Store["getTask"]>>): ExpertTask {
-  const flowExpert = task.flowExpertId ? store.getFlowExpert(task.flowExpertId) : null;
+  const agentSession = task.agentSessionId ? store.getAgentSession(task.agentSessionId) : null;
   return {
     task_id: task.id,
-    work_run_id: task.workRunId,
     subject: task.title,
     description: task.description,
     active_form: task.activeForm,
     assignment: {
-      expert_id: task.expertId ?? "",
-      flow_expert_id: task.flowExpertId ?? "",
-      ...(flowExpert?.displayName ? { display_name: flowExpert.displayName } : {}),
+      agent_definition_id: agentSession?.agentDefinitionId ?? task.recommendedAgentDefinitionId ?? "",
+      agent_session_id: task.agentSessionId ?? "",
+      ...(agentSession?.displayName ? { display_name: agentSession.displayName } : {}),
     },
     status: ExpertTaskStatus.parse(task.status),
     dependency_task_ids: store.listTaskDependencies(task.id),
@@ -71,18 +70,18 @@ export function createExpertTaskStorePort(
   hooks: ExpertTaskStorePortHooks = {},
 ): ExpertTaskStorePort {
   const actorIsLiveForFlow = (scope: ExpertTaskActorScope) => {
-    const session = store.getAgentSession(scope.agentSessionId);
+    const session = store.getAgentRun(scope.agentRunId);
     return Boolean(
       session
       && session.flowId === scope.flowId
-      && session.flowExpertId === scope.flowExpertId,
+      && session.agentSessionId === scope.agentSessionId,
     );
   };
 
   const scopedTask = (scope: ExpertTaskActorScope, taskId: string) => {
     const task = store.getTask(taskId);
     if (!task || task.flowId !== scope.flowId) return { task: null, failure: "not_found" as const };
-    if (task.flowExpertId !== scope.flowExpertId) return { task: null, failure: "not_assigned" as const };
+    if (task.agentSessionId !== scope.agentSessionId) return { task: null, failure: "not_assigned" as const };
     return { task, failure: null };
   };
 
@@ -90,7 +89,7 @@ export function createExpertTaskStorePort(
     listMyTasks(scope) {
       if (!actorIsLiveForFlow(scope)) return [];
       return store.listTasks(scope.flowId)
-        .filter((task) => task.flowExpertId === scope.flowExpertId)
+        .filter((task) => task.agentSessionId === scope.agentSessionId)
         .map((task) => toExpertTask(store, task));
     },
 
@@ -137,13 +136,12 @@ export function createExpertTaskStorePort(
       const task = toExpertTask(store, updated);
       store.appendEventLog({
         flowId: input.flowId,
-        workRunId: updated.workRunId,
         taskId: updated.id,
-        agentSessionId: input.agentSessionId,
+        agentRunId: input.agentRunId,
         eventType: "expert_task.updated",
         payload: {
-          flow_expert_id: input.flowExpertId,
           agent_session_id: input.agentSessionId,
+          agent_run_id: input.agentRunId,
           task_id: updated.id,
           status: updated.status,
           revision: updated.revision,

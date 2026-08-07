@@ -1,9 +1,0 @@
-{
-  "id": "wait-for-events",
-  "description": "等待指定的秒数，让事件处理完成",
-  "params": ["seconds"],
-  "steps": [
-    "等待 {seconds} 秒，观察聊天区和右侧数据面板的变化"
-  ],
-  "verify": null
-}

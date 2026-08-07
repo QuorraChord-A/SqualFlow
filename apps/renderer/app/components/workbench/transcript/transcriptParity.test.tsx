@@ -5,11 +5,11 @@ import type { TranscriptTimelineItem } from "../../../lib/ws";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import SessionTranscriptPanel from "../SessionTranscriptPanel";
 import {
-  parityAgentSessionId,
-  parityDecisionCards,
+  parityAgentRunId,
+  parityDecisionRequests,
   parityFlowId,
   parityHistoryMessages,
-  paritySpecCards,
+  parityPlanCards,
   parityUserMessage,
 } from "./transcriptParity.fixture";
 import { resetCollapseStoreForTests } from "./useCollapse";
@@ -41,7 +41,7 @@ vi.mock("use-stick-to-bottom", () => ({
 vi.mock("../../../lib/ws", () => ({
   wsClient: {
     sendSessionGet: vi.fn(),
-    sendRunSpec: vi.fn(),
+    sendRunPlan: vi.fn(),
     onMessage: vi.fn((handler: (message: any) => void) => {
       wsHandlers.add(handler);
       return () => wsHandlers.delete(handler);
@@ -77,8 +77,8 @@ function fixtureTimelineItems(messages: UIMessage[]): TranscriptTimelineItem[] {
       type: "message",
       lifecycle: "complete",
       message_id: source.id,
-      session_id: parityAgentSessionId,
-      agent_session_id: parityAgentSessionId,
+      session_id: parityAgentRunId,
+      agent_run_id: parityAgentRunId,
       work_run_id: null,
       presentation_turn_id: presentationTurnId,
       message_kind: messageKind,
@@ -166,7 +166,7 @@ async function assertParityRenders() {
 
   const body = document.body.textContent ?? "";
   expect(body).toContain("已询问");
-  expect(body).toContain("Spec");
+  expect(body).toContain("Plan");
   expect(body).toContain("Task");
   expect(body).toContain("Agent");
   expect(body).toContain("Message");
@@ -182,43 +182,43 @@ function replayRealtimeChunks() {
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "start", messageId: assistantMessageId } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "reasoning-start" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "reasoning-delta", delta: "I need to demonstrate the split between tool_call and tool_result." } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "reasoning-end" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-start", id: "text-parity-1" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-delta", delta: "好的，我来演示一组聊天内工具轨迹。" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-end" } },
   });
 
@@ -231,13 +231,13 @@ function replayRealtimeChunks() {
     { toolCallId: "tc-bash-1", toolName: "Bash", input: { command: "python3 /workspace/ZCodeProject/greet.py" }, output: { stdout: "Hello, ZCode!", stderr: "", exit_code: 0 } },
     { toolCallId: "tc-websearch-1", toolName: "WebSearch", input: { query: "AI technology trends 2026" }, output: { results: [{ title: "Trend 1" }] } },
     { toolCallId: "tc-getcontext-1", toolName: "mcp__squadflow-leader__get_context", input: {}, output: { active_work_run_id: null, pending_action: null } },
-    { toolCallId: "tc-askuser-1", toolName: "mcp__squadflow-leader__ask_user", input: { questions: [{ question: "你更喜欢哪种界面主题？" }] }, output: { decision_card_id: "card-theme", answer: "浅色模式" } },
-    { toolCallId: "tc-createplan-1", toolName: "mcp__squadflow-leader__create_plan", input: { name: "Web_Calculator.md", overview: "开发一个支持加减乘除四则运算的 Web 界面计算器" }, output: { spec_approval_id: "spec-calc", spec_revision: { file_name: "Web_Calculator.md" } } },
+    { toolCallId: "tc-askuser-1", toolName: "mcp__squadflow-leader__ask_user", input: { questions: [{ question: "你更喜欢哪种界面主题？" }] }, output: { decision_request_id: "decision-theme", answer: "浅色模式" } },
+    { toolCallId: "tc-createplan-1", toolName: "mcp__squadflow-leader__create_plan", input: { name: "Web_Calculator.md", overview: "开发一个支持加减乘除四则运算的 Web 界面计算器" }, output: { plan_approval_id: "plan-calc", plan_revision: { file_name: "Web_Calculator.md" } } },
     { toolCallId: "tc-createtask-1", toolName: "mcp__squadflow-leader__create_task", input: { subject: "实现 Web 计算器" }, output: { task: { task_id: "task-101", subject: "实现 Web 计算器", status: "pending" } } },
     { toolCallId: "tc-updatetask-1", toolName: "mcp__squadflow-leader__update_task", input: { task_id: "task-101", status: "in_progress" }, output: { task: { task_id: "task-101", subject: "实现 Web 计算器", status: "in_progress" } } },
     { toolCallId: "tc-listtasks-1", toolName: "mcp__squadflow-leader__list_tasks", input: {}, output: { tasks: [{ task_id: "task-101", subject: "实现 Web 计算器", status: "in_progress" }, { task_id: "task-102", subject: "浏览器验证", status: "blocked" }, { task_id: "task-103", subject: "代码审查", status: "pending" }] } },
     { toolCallId: "tc-gettask-1", toolName: "mcp__squadflow-leader__get_task", input: { task_id: "task-101" }, output: { task: { task_id: "task-101", subject: "实现 Web 计算器", status: "in_progress" } } },
-    { toolCallId: "tc-dispatchagent-1", toolName: "mcp__squadflow-leader__dispatch_agent", input: { expert_id: "Frontend Expert", task_id: "task-101" }, output: { agent_session: { agent_session_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" } } },
+    { toolCallId: "tc-dispatchagent-1", toolName: "mcp__squadflow-leader__dispatch_agent", input: { expert_id: "Frontend Expert", task_id: "task-101" }, output: { agent_run: { agent_run_id: "ags-frontend-7a2f", expert_id: "Frontend Expert", task_id: "task-101" } } },
     { toolCallId: "tc-sendmessage-1", toolName: "mcp__squadflow-leader__send_message", input: { expert_id: "Frontend Expert", summary: "补充指令", content: "请保留键盘输入支持，并补充除零提示" }, output: { accepted: true } },
   ];
 
@@ -245,7 +245,7 @@ function replayRealtimeChunks() {
     emit({
       type: "session:chat_event",
       flow_id: parityFlowId,
-      agent_session_id: parityAgentSessionId,
+      agent_run_id: parityAgentRunId,
       data: {
         event: {
           type: "tool-input-start",
@@ -257,7 +257,7 @@ function replayRealtimeChunks() {
     emit({
       type: "session:chat_event",
       flow_id: parityFlowId,
-      agent_session_id: parityAgentSessionId,
+      agent_run_id: parityAgentRunId,
       data: {
         event: {
           type: "tool-input-available",
@@ -269,7 +269,7 @@ function replayRealtimeChunks() {
     emit({
       type: "session:chat_event",
       flow_id: parityFlowId,
-      agent_session_id: parityAgentSessionId,
+      agent_run_id: parityAgentRunId,
       data: {
         event: {
           type: "tool-output-available",
@@ -283,25 +283,25 @@ function replayRealtimeChunks() {
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-start", id: "text-parity-2" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-delta", delta: "完成演示。" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "text-end" } },
   });
   emit({
     type: "session:chat_event",
     flow_id: parityFlowId,
-    agent_session_id: parityAgentSessionId,
+    agent_run_id: parityAgentRunId,
     data: { event: { type: "finish", durationMs: 18800, finishedAt: "2026-06-19T10:00:18.800Z" } },
   });
 }
@@ -324,17 +324,17 @@ describe("transcript parity", () => {
     render(
       <SessionTranscriptPanel
         flowId={parityFlowId}
-        agentSessionId={parityAgentSessionId}
+        agentRunId={parityAgentRunId}
         readonly
-        decisionCards={parityDecisionCards}
-        specCards={paritySpecCards}
+        decisionRequests={parityDecisionRequests}
+        planCards={parityPlanCards}
       />,
     );
 
     emit({
       type: "session:history",
       flow_id: parityFlowId,
-      agent_session_id: parityAgentSessionId,
+      agent_run_id: parityAgentRunId,
       data: parityHistoryMessages as UIMessage[],
     });
 
@@ -345,17 +345,17 @@ describe("transcript parity", () => {
     render(
       <SessionTranscriptPanel
         flowId={parityFlowId}
-        agentSessionId={parityAgentSessionId}
+        agentRunId={parityAgentRunId}
         readonly
-        decisionCards={parityDecisionCards}
-        specCards={paritySpecCards}
+        decisionRequests={parityDecisionRequests}
+        planCards={parityPlanCards}
       />,
     );
 
     emit({
       type: "session:history",
       flow_id: parityFlowId,
-      agent_session_id: parityAgentSessionId,
+      agent_run_id: parityAgentRunId,
       data: [parityUserMessage],
     });
 

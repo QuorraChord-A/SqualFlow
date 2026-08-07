@@ -149,7 +149,7 @@ describe("DesktopBridge", () => {
     }));
   });
 
-  it("enforces a single-holder lease bound to agentSessionId", () => {
+  it("enforces a single-holder lease bound to agentRunId", () => {
     const bridge = new DesktopBridge();
     expect(bridge.acquireLease("session-a", "Verify", "flow-a")).toEqual({ ok: true });
     expect(bridge.getLease()).toEqual(expect.objectContaining({ flowId: "flow-a" }));

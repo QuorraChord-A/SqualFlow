@@ -8,50 +8,40 @@ import {
 } from "../config/agentRuntimeConfig.js";
 import type { Store } from "../db/store.js";
 
-type RuntimeAgentSession = NonNullable<ReturnType<Store["getAgentSession"]>>;
+type RuntimeAgentRun = NonNullable<ReturnType<Store["getAgentRun"]>>;
 
-export async function runtimeSdkForPersistedAgentSession(input: {
+export async function runtimeSdkForPersistedAgentRun(input: {
   store: Store;
   flowId: string;
-  agentSession?: RuntimeAgentSession | null;
-  expertId?: string | null;
-  sdkSessionId?: string | null;
+  agentRun?: RuntimeAgentRun | null;
+  agentDefinitionId?: string | null;
+  providerSessionId?: string | null;
 }): Promise<RuntimeSdk> {
-  const agentSession = input.agentSession ?? null;
-  const persistedSdkSessionId = input.sdkSessionId ?? agentSession?.sessionId ?? null;
-  const sessionRuntimeSdk = agentSession ? runtimeSdkFromValue(agentSession.runtimeSdk) : null;
-  if (sessionRuntimeSdk) return sessionRuntimeSdk;
+  const run = input.agentRun ?? null;
+  const session = run ? input.store.getAgentSession(run.agentSessionId) : null;
+  const definitionId = input.agentDefinitionId ?? session?.agentDefinitionId ?? null;
+  const persistedProviderSessionId = input.providerSessionId ?? session?.providerSessionId ?? null;
+  const lockedSdk = runtimeSdkFromValue(session?.runtimeSdk);
+  if (lockedSdk) return lockedSdk;
 
-  const resolvedExpertId = input.expertId ?? agentSession?.expertId ?? null;
   try {
-    if (resolvedExpertId === "exp-leader") {
-      const flow = input.store.getFlow(input.flowId);
-      const lockedSdk = runtimeSdkFromValue(flow?.leaderRuntimeSdk);
-      if (lockedSdk) return lockedSdk;
-      const leaderConfig = await readFlowLeaderRuntimeConfig({
-        configId: flow?.leaderRuntimeConfigId,
-        modelId: flow?.leaderRuntimeModelId,
-        sdk: flow?.leaderRuntimeSdk,
+    if (session?.role === "leader" || definitionId === "exp-leader") {
+      const config = await readFlowLeaderRuntimeConfig({
+        configId: session?.runtimeConfigId,
+        modelId: session?.runtimeModelId,
+        sdk: session?.runtimeSdk,
       });
-      if (leaderConfig) return leaderConfig.config.sdk;
-      if (persistedSdkSessionId) return legacySessionRuntimeSdk;
+      if (config) return config.config.sdk;
+      if (persistedProviderSessionId) return legacySessionRuntimeSdk;
       return (await readRoleRuntimeConfig("leader")).config.sdk;
     }
-
-    const expert = resolvedExpertId ? input.store.getExpert(resolvedExpertId) : null;
-    const flowExpert = agentSession?.flowExpertId
-      ? input.store.getFlowExpert(agentSession.flowExpertId)
-      : resolvedExpertId
-        ? input.store.listFlowExperts(input.flowId).find((item) => item.expertId === resolvedExpertId) ?? null
-        : null;
-    const flowExpertRuntimeSdk = runtimeSdkFromValue(flowExpert?.runtimeSdk);
-    if (flowExpertRuntimeSdk) return flowExpertRuntimeSdk;
-    if (flowExpert?.sdkSessionId || persistedSdkSessionId) return legacySessionRuntimeSdk;
-    if (expert) {
-      return (await readRoleRuntimeConfig(runtimeRoleForExpertRole(expert.role), { requireEnabled: false })).config.sdk;
+    const definition = definitionId ? input.store.getAgentDefinition(definitionId) : null;
+    if (persistedProviderSessionId) return legacySessionRuntimeSdk;
+    if (definition) {
+      return (await readRoleRuntimeConfig(runtimeRoleForExpertRole(definition.role), { requireEnabled: false })).config.sdk;
     }
   } catch {
-    // Sessions without runtime metadata were created before multi-SDK support.
+    // A missing runtime lock falls back to the legacy SDK for persisted provider sessions.
   }
   return legacySessionRuntimeSdk;
 }

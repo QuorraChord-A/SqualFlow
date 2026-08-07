@@ -40,9 +40,9 @@ export type AssistantUIMessage = {
   createdAt?: string;
   metadata?: {
     turnTiming?: TurnTiming;
-    messageKind?: "assistant" | "assistant-continuation" | "work-run-terminal";
+    messageKind?: "assistant" | "assistant-continuation" | "agent-run-terminal";
     presentationTurnId?: string;
-    agentSessionId?: string;
+    agentRunId?: string;
   };
 };
 
@@ -102,7 +102,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function canonicalMessageKind(value: unknown, role: ChatUIMessage["role"]): CanonicalMessageKind {
   return value === "assistant-continuation"
     || value === "running-guide"
-    || value === "work-run-terminal"
+    || value === "agent-run-terminal"
     || value === "assistant"
     || value === "user"
     ? value
@@ -141,7 +141,7 @@ export class ChatJournal {
   private readonly dirtyMessageIds = new Map<string, Set<string>>();
   private readonly removedMessageIds = new Map<string, Set<string>>();
   private readonly transcriptSessions = new Map<string, Set<string>>();
-  private readonly agentSessionIds = new Map<string, string>();
+  private readonly agentRunIds = new Map<string, string>();
 
   constructor(
     private readonly persistence?: TranscriptPersistence,
@@ -160,10 +160,10 @@ export class ChatJournal {
     createdAt?: string,
     transcriptId = sessionId,
     metadata?: Record<string, unknown>,
-    agentSessionId = transcriptId,
+    agentRunId = transcriptId,
   ): { cursor: number; timelineItems: CanonicalTimelineItem[]; message: ChatUIMessage } & Pick<JournalRecordResult, "removedMessageIds" | "activeTurn"> {
     const key = keyFor(flowId, sessionId);
-    this.registerSession(flowId, sessionId, transcriptId, agentSessionId);
+    this.registerSession(flowId, sessionId, transcriptId, agentRunId);
     const runningGuide = metadata?.messageKind === "running-guide";
     const presentationTurnId = runningGuide
       ? this.rootMessageIds.get(key) ?? this.current.get(key)?.id
@@ -178,13 +178,13 @@ export class ChatJournal {
         ...(metadata ?? {}),
         messageKind: runningGuide ? "running-guide" : "user",
         ...(presentationTurnId ? { presentationTurnId } : {}),
-        agentSessionId,
+        agentRunId,
       },
     };
     if (runningGuide) {
       const activeMessageIdBefore = this.current.get(key)?.id;
       const removedMessageIds = this.recordPendingGuideBoundary(flowId, sessionId, message);
-      const commit = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+      const commit = this.commitMutation(flowId, sessionId, transcriptId, agentRunId);
       const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
       return {
         ...commit,
@@ -194,7 +194,7 @@ export class ChatJournal {
       };
     }
     this.appendHistory(flowId, sessionId, message);
-    return { ...this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), message };
+    return { ...this.commitMutation(flowId, sessionId, transcriptId, agentRunId), message };
   }
 
   record(
@@ -202,12 +202,12 @@ export class ChatJournal {
     sessionId: string,
     event: JournalEvent,
     transcriptId = sessionId,
-    agentSessionId = transcriptId,
+    agentRunId = transcriptId,
   ): JournalRecordResult {
     const eventRecord = event as Record<string, unknown>;
     const eventType = typeof eventRecord.type === "string" ? eventRecord.type : "";
     const key = keyFor(flowId, sessionId);
-    this.registerSession(flowId, sessionId, transcriptId, agentSessionId);
+    this.registerSession(flowId, sessionId, transcriptId, agentRunId);
 
     if (eventType === "start") {
       const startedAt = stringValue(eventRecord, "startedAt") || new Date().toISOString();
@@ -221,7 +221,7 @@ export class ChatJournal {
         metadata: {
           messageKind: "assistant",
           presentationTurnId: messageId,
-          agentSessionId,
+          agentRunId,
           turnTiming: { startedAt, finishedAt: null, durationMs: null },
         },
       });
@@ -230,7 +230,7 @@ export class ChatJournal {
       this.textIndex.set(key, -1);
       this.reasoningIndex.set(key, -1);
       this.markMessageDirty(flowId, sessionId, messageId);
-      return { ...this.commitMutation(flowId, sessionId, transcriptId, agentSessionId), messageId };
+      return { ...this.commitMutation(flowId, sessionId, transcriptId, agentRunId), messageId };
     }
 
     const message = this.current.get(key);
@@ -331,7 +331,7 @@ export class ChatJournal {
     const currentAfterEvent = this.current.get(key);
     if (currentAfterEvent) this.updateMessageContent(currentAfterEvent);
     this.markMessageDirty(flowId, sessionId, canonicalMessageId);
-    const commit = this.commitMutation(flowId, sessionId, transcriptId, agentSessionId);
+    const commit = this.commitMutation(flowId, sessionId, transcriptId, agentRunId);
     const activeTurn = this.activeTurnAfterTransition(flowId, sessionId, activeMessageIdBefore);
     return {
       ...commit,
@@ -367,8 +367,7 @@ export class ChatJournal {
           messageId: item.message.id,
           position: ++position,
           sessionId,
-          agentSessionId: this.agentSessionIds.get(sessionKey) ?? transcriptId,
-          workRunId: null,
+          agentRunId: this.agentRunIds.get(sessionKey) ?? transcriptId,
           presentationTurnId: typeof item.message.metadata?.presentationTurnId === "string"
             ? item.message.metadata.presentationTurnId
             : null,
@@ -475,9 +474,9 @@ export class ChatJournal {
       ]));
       this.removedMessageIds.delete(fromKey);
     }
-    if (this.agentSessionIds.has(fromKey)) {
-      this.agentSessionIds.set(toKey, this.agentSessionIds.get(fromKey) ?? "");
-      this.agentSessionIds.delete(fromKey);
+    if (this.agentRunIds.has(fromKey)) {
+      this.agentRunIds.set(toKey, this.agentRunIds.get(fromKey) ?? "");
+      this.agentRunIds.delete(fromKey);
     }
     for (const sessions of this.transcriptSessions.values()) {
       if (!sessions.delete(fromSessionId)) continue;
@@ -496,13 +495,13 @@ export class ChatJournal {
     flowId: string,
     sessionId: string,
     transcriptId: string,
-    agentSessionId: string,
+    agentRunId: string,
   ): void {
     const transcriptKey = keyFor(flowId, transcriptId);
     const sessions = this.transcriptSessions.get(transcriptKey) ?? new Set<string>();
     sessions.add(sessionId);
     this.transcriptSessions.set(transcriptKey, sessions);
-    this.agentSessionIds.set(keyFor(flowId, sessionId), agentSessionId);
+    this.agentRunIds.set(keyFor(flowId, sessionId), agentRunId);
   }
 
   private messagesForPersistence(
@@ -528,7 +527,7 @@ export class ChatJournal {
     flowId: string,
     sessionId: string,
     transcriptId: string,
-    agentSessionId: string,
+    agentRunId: string,
   ): { cursor: number; timelineItems: CanonicalTimelineItem[] } {
     const sessionKey = keyFor(flowId, sessionId);
     const dirtyMessageIds = this.dirtyMessageIds.get(sessionKey) ?? new Set<string>();
@@ -545,7 +544,7 @@ export class ChatJournal {
         flowId,
         channelId: transcriptId,
         sessionId,
-        agentSessionId,
+        agentRunId,
         messages: this.messagesForPersistence(flowId, sessionId, dirtyMessageIds).map((item) => ({
           // MCP server icons are runtime metadata. Keep them on the live
           // message for the current Flow, but never persist them because the
@@ -575,7 +574,7 @@ export class ChatJournal {
     this.pendingGuideMessages.delete(key);
     this.dirtyMessageIds.delete(key);
     this.removedMessageIds.delete(key);
-    this.agentSessionIds.delete(key);
+    this.agentRunIds.delete(key);
   }
 
   private markMessageRemoved(flowId: string, sessionId: string, messageId: string): void {
@@ -729,7 +728,7 @@ export class ChatJournal {
       metadata: {
         messageKind: "assistant-continuation",
         presentationTurnId: rootMessageId,
-        agentSessionId: previous.metadata?.agentSessionId,
+        agentRunId: previous.metadata?.agentRunId,
         turnTiming: { startedAt, finishedAt: null, durationMs: null },
       },
     };

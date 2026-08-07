@@ -1,0 +1,1 @@
+{"id":"send-chat-message","description":"向当前 Flow 发送普通消息","params":["message"],"steps":["确认当前 Flow 名称正确","在输入框原样填写：{message}","点击发送并重新读取无障碍树"],"verify":["聊天时间线或持久队列中出现该消息","消息没有附带或显示模式快照"]}

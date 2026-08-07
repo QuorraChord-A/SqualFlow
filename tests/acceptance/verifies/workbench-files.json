@@ -1,0 +1,1 @@
+{"id":"workbench-files","description":"工作台和文件","assertions":["团队按 Session/Run 展示，Task、Artifact 和 ChangeSet 投影可理解","文件树搜索、刷新、文本预览和路径展示正常","二进制、超限和越界文件给出安全且清楚的反馈"]}

@@ -341,8 +341,8 @@ describe("leader harness options", () => {
       getContext: () => ({ flow_id: "flow-1", status: "ready" }),
       listPendingUserActions: () => [],
       createPlan: () => ({
-        spec_revision: { spec_revision_id: "spec-1", status: "draft", revision_number: 1 },
-        spec_approval: { spec_approval_id: "sca-1", status: "pending", actions: ["run"] },
+        plan_revision: { plan_revision_id: "plan-1", status: "draft", revision_number: 1 },
+        plan_approval: { plan_approval_id: "sca-1", status: "pending", actions: ["run"] },
       }),
       askUser: (input) => ({ id: input.cardId, status: "pending", workRunId: "utn-1" }),
       createTask: () => ({
@@ -355,7 +355,7 @@ describe("leader harness options", () => {
       getTask: (input) => ({ task_id: input.taskId, status: "pending" }),
       dispatchAgent: async (input) => ({
         ok: true,
-        agent_session: { agent_session_id: "ags-1", expert_id: input.expertId, task_id: input.taskId },
+        agent_run: { agent_run_id: "ags-1", expert_id: input.expertId, task_id: input.taskId },
         task: { task_id: input.taskId, status: "in_progress" },
       }),
       sendMessage: () => ({ ok: true, accepted: true }),

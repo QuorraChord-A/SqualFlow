@@ -1,0 +1,1 @@
+{"id":"stop-leader-run","description":"使用输入框圆形按钮停止当前 Leader Run","params":[],"steps":["等待 Leader 正在运行且至少一个 Expert 仍可观察","点击输入框右下角圆形停止按钮","等待状态更新并重新读取无障碍树"],"verify":["当前 Leader Run 停止","Leader Session 仍存在","Expert Run 没有被该按钮停止"]}

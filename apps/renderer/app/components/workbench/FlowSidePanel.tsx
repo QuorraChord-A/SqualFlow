@@ -15,13 +15,13 @@ import { DEFAULT_RIGHT_PANEL_WIDTH } from "../panelSizing";
 import SessionDetailPanel from "./SessionDetailPanel";
 import WorkspaceFilesPanel from "./WorkspaceFilesPanel";
 import DesktopBrowserPanel from "./DesktopBrowserPanel";
-import ReviewDiffPanel from "./ReviewDiffPanel";
+import ChangeSetDiffPanel from "./ChangeSetDiffPanel";
 import {
   closeDynamicWorkbenchTab,
   dynamicWorkbenchTabId,
   openBrowserWorkbenchTab,
   openDynamicWorkbenchTab,
-  openReviewWorkbenchTab,
+  openChangeSetWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   type DynamicWorkbenchTab,
   type RightPanelCollapsedSections,
@@ -58,7 +58,7 @@ function workspaceFileTitle(path: string | null) {
 }
 
 type WorkbenchAddAction = {
-  id: "browser" | "review";
+  id: "browser" | "change_set";
   label: string;
   icon: ReactNode;
   onSelect?: () => void;
@@ -71,7 +71,7 @@ type FlowSidePanelHeaderProps = {
   isMaximized?: boolean;
   onToggleMaximize?: () => void;
   onOpenBrowser?: () => void;
-  onOpenReview?: () => void;
+  onOpenChangeSet?: () => void;
 };
 
 export function FlowSidePanelHeader({
@@ -80,7 +80,7 @@ export function FlowSidePanelHeader({
   isMaximized = false,
   onToggleMaximize = () => {},
   onOpenBrowser = () => {},
-  onOpenReview = () => {},
+  onOpenChangeSet = () => {},
 }: FlowSidePanelHeaderProps) {
   const setTab = (tab: "overview" | "files") => {
     onStateChange({
@@ -90,7 +90,7 @@ export function FlowSidePanelHeader({
     });
   };
   const hasBrowserTab = state.dynamicTabs.some((tab) => tab.type === "browser");
-  const hasReviewTab = state.dynamicTabs.some((tab) => tab.type === "review");
+  const hasChangeSetTab = state.dynamicTabs.some((tab) => tab.type === "change_set");
   const fixedTabs: { id: "overview" | "files"; label: string; icon?: ReactNode }[] = [
     { id: "overview", label: "概要" },
     { id: "files", label: workspaceFileTitle(state.activeWorkspaceFilePath) },
@@ -104,12 +104,12 @@ export function FlowSidePanelHeader({
           onSelect: onOpenBrowser,
         }]
       : []),
-    ...(!hasReviewTab
+    ...(!hasChangeSetTab
       ? [{
-          id: "review" as const,
-          label: "审核",
+          id: "change_set" as const,
+          label: "变更",
           icon: <FileDiff className="size-4" />,
-          onSelect: onOpenReview,
+          onSelect: onOpenChangeSet,
         }]
       : []),
   ];
@@ -336,7 +336,7 @@ function TeamSection({ team, onOpenExpert }: {
         <button
           key={member.id}
           type="button"
-          disabled={member.is_leader || !member.flow_expert_id}
+          disabled={member.is_leader || !member.agent_session_id}
           onClick={() => onOpenExpert(member)}
           data-testid="team-member-row"
           className="flex w-full items-center justify-between rounded-md border border-border/60 bg-background/70 px-3 py-2 text-left disabled:cursor-default"
@@ -361,33 +361,33 @@ function TeamSection({ team, onOpenExpert }: {
 
 function ArtifactSection({
   artifacts,
-  onOpenSpec,
+  onOpenPlan,
   onOpenArtifact,
   onOpenWorkspaceFile,
 }: {
   artifacts: FlowWorkbench["artifacts"];
-  onOpenSpec: (spec: FlowWorkbench["artifacts"]["specs"][number]) => void;
+  onOpenPlan: (plan: FlowWorkbench["artifacts"]["plans"][number]) => void;
   onOpenArtifact: (report: FlowWorkbench["artifacts"]["reports"][number]) => void;
   onOpenWorkspaceFile: (path: string) => void;
 }) {
-  if (artifacts.specs.length === 0 && artifacts.files.length === 0 && artifacts.reports.length === 0) {
+  if (artifacts.plans.length === 0 && artifacts.files.length === 0 && artifacts.reports.length === 0) {
     return <div className="text-sm text-muted-foreground">暂无产物</div>;
   }
 
   return (
     <div className="space-y-4">
-      {artifacts.specs.length > 0 ? (
+      {artifacts.plans.length > 0 ? (
         <div>
-          <div className="mb-2 text-xs text-muted-foreground">Spec {artifacts.specs.length}</div>
+          <div className="mb-2 text-xs text-muted-foreground">计划 {artifacts.plans.length}</div>
           <div className="space-y-2">
-            {artifacts.specs.map((spec) => (
+            {artifacts.plans.map((plan) => (
               <button
-                key={spec.id}
+                key={plan.plan_revision_id}
                 type="button"
-                onClick={() => onOpenSpec(spec)}
+                onClick={() => onOpenPlan(plan)}
                 className="w-full rounded-md bg-background/70 px-3 py-2 text-left text-sm text-foreground"
               >
-                {spec.title}
+                {plan.title}
               </button>
             ))}
           </div>
@@ -400,7 +400,7 @@ function ArtifactSection({
           <div className="space-y-2">
             {artifacts.files.map((file) => (
               <button
-                key={`${file.source_artifact_id ?? "file"}:${file.path}`}
+                key={`${file.change_set_id}:${file.path}`}
                 type="button"
                 onClick={() => onOpenWorkspaceFile(file.path)}
                 className="flex w-full items-center justify-between rounded-md bg-background/70 px-3 py-2 text-sm"
@@ -419,7 +419,7 @@ function ArtifactSection({
           <div className="space-y-2">
             {artifacts.reports.map((report) => (
               <button
-                key={report.id}
+                key={report.artifact_id}
                 type="button"
                 onClick={() => onOpenArtifact(report)}
                 className="w-full rounded-md bg-background/70 px-3 py-2 text-left text-sm text-foreground"
@@ -463,7 +463,7 @@ function OverviewTab({
   workbench,
   onToggleSection,
   onOpenExpert,
-  onOpenSpec,
+  onOpenPlan,
   onOpenArtifact,
   onOpenWorkspaceFile,
 }: {
@@ -471,7 +471,7 @@ function OverviewTab({
   workbench: FlowWorkbench;
   onToggleSection: (id: keyof RightPanelCollapsedSections) => void;
   onOpenExpert: (member: WorkbenchTeamMember) => void;
-  onOpenSpec: (spec: FlowWorkbench["artifacts"]["specs"][number]) => void;
+  onOpenPlan: (plan: FlowWorkbench["artifacts"]["plans"][number]) => void;
   onOpenArtifact: (report: FlowWorkbench["artifacts"]["reports"][number]) => void;
   onOpenWorkspaceFile: (path: string) => void;
 }) {
@@ -491,7 +491,7 @@ function OverviewTab({
           ) : section.id === "artifacts" ? (
             <ArtifactSection
               artifacts={workbench.artifacts}
-              onOpenSpec={onOpenSpec}
+              onOpenPlan={onOpenPlan}
               onOpenArtifact={onOpenArtifact}
               onOpenWorkspaceFile={onOpenWorkspaceFile}
             />
@@ -524,25 +524,25 @@ function DynamicTabContent({
     return (
       <SessionDetailPanel
         flowId={flowId}
-        flowExpertId={tab.flow_expert_id}
+        agentSessionId={tab.agent_session_id}
         workspaceRootPath={workspaceRootPath ?? workbench.files.root_path}
         onOpenWorkspaceFile={onOpenWorkspaceFile}
       />
     );
   }
-  if (tab.type === "spec_preview") {
-    const spec = workbench.artifacts.specs.find((item) =>
-      item.spec_revision_id === tab.spec_revision_id || item.id === tab.spec_revision_id
+  if (tab.type === "plan_preview") {
+    const plan = workbench.artifacts.plans.find((item) =>
+      item.plan_revision_id === tab.plan_revision_id
     );
     return (
       <div className="min-w-0 p-4">
-        <div className="mb-4 truncate text-sm text-muted-foreground">{spec?.file_name ?? tab.title}</div>
-        <MessageResponse>{spec?.content ?? ""}</MessageResponse>
+        <div className="mb-4 truncate text-sm text-muted-foreground">{plan?.title ?? tab.title}</div>
+        <MessageResponse>{plan?.content ?? ""}</MessageResponse>
       </div>
     );
   }
   if (tab.type === "artifact_preview") {
-    const artifact = workbench.artifacts.reports.find((item) => item.id === tab.artifact_id);
+    const artifact = workbench.artifacts.reports.find((item) => item.artifact_id === tab.artifact_id);
     return (
       <div className="min-w-0 p-4">
         <div className="mb-4 truncate text-sm text-muted-foreground">{artifact?.title ?? tab.title}</div>
@@ -552,24 +552,24 @@ function DynamicTabContent({
   }
   if (tab.type === "orchestration_plan") {
     const currentPlan = workbench.orchestration_plan;
-    const tabPlanId = tab.plan_id ?? tab.plan?.plan_id;
-    const plan = currentPlan && currentPlan.plan_id === tabPlanId
+    const tabPlanId = tab.orchestration_plan_id;
+    const plan = currentPlan && currentPlan.orchestration_plan_id === tabPlanId
       ? currentPlan
       : tab.plan ?? currentPlan;
     if (!plan) return null;
     return <OrchestrationPlanPanel flowId={flowId ?? plan.flow_id} initialPlan={plan} onApprove={(target) => {
       if (!target.approval) return;
-      wsClient.send({ type: "flow:plan_approve", flow_id: target.flow_id, plan_approval_id: target.approval.plan_approval_id, client_action_id: `plan-approve-${Date.now()}` });
+      wsClient.send({ type: "orchestration:resolve", flow_id: target.flow_id, orchestration_approval_id: target.approval.orchestration_approval_id, resolution: "approved", client_action_id: `orchestration-approve-${Date.now()}` });
     }} />;
   }
   if (tab.type === "browser") {
     return <DesktopBrowserPanel flowId={flowId} visible={browserVisible} />;
   }
-  if (tab.type === "review") {
-    const review = tab.work_run_id
-      ? workbench.reviews.find((item) => item.work_run_id === tab.work_run_id) ?? null
-      : workbench.reviews.at(-1) ?? null;
-    return <ReviewDiffPanel review={review} />;
+  if (tab.type === "change_set") {
+    const changeSet = tab.change_set_id
+      ? workbench.artifacts.change_sets.find((item) => item.change_set_id === tab.change_set_id) ?? null
+      : workbench.artifacts.change_sets.at(-1) ?? null;
+    return <ChangeSetDiffPanel changeSet={changeSet} />;
   }
   return null;
 }
@@ -612,27 +612,27 @@ export default function FlowSidePanel({
   };
 
   const openExpert = (member: WorkbenchTeamMember) => {
-    if (member.is_leader || !member.flow_expert_id) return;
+    if (member.is_leader || !member.agent_session_id) return;
     onStateChange(openDynamicWorkbenchTab(state, {
       type: "expert_chat",
-      flow_expert_id: member.flow_expert_id,
       agent_session_id: member.agent_session_id,
+      agent_run_id: member.agent_run_id,
       title: member.display_name,
     }));
   };
 
-  const openSpec = (spec: FlowWorkbench["artifacts"]["specs"][number]) => {
+  const openPlan = (plan: FlowWorkbench["artifacts"]["plans"][number]) => {
     onStateChange(openDynamicWorkbenchTab(state, {
-      type: "spec_preview",
-      spec_revision_id: spec.spec_revision_id,
-      title: spec.file_name,
+      type: "plan_preview",
+      plan_revision_id: plan.plan_revision_id,
+      title: plan.title,
     }));
   };
 
   const openArtifact = (report: FlowWorkbench["artifacts"]["reports"][number]) => {
     onStateChange(openDynamicWorkbenchTab(state, {
       type: "artifact_preview",
-      artifact_id: report.id,
+      artifact_id: report.artifact_id,
       title: report.title,
     }));
   };
@@ -645,8 +645,8 @@ export default function FlowSidePanel({
     onStateChange(openBrowserWorkbenchTab(state));
   };
 
-  const openReview = () => {
-    onStateChange(openReviewWorkbenchTab(state));
+  const openChangeSet = () => {
+    onStateChange(openChangeSetWorkbenchTab(state));
   };
 
   const openWorkspaceFileInBrowser = (url: string) => {
@@ -677,7 +677,7 @@ export default function FlowSidePanel({
       ? activeDynamicTab.path
       : null;
   const isFileWorkspace = state.tab === "files" || activeDynamicTab?.type === "workspace_file_preview";
-  const isReviewWorkspace = activeDynamicTab?.type === "review";
+  const isChangeSetWorkspace = activeDynamicTab?.type === "change_set";
   const isBrowserWorkspace = activeDynamicTab?.type === "browser";
   const isAnimatingDrawer = drawerAnimation !== null;
   const isOverlayDrawer = !isMaximized && (!isOpen || isAnimatingDrawer);
@@ -747,17 +747,17 @@ export default function FlowSidePanel({
           isMaximized={isMaximized}
           onToggleMaximize={onToggleMaximize}
           onOpenBrowser={openBrowser}
-          onOpenReview={openReview}
+          onOpenChangeSet={openChangeSet}
         />
 
-        <div className={isFileWorkspace || isBrowserWorkspace || isReviewWorkspace ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto"}>
+        <div className={isFileWorkspace || isBrowserWorkspace || isChangeSetWorkspace ? "min-h-0 flex-1 overflow-hidden" : "min-h-0 flex-1 overflow-y-auto"}>
           {state.tab === "overview" ? (
           <OverviewTab
             state={state}
             workbench={workbench}
             onToggleSection={toggleSection}
             onOpenExpert={openExpert}
-            onOpenSpec={openSpec}
+            onOpenPlan={openPlan}
             onOpenArtifact={openArtifact}
             onOpenWorkspaceFile={openWorkspaceFile}
           />

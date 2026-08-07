@@ -46,16 +46,16 @@ export type TranscriptBlock =
       activeState?: "thinking" | "running" | "pinned";
       currentToolCallId?: string | null;
     }
-  | { id: string; type: "decision-card"; cardId: string; toolCallId: string }
+  | { id: string; type: "decision-request"; requestId: string; toolCallId: string }
   | {
       id: string;
-      type: "decision-card-result";
-      cardId: string;
+      type: "decision-request-result";
+      requestId: string;
       status: "resolved" | "cancelled";
       collapseState: "expanded" | "shallow";
     }
-  | { id: string; type: "spec-card"; specApprovalId: string; toolCallId: string }
-  | { id: string; type: "plan-card"; planRevisionId: string; toolCallId: string }
+  | { id: string; type: "plan-card"; planApprovalId: string; toolCallId: string }
+  | { id: string; type: "orchestration-card"; orchestrationRevisionId: string; toolCallId: string }
   | { id: string; type: "thinking" };
 
 export type TimelineInputPart =
@@ -78,8 +78,8 @@ export type TimelineInputMessage = {
   role: "assistant" | "user";
   parts: TimelineInputPart[];
   metadata?: {
-    decisionCardId?: string;
-    decisionStatus?: "resolved" | "cancelled";
+    decisionRequestId?: string;
+    decisionRequestStatus?: "resolved" | "cancelled";
   } & Record<string, unknown>;
 };
 
@@ -100,7 +100,7 @@ export type ToolIcon =
   | "edit"
   | "terminal"
   | "question"
-  | "spec"
+  | "plan"
   | "task"
   | "agent"
   | "message"

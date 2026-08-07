@@ -1,0 +1,1 @@
+{"id":"manage-queue","description":"编辑当前 Flow 的持久消息队列","params":["first","second","edited"],"steps":["在 Leader 运行中依次发送 {first} 和 {second} 使其进入队列","把第一条编辑为 {edited}","调整两条消息顺序后删除其中一条","刷新页面并重新读取无障碍树"],"verify":["队列只保留预期消息且内容和顺序正确","刷新后队列保持一致"]}

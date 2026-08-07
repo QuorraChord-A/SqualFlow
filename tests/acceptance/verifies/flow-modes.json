@@ -1,0 +1,1 @@
+{"id":"flow-modes","description":"Flow 模式独立性","assertions":["计划模式保留进入前风险档位，自动编辑与完全访问切换正确","排队后或 Guide 前切换模式时 Leader 按消费时最新模式工作","模式切换不暂停、取消、重排 Run、Task 或队列"]}

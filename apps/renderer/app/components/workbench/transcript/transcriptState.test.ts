@@ -57,7 +57,7 @@ function canonicalItems(messages: UIMessage[]): TranscriptTimelineItem[] {
       lifecycle: "complete",
       message_id: message.id,
       session_id: null,
-      agent_session_id: null,
+      agent_run_id: null,
       work_run_id: null,
       presentation_turn_id: presentationTurnId,
       message_kind: kind,

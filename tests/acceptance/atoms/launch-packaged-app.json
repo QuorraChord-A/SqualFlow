@@ -1,0 +1,1 @@
+{"id":"launch-packaged-app","description":"使用隔离数据目录启动本地打包 App","params":["userDataPath"],"steps":["完全退出已运行的 SquadFlow","使用专用数据目录 {userDataPath} 启动本地打包 App","等待启动页消失并重新读取当前窗口无障碍树"],"verify":["主窗口可操作且没有开发服务器浮标","首次启动或恢复后的页面内容完整且没有遮挡"]}

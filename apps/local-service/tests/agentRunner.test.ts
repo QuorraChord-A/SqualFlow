@@ -65,7 +65,7 @@ describe("runClaudeAgent", () => {
         metadata: expect.objectContaining({
           messageKind: "assistant",
           presentationTurnId: "msg-1",
-          agentSessionId: "ags-1",
+          agentRunId: "ags-1",
           turnTiming: {
             startedAt,
             finishedAt: expect.any(String),

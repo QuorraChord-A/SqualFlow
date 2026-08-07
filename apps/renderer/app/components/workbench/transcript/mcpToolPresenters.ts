@@ -144,54 +144,70 @@ type McpKind =
   | "ask_user"
   | "create_plan"
   | "create_task"
-  | "save_execution_plan"
   | "submit_orchestration_plan"
   | "update_task"
   | "list_tasks"
   | "get_task"
   | "dispatch_agent"
-  | "send_message";
+  | "send_message"
+  | "cancel_agent"
+  | "open_change_set"
+  | "bind_change_set"
+  | "finalize_change_set"
+  | "abandon_change_set";
 
 const MCP_STATUS_LABELS: Record<McpKind, string> = {
   get_context: "已读取",
   ask_user: "已询问",
   create_plan: "已创建",
   create_task: "已创建",
-  save_execution_plan: "已保存",
   submit_orchestration_plan: "已生成",
   update_task: "已更新",
   list_tasks: "已列出",
   get_task: "已读取",
   dispatch_agent: "已派遣",
   send_message: "已发送",
+  cancel_agent: "已取消",
+  open_change_set: "已打开",
+  bind_change_set: "已绑定",
+  finalize_change_set: "已完成",
+  abandon_change_set: "已放弃",
 };
 
 const MCP_OPERATION_LABELS: Record<McpKind, string> = {
   get_context: "Context",
   ask_user: "Ask",
-  create_plan: "Spec",
+  create_plan: "Plan",
   create_task: "Task",
-  save_execution_plan: "Plan",
   submit_orchestration_plan: "编排计划",
   update_task: "Task",
   list_tasks: "Task",
   get_task: "Task",
   dispatch_agent: "Agent",
   send_message: "Message",
+  cancel_agent: "Agent",
+  open_change_set: "ChangeSet",
+  bind_change_set: "ChangeSet",
+  finalize_change_set: "ChangeSet",
+  abandon_change_set: "ChangeSet",
 };
 
 const MCP_ICONS: Record<McpKind, ToolIcon> = {
   get_context: "context",
   ask_user: "question",
-  create_plan: "spec",
+  create_plan: "plan",
   create_task: "task",
-  save_execution_plan: "spec",
-  submit_orchestration_plan: "spec",
+  submit_orchestration_plan: "plan",
   update_task: "task",
   list_tasks: "task",
   get_task: "task",
   dispatch_agent: "agent",
   send_message: "message",
+  cancel_agent: "agent",
+  open_change_set: "edit",
+  bind_change_set: "edit",
+  finalize_change_set: "edit",
+  abandon_change_set: "edit",
 };
 
 function isMcpKind(name: string): name is McpKind {
@@ -209,8 +225,6 @@ function statusLabelForState(state: ToolPresentation["status"], kind: McpKind): 
         case "create_task":
         case "create_plan":
           return "准备创建";
-        case "save_execution_plan":
-          return "准备保存";
         case "submit_orchestration_plan":
           return "正在生成编排计划…";
         case "ask_user":
@@ -251,13 +265,13 @@ function titleForCreatePlan(input: Record<string, unknown> | null, output: unkno
   const parsedObj = parsedOutput && typeof parsedOutput === "object" && !Array.isArray(parsedOutput)
     ? (parsedOutput as Record<string, unknown>)
     : null;
-  const specRevision = parsedObj?.spec_revision && typeof parsedObj.spec_revision === "object" && !Array.isArray(parsedObj.spec_revision)
-    ? (parsedObj.spec_revision as Record<string, unknown>)
+  const planRevision = parsedObj?.plan_revision && typeof parsedObj.plan_revision === "object" && !Array.isArray(parsedObj.plan_revision)
+    ? (parsedObj.plan_revision as Record<string, unknown>)
     : null;
 
   return (
     firstString(input?.name) ??
-    firstString(specRevision?.file_name) ??
+    firstString(planRevision?.title) ??
     "create_plan"
   );
 }
@@ -288,12 +302,12 @@ function taskRecordFromOutput(output: unknown): Record<string, unknown> | null {
   return null;
 }
 
-function agentSessionRecordFromOutput(output: unknown): Record<string, unknown> | null {
+function agentRunRecordFromOutput(output: unknown): Record<string, unknown> | null {
   const parsed = parseMcpOutput(output);
   const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed)
     ? (parsed as Record<string, unknown>)
     : null;
-  const session = obj?.agent_session;
+  const session = obj?.agent_run;
   if (session && typeof session === "object" && !Array.isArray(session)) {
     return session as Record<string, unknown>;
   }
@@ -305,8 +319,8 @@ function taskSubject(input: Record<string, unknown> | null, output: unknown): st
 }
 
 function titleForDispatchAgent(input: Record<string, unknown> | null, output: unknown): string {
-  const session = agentSessionRecordFromOutput(output);
-  return firstString(session?.expert_id) ?? firstString(input?.expert_id) ?? firstString(input?.task_id) ?? "dispatch_agent";
+  const session = agentRunRecordFromOutput(output);
+  return firstString(session?.display_name) ?? firstString(input?.agent_definition_id) ?? firstString(input?.task_id) ?? "dispatch_agent";
 }
 
 function titleForGetTask(input: Record<string, unknown> | null, output: unknown): string {
@@ -315,17 +329,6 @@ function titleForGetTask(input: Record<string, unknown> | null, output: unknown)
 
 function titleForCreateTask(input: Record<string, unknown> | null, output: unknown): string {
   return taskSubject(input, output) ?? firstString(taskRecordFromOutput(output)?.task_id) ?? "create_task";
-}
-
-function titleForSaveExecutionPlan(input: Record<string, unknown> | null, output: unknown): string {
-  const parsed = parseMcpOutput(output);
-  const obj = parsed && typeof parsed === "object" && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
-    : null;
-  const artifact = obj?.artifact && typeof obj.artifact === "object" && !Array.isArray(obj.artifact)
-    ? (obj.artifact as Record<string, unknown>)
-    : null;
-  return firstString(input?.title) ?? firstString(artifact?.title) ?? "save_execution_plan";
 }
 
 function titleForUpdateTask(input: Record<string, unknown> | null, output: unknown): string {
@@ -337,11 +340,9 @@ function truncate(text: string, maxLength: number): string {
 }
 
 function titleForSendMessage(input: Record<string, unknown> | null): string {
-  const summary = firstString(input?.summary);
-  if (summary) return truncate(summary, 40);
-  const content = firstString(input?.content);
-  if (content) return truncate(content, 40);
-  return firstString(input?.expert_id) ?? "send_message";
+  const message = firstString(input?.message);
+  if (message) return truncate(message, 40);
+  return firstString(input?.agent_session_id) ?? "send_message";
 }
 
 function titleForListTasks(): string {
@@ -360,8 +361,6 @@ function titleForMcp(kind: McpKind, input: Record<string, unknown> | null, outpu
       return titleForAskUser(input);
     case "create_task":
       return titleForCreateTask(input, output);
-    case "save_execution_plan":
-      return titleForSaveExecutionPlan(input, output);
     case "submit_orchestration_plan":
       return firstString(input?.title) ?? "";
     case "update_task":
@@ -374,6 +373,13 @@ function titleForMcp(kind: McpKind, input: Record<string, unknown> | null, outpu
       return titleForDispatchAgent(input, output);
     case "send_message":
       return titleForSendMessage(input);
+    case "cancel_agent":
+      return firstString(input?.agent_session_id) ?? "cancel_agent";
+    case "open_change_set":
+    case "bind_change_set":
+    case "finalize_change_set":
+    case "abandon_change_set":
+      return firstString(input?.title) ?? firstString(input?.change_set_id) ?? kind;
     case "get_context":
       return titleForGetContext();
     default:
@@ -429,7 +435,7 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
     ? (parsedOutput as Record<string, unknown>)
     : null;
   const taskRecord = taskRecordFromOutput(output);
-  const agentSession = agentSessionRecordFromOutput(output);
+  const agentRun = agentRunRecordFromOutput(output);
 
   const push = (label: string, value: unknown) => {
     if (typeof value === "string" && value) rows.push({ label, value: truncate(value, 120) });
@@ -438,7 +444,7 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
 
   switch (kind) {
     case "get_context":
-      push("当前工作", parsedObj?.current_work_run_id);
+      push("Leader 运行", parsedObj?.active_leader_agent_run_id);
       push("动作", parsedObj?.pending_action);
       break;
     case "ask_user":
@@ -455,9 +461,6 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
       push("状态", taskRecord?.status);
       break;
     }
-    case "save_execution_plan":
-      push("标题", input?.title);
-      break;
     case "submit_orchestration_plan":
       push("标题", input?.title);
       push("目标", input?.objective);
@@ -513,11 +516,11 @@ function detailRowsForMcp(kind: McpKind, input: Record<string, unknown> | null, 
       break;
     }
     case "dispatch_agent": {
-      const session = agentSession;
+      const session = agentRun;
       push("Expert", session?.expert_id ?? input?.expert_id);
       push("Task", session?.task_id ?? input?.task_id);
-      push("AgentSession", session?.agent_session_id);
-      const resumeFrom = session?.resume_from_agent_session_id ?? input?.resume_agent_session_id;
+      push("AgentRun", session?.agent_run_id);
+      const resumeFrom = session?.resume_from_agent_run_id ?? input?.resume_agent_run_id;
       if (typeof resumeFrom === "string" && resumeFrom) {
         rows.push({ label: "派发", value: `恢复 ${resumeFrom}` });
       } else {

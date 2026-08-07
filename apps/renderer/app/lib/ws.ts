@@ -2,13 +2,13 @@
  * SquadFlow WebSocket client — singleton, auto-reconnects.
  *
  * Protocol (namespace:action):
- *   Client → Server: flow, spec, WorkRun, and session commands.
- *   Server → Client: flow, WorkRun, task, session, decision-card, and artifact events.
+ *   Client → Server: Flow, queue, approval, AgentRun, and session commands.
+ *   Server → Client: canonical Supervisor events.
  */
 
 import { API_BASE } from './api';
 import type { OutgoingMessageImageAttachment } from '../types/messageAttachments';
-import type { PlanFeedbackDraft } from '../types/orchestration';
+import type { OrchestrationFeedbackDraft } from '../types/orchestration';
 
 // ── Incoming message types ──
 
@@ -19,10 +19,9 @@ export type TranscriptTimelineItem = {
   lifecycle: "active" | "complete" | "sealed";
   message_id: string | null;
   session_id: string | null;
-  agent_session_id: string | null;
-  work_run_id: string | null;
+  agent_run_id: string | null;
   presentation_turn_id: string | null;
-  message_kind: "user" | "assistant" | "assistant-continuation" | "running-guide" | "work-run-terminal" | null;
+  message_kind: "user" | "assistant" | "assistant-continuation" | "running-guide" | "agent-run-terminal" | null;
   payload: unknown;
   created_at: string;
   updated_at: string;
@@ -37,42 +36,40 @@ export type TranscriptActiveTurn = {
 
 export type WsInMessage =
   | { type: "flow:state"; flow_id: string; data: any }
-  | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
-  | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_session_id?: string } }
+  | { type: "flow:message_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_run_id?: string } }
+  | { type: "flow:guide_ack"; flow_id: string; log_id?: string; data: { accepted: boolean; message_id: string; client_message_id?: string | null; leader_agent_run_id?: string } }
   | { type: "flow:queue_state"; flow_id: string; log_id?: string; data: { messages: Array<Record<string, unknown>> } }
-  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
-  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_session_id?: string; flow_expert_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; active_turn?: TranscriptActiveTurn }; pending_cards?: any[]; decision_cards?: any[] }
+  | { type: "session:transcript_event"; flow_id: string; session_id: string; agent_run_id?: string; agent_session_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; event: any; removed_message_ids?: string[]; active_turn?: TranscriptActiveTurn } }
+  | { type: "session:transcript_snapshot"; flow_id: string; session_id?: string; agent_run_id?: string; agent_session_id?: string; data: { stream_epoch: string; cursor: number; timeline_items: TranscriptTimelineItem[]; active_turn?: TranscriptActiveTurn }; pending_user_actions?: any[] }
   | { type: "flow:status"; flow_id: string; data: any }
   | { type: "flow:name_updated"; flow_id: string; data: { name: string; name_generation_status: "pending" | "generated" | "fallback" | "manual" } }
   | { type: "task:event"; flow_id: string; data: any }
-  | { type: "work_run:event"; flow_id: string; data: any }
-  | { type: "session:event"; flow_id: string; data: any }
-  | { type: "flow_expert:event"; flow_id: string; data: any }
+  | { type: "agent_session:event"; flow_id: string; data: any }
+  | { type: "agent_run:event"; flow_id: string; data: any }
+  | { type: "tool_call:event"; flow_id: string; data: any }
   | { type: "context_usage:event"; flow_id: string; data: any }
   | { type: "context_compaction:event"; flow_id: string; data: any }
   | {
       type: "runtime:transport";
       flow_id: string;
-      agent_session_id: string;
-      flow_expert_id?: string;
+      agent_run_id: string;
+      agent_session_id?: string;
       data: {
         state: "reconnecting" | "timeout" | "fallback_https" | "clear";
         message?: string;
         attempt?: number;
         max_attempts?: number;
         runtime_role: "leader" | "expert";
-        work_run_id?: string;
         task_id?: string;
       };
     }
-  | { type: "flow:decision_card"; flow_id: string; data: any }
-  | { type: "flow:decision_card_resolved"; flow_id: string; data: any }
-  | { type: "flow:spec_card"; flow_id: string; data: any }
-  | { type: "flow:spec_card_resolved"; flow_id: string; data: any }
+  | { type: "decision_request:event"; flow_id: string; data: any }
   | { type: "artifact:event"; flow_id: string; data: any }
   | { type: "plan:event"; flow_id: string; data: any }
   | { type: "plan_approval:event"; flow_id: string; data: any }
-  | { type: "plan_run:event"; flow_id: string; data: any }
+  | { type: "orchestration:event"; flow_id: string; data: any }
+  | { type: "orchestration_approval:event"; flow_id: string; data: any }
+  | { type: "change_set:event"; flow_id: string; data: any }
   | { type: "system:error"; flow_id?: string; log_id?: string; data: { code: string; message: string } & Record<string, unknown> }
 
 export type WsMessageHandler = (msg: WsInMessage) => void;
@@ -89,6 +86,7 @@ const OUTBOX_MESSAGE_TYPES = new Set([
   "flow:message",
   "flow:guide",
   "flow:queue_add",
+  "flow:queue_edit",
   "flow:queue_delete",
   "flow:queue_reorder",
   "flow:queue_dispatch",
@@ -425,14 +423,14 @@ export class SquadFlowWs {
   sendSessionGet(
     flowId: string,
     _stage: string,
+    agentRunId?: string,
     agentSessionId?: string,
-    flowExpertId?: string,
   ) {
     this.send({
       type: "session:get",
       flow_id: flowId,
+      ...(agentRunId ? { agent_run_id: agentRunId } : {}),
       ...(agentSessionId ? { agent_session_id: agentSessionId } : {}),
-      ...(flowExpertId ? { flow_expert_id: flowExpertId } : {}),
       session_id: "",
     });
   }
@@ -442,7 +440,7 @@ export class SquadFlowWs {
     event: "flow_switch_started" | "flow_switch_ready" | "flow_switch_failed";
     durationMs?: number;
     errorCode?: string;
-    leaderAgentSessionId?: string;
+    leaderAgentRunId?: string;
   }) {
     this.send({
       type: "client:diagnostic",
@@ -450,31 +448,21 @@ export class SquadFlowWs {
       event: input.event,
       ...(input.durationMs !== undefined ? { duration_ms: Math.max(0, Math.round(input.durationMs)) } : {}),
       ...(input.errorCode ? { error_code: input.errorCode } : {}),
-      ...(input.leaderAgentSessionId ? { leader_agent_session_id: input.leaderAgentSessionId } : {}),
+      ...(input.leaderAgentRunId ? { leader_agent_run_id: input.leaderAgentRunId } : {}),
     });
   }
 
-  sendWorkRunInterrupt(flowId: string, workRunId: string, expectedRevision: number, clientActionId: string) {
+  sendAgentRunCancel(flowId: string, agentRunId: string, clientActionId: string) {
     this.send({
-      type: "work_run:interrupt",
+      type: "agent_run:cancel",
       flow_id: flowId,
-      work_run_id: workRunId,
-      expected_revision: expectedRevision,
+      agent_run_id: agentRunId,
       client_action_id: clientActionId,
     });
   }
 
-  sendAgentSessionInterrupt(flowId: string, agentSessionId: string, clientActionId: string) {
-    this.send({
-      type: "agent_session:interrupt",
-      flow_id: flowId,
-      agent_session_id: agentSessionId,
-      client_action_id: clientActionId,
-    });
-  }
-
-  sendRunSpec(flowId: string, specApprovalId: string) {
-    this.send({ type: "flow:run_spec", flow_id: flowId, spec_approval_id: specApprovalId });
+  sendFlowInterrupt(flowId: string, clientActionId: string) {
+    this.send({ type: "flow:interrupt", flow_id: flowId, client_action_id: clientActionId });
   }
 
   sendFlowGuide(
@@ -483,14 +471,14 @@ export class SquadFlowWs {
     clientMessageId: string,
     logId?: string,
     attachments?: OutgoingMessageImageAttachment[],
-    planFeedback?: PlanFeedbackDraft[],
+    orchestrationFeedback?: OrchestrationFeedbackDraft[],
   ) {
     this.send({
       type: "flow:guide",
       flow_id: flowId,
       content,
       ...(attachments?.length ? { attachments } : {}),
-      ...(planFeedback?.length ? { plan_feedback: planFeedback.map((feedback) => ({ id: feedback.id, plan_revision_id: feedback.planRevisionId, plan_node_id: feedback.planNodeId, marker_number: feedback.markerNumber, comment: feedback.comment })) } : {}),
+      ...(orchestrationFeedback?.length ? { orchestration_feedback: orchestrationFeedback.map((feedback) => ({ id: feedback.id, orchestration_revision_id: feedback.orchestrationRevisionId, orchestration_node_id: feedback.orchestrationNodeId, marker_number: feedback.markerNumber, comment: feedback.comment })) } : {}),
       client_message_id: clientMessageId,
       ...(logId ? { log_id: logId } : {}),
     });

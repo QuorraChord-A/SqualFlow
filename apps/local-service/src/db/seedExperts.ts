@@ -1,32 +1,27 @@
 import { inArray } from "drizzle-orm";
 import type { BetterSQLite3Database } from "drizzle-orm/better-sqlite3";
-import { experts } from "./schema.js";
+import { agentDefinitions } from "./schema.js";
 import type * as schema from "./schema.js";
 import { BROWSER_MCP_TOOL_NAMES } from "../mcp/browserServer.js";
 import { DEFAULT_LEADER_SYSTEM_PROMPT } from "./defaultLeaderSystemPrompt.js";
 
-/**
- * Leader tools:
- * - single expert: create_task + dispatch_agent (+ update_task / save_execution_plan as needed)
- * - multi expert (2+): submit_orchestration_plan; Leader dispatches materialized tasks after approval
- */
 const leaderMcpTools = [
   "get_context",
   "ask_user",
   "create_plan",
   "create_task",
-  "save_execution_plan",
   "submit_orchestration_plan",
-  "resolve_plan_feedback",
+  "resolve_orchestration_feedback",
   "update_task",
   "list_tasks",
   "get_task",
   "dispatch_agent",
   "cancel_agent",
   "send_message",
-  "interrupt_work_run",
-  "resume_work_run",
-  "cancel_work_run",
+  "open_change_set",
+  "bind_change_set",
+  "finalize_change_set",
+  "abandon_change_set",
 ].map((tool) => `mcp__squadflow-leader__${tool}`);
 
 const stableExperts: Array<{
@@ -34,7 +29,7 @@ const stableExperts: Array<{
   role: string;
   /** Fixed Chinese role title (UI subtitle). */
   name: string;
-  /** 2–3 character person-name pool; assigned when FlowExpert is first created. */
+  /** 2–3 character person-name pool; assigned when AgentSession is first created. */
   personNameCandidates: string[];
   builtinTools: string[];
   mcpTools: string[];
@@ -140,7 +135,7 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
   research: [
     "你是 SquadFlow Research Expert，负责提供可直接行动、可追溯的事实。",
     "工具与边界：只使用 read/search 只读分析目标项目；仅在任务需要外部或时效性信息时使用 web_search；",
-    "绝不修改文件、执行实现或保存产物与 Spec。",
+    "绝不修改文件、执行实现或保存产物与 Plan。",
     "职责：",
     "- 从 dispatch prompt 提取待回答问题，逐项给出结论、证据和未知项。",
     "- 代码事实标注文件路径:行号；外部事实优先官方文档、规范或论文，并给出来源与日期。",
@@ -151,7 +146,7 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
   coder: [
     "你是 SquadFlow Coder Expert，负责在用户当前项目中完成可交付的实现和 bug 修复。",
     "工具与边界：使用 read/search 定位事实，使用 write/edit 修改文件，使用 shell 构建和验证；",
-    "任务涉及可见 Web UI 时使用 browser_* 做真实交互验证。不保存产物或 Spec。",
+    "任务涉及可见 Web UI 时使用 browser_* 做真实交互验证。不保存产物或 Plan。",
     "职责：",
     "- 不预设语言、框架、版本、包管理器或目录结构；先从目标项目的代码、配置和命令识别技术栈，",
     "  再遵循其组件、状态、样式、路由、数据与测试约定。",
@@ -167,7 +162,7 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
   verify: [
     "你是 SquadFlow Verify Expert，负责独立判断交付是否满足 dispatch prompt 与验收标准。",
     "工具与边界：目标项目只读；使用 read/search 检查实现，使用 shell 执行验证，UI 或浏览器任务",
-    "使用 browser_*；临时输出只写 scratch，不修改目标项目，也不保存产物或 Spec。",
+    "使用 browser_*；临时输出只写 scratch，不修改目标项目，也不保存产物或 Plan。",
     "职责：",
     "- 从风险最高、最可能失败的行为开始，按任务规模选择最小充分验证集。",
     "- 自己执行命令和用户路径，不用实现者的自报结果代替证据。",
@@ -181,7 +176,7 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
   ].join("\n"),
   codereview: [
     "你是 SquadFlow CodeReview Expert，负责对 dispatch prompt 指定的改动做只读、证据化审查。",
-    "工具与边界：只使用 read/search；不得修改文件、执行命令、保存产物或 Spec，也不得声称测试已运行。",
+    "工具与边界：只使用 read/search；不得修改文件、执行命令、保存产物或 Plan，也不得声称测试已运行。",
     "职责：",
     "- 以改动范围、既有契约和验收标准为边界，检查相关实现与测试。",
     "- 优先发现可触发的正确性、回归、状态一致性、安全、数据或协议兼容以及缺失测试问题。",
@@ -194,14 +189,14 @@ export const EXPERT_ROLE_SYSTEM_PROMPTS: Record<string, string> = {
 
 export function composeExpertSystemPrompt(role: string, name: string) {
   const roleSpecificPrompt = EXPERT_ROLE_SYSTEM_PROMPTS[role]
-    ?? `You are SquadFlow ${name}. Follow the current WorkRun task contract and end your final reply with a clear conclusion.`;
+    ?? `You are SquadFlow ${name}. Follow the current Task contract and end your final reply with a clear conclusion.`;
   return [COMMON_EXPERT_SYSTEM_PROMPT, roleSpecificPrompt].join("\n\n");
 }
 
 export function seedExpertsIntoStore(db: BetterSQLite3Database<typeof schema>) {
   const timestamp = new Date().toISOString();
 
-  db.delete(experts).where(inArray(experts.id, ["exp-frontend", "exp-backend"])).run();
+  db.delete(agentDefinitions).where(inArray(agentDefinitions.id, ["exp-frontend", "exp-backend"])).run();
 
   for (const expert of stableExperts) {
     const row = {
@@ -218,10 +213,10 @@ export function seedExpertsIntoStore(db: BetterSQLite3Database<typeof schema>) {
       updatedAt: timestamp,
     };
 
-    db.insert(experts)
+    db.insert(agentDefinitions)
       .values(row)
       .onConflictDoUpdate({
-        target: experts.id,
+        target: agentDefinitions.id,
         set: {
           role: row.role,
           name: row.name,

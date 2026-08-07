@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Background, Controls, getViewportForBounds, Handle, Position, ReactFlow, type Edge, type Node, type NodeProps, type NodeTypes, type ReactFlowInstance } from "@xyflow/react";
 import { Code2, FlaskConical, Search, ShieldCheck } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import type { PlanNodeView } from "../../types/orchestration";
+import type { OrchestrationNodeView } from "../../types/orchestration";
 
 const expertMeta = {
   "exp-research": { label: "Research", icon: Search },
@@ -13,11 +13,12 @@ const expertMeta = {
   "exp-codereview": { label: "CodeReview", icon: ShieldCheck },
 } as const;
 
-function role(node: PlanNodeView) {
-  return expertMeta[node.expert_id as keyof typeof expertMeta] ?? { label: node.expert_id, icon: Code2 };
+function role(node: OrchestrationNodeView) {
+  return expertMeta[node.recommended_agent_definition_id as keyof typeof expertMeta]
+    ?? { label: node.recommended_agent_definition_id, icon: Code2 };
 }
 
-function status(node: PlanNodeView) {
+function status(node: OrchestrationNodeView) {
   switch (node.task?.status) {
     case "in_progress":
       return { label: "执行中", dot: "animate-pulse bg-status-running" };
@@ -37,15 +38,15 @@ function status(node: PlanNodeView) {
 }
 
 type GraphNodeData = Record<string, unknown> & {
-  node: PlanNodeView;
+  node: OrchestrationNodeView;
   compact: boolean;
   inspectOpen: boolean;
   onInspect: (nodeId: string) => void;
   onSelect?: (nodeId: string) => void;
 };
-type GraphNode = Node<GraphNodeData, "planNode">;
+type GraphNode = Node<GraphNodeData, "orchestrationNode">;
 
-function PlanNode({ data, selected }: NodeProps<GraphNode>) {
+function OrchestrationNode({ data, selected }: NodeProps<GraphNode>) {
   const meta = role(data.node);
   const taskStatus = status(data.node);
   const Icon = meta.icon;
@@ -54,8 +55,8 @@ function PlanNode({ data, selected }: NodeProps<GraphNode>) {
       type="button"
       onClick={(event) => {
         event.stopPropagation();
-        if (data.compact) data.onInspect(data.node.plan_node_id);
-        else data.onSelect?.(data.node.plan_node_id);
+        if (data.compact) data.onInspect(data.node.orchestration_node_id);
+        else data.onSelect?.(data.node.orchestration_node_id);
       }}
       className={`grid text-left border bg-card shadow-[var(--ui-shadow-elevated)] transition-colors ${data.compact ? "w-[172px] grid-cols-[26px_minmax(0,1fr)] gap-2 rounded-lg px-2.5 py-2" : "w-[194px] grid-cols-[30px_minmax(0,1fr)] gap-2.5 rounded-xl px-3 py-2.5"} ${selected ? "border-primary ring-2 ring-primary/15" : "border-ui-border-strong hover:border-foreground/35"}`}
     >
@@ -74,7 +75,7 @@ function PlanNode({ data, selected }: NodeProps<GraphNode>) {
   );
   if (!data.compact) return content;
   return (
-    <Popover open={data.inspectOpen} onOpenChange={(open) => { if (open) data.onInspect(data.node.plan_node_id); else data.onInspect(""); }}>
+    <Popover open={data.inspectOpen} onOpenChange={(open) => { if (open) data.onInspect(data.node.orchestration_node_id); else data.onInspect(""); }}>
       <PopoverTrigger render={content} />
       <PopoverContent side="top" align="center" className="w-80 gap-2.5 p-4">
         <div className="text-[11px] font-semibold text-muted-foreground">{meta.label}</div>
@@ -85,49 +86,49 @@ function PlanNode({ data, selected }: NodeProps<GraphNode>) {
   );
 }
 
-const nodeTypes: NodeTypes = { planNode: PlanNode };
+const nodeTypes: NodeTypes = { orchestrationNode: OrchestrationNode };
 
-function layout(nodes: PlanNodeView[], compact: boolean) {
+function layout(nodes: OrchestrationNodeView[], compact: boolean) {
   const depthMemo = new Map<string, number>();
-  const byId = new Map(nodes.map((node) => [node.plan_node_id, node]));
-  const depth = (node: PlanNodeView, visiting = new Set<string>()): number => {
-    const cached = depthMemo.get(node.plan_node_id);
+  const byId = new Map(nodes.map((node) => [node.orchestration_node_id, node]));
+  const depth = (node: OrchestrationNodeView, visiting = new Set<string>()): number => {
+    const cached = depthMemo.get(node.orchestration_node_id);
     if (cached !== undefined) return cached;
-    if (visiting.has(node.plan_node_id)) return 0;
-    visiting.add(node.plan_node_id);
+    if (visiting.has(node.orchestration_node_id)) return 0;
+    visiting.add(node.orchestration_node_id);
     const value = node.depends_on_node_ids.length === 0 ? 0 : 1 + Math.max(...node.depends_on_node_ids.map((id) => byId.get(id)).filter(Boolean).map((parent) => depth(parent!, visiting)));
-    depthMemo.set(node.plan_node_id, value);
+    depthMemo.set(node.orchestration_node_id, value);
     return value;
   };
-  const groups = new Map<number, PlanNodeView[]>();
+  const groups = new Map<number, OrchestrationNodeView[]>();
   nodes.forEach((node) => groups.set(depth(node), [...(groups.get(depth(node)) ?? []), node]));
   const xStep = compact ? 205 : 242;
   const yStep = compact ? 92 : 112;
   const positions = new Map<string, { x: number; y: number }>();
   for (const [level, group] of groups) {
     const offset = -((group.length - 1) * yStep) / 2;
-    group.forEach((node, index) => positions.set(node.plan_node_id, { x: level * xStep, y: 120 + offset + index * yStep }));
+    group.forEach((node, index) => positions.set(node.orchestration_node_id, { x: level * xStep, y: 120 + offset + index * yStep }));
   }
   return positions;
 }
 
-export function buildPlanEdges(planNodes: PlanNodeView[]): Edge[] {
-  return planNodes.flatMap((node) => node.depends_on_node_ids.map((dependency) => ({
-    id: `${dependency}-${node.plan_node_id}`,
+export function buildPlanEdges(orchestrationNodes: OrchestrationNodeView[]): Edge[] {
+  return orchestrationNodes.flatMap((node) => node.depends_on_node_ids.map((dependency) => ({
+    id: `${dependency}-${node.orchestration_node_id}`,
     source: dependency,
-    target: node.plan_node_id,
+    target: node.orchestration_node_id,
     type: "smoothstep",
     animated: !node.task || ["in_progress", "queued_for_expert", "recovery_pending"].includes(node.task.status),
   })));
 }
 
 export default function OrchestrationPlanGraph({
-  planNodes,
+  orchestrationNodes,
   compact = false,
   selectedNodeId,
   onSelectNode,
 }: {
-  planNodes: PlanNodeView[];
+  orchestrationNodes: OrchestrationNodeView[];
   compact?: boolean;
   selectedNodeId?: string | null;
   onSelectNode?: (nodeId: string) => void;
@@ -136,29 +137,29 @@ export default function OrchestrationPlanGraph({
   const containerRef = useRef<HTMLDivElement>(null);
   const instanceRef = useRef<ReactFlowInstance<GraphNode, Edge> | null>(null);
   const fitFrameRef = useRef<number | null>(null);
-  useEffect(() => setInspectNodeId(""), [planNodes]);
-  const positions = useMemo(() => layout(planNodes, compact), [compact, planNodes]);
+  useEffect(() => setInspectNodeId(""), [orchestrationNodes]);
+  const positions = useMemo(() => layout(orchestrationNodes, compact), [compact, orchestrationNodes]);
   const planBounds = useMemo(() => {
     const nodeWidth = compact ? 172 : 194;
     const nodeHeight = compact ? 56 : 68;
-    const points = planNodes.map((node) => positions.get(node.plan_node_id) ?? { x: 0, y: 0 });
+    const points = orchestrationNodes.map((node) => positions.get(node.orchestration_node_id) ?? { x: 0, y: 0 });
     if (points.length === 0) return { x: 0, y: 0, width: nodeWidth, height: nodeHeight };
     const minX = Math.min(...points.map((point) => point.x));
     const minY = Math.min(...points.map((point) => point.y));
     const maxX = Math.max(...points.map((point) => point.x)) + nodeWidth;
     const maxY = Math.max(...points.map((point) => point.y)) + nodeHeight;
     return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-  }, [compact, planNodes, positions]);
-  const nodes = useMemo<GraphNode[]>(() => planNodes.map((node) => ({
-    id: node.plan_node_id,
-    type: "planNode",
-    position: positions.get(node.plan_node_id) ?? { x: 0, y: 0 },
+  }, [compact, orchestrationNodes, positions]);
+  const nodes = useMemo<GraphNode[]>(() => orchestrationNodes.map((node) => ({
+    id: node.orchestration_node_id,
+    type: "orchestrationNode",
+    position: positions.get(node.orchestration_node_id) ?? { x: 0, y: 0 },
     initialWidth: compact ? 172 : 194,
     initialHeight: compact ? 56 : 68,
-    selected: node.plan_node_id === selectedNodeId,
-    data: { node, compact, inspectOpen: inspectNodeId === node.plan_node_id, onInspect: setInspectNodeId, onSelect: onSelectNode },
-  })), [compact, inspectNodeId, onSelectNode, planNodes, positions, selectedNodeId]);
-  const edges = useMemo<Edge[]>(() => buildPlanEdges(planNodes), [planNodes]);
+    selected: node.orchestration_node_id === selectedNodeId,
+    data: { node, compact, inspectOpen: inspectNodeId === node.orchestration_node_id, onInspect: setInspectNodeId, onSelect: onSelectNode },
+  })), [compact, inspectNodeId, onSelectNode, orchestrationNodes, positions, selectedNodeId]);
+  const edges = useMemo<Edge[]>(() => buildPlanEdges(orchestrationNodes), [orchestrationNodes]);
   const fitPlan = useCallback((instance = instanceRef.current) => {
     if (!instance) return;
     if (fitFrameRef.current !== null) window.cancelAnimationFrame(fitFrameRef.current);
@@ -186,8 +187,8 @@ export default function OrchestrationPlanGraph({
     fitPlan(instance);
   }, [fitPlan]);
   useEffect(() => {
-    if (planNodes.length > 0) fitPlan();
-  }, [fitPlan, planNodes]);
+    if (orchestrationNodes.length > 0) fitPlan();
+  }, [fitPlan, orchestrationNodes]);
   useEffect(() => {
     const container = containerRef.current;
     if (!container || typeof ResizeObserver === "undefined") return;

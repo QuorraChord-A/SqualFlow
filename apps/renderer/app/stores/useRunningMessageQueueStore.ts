@@ -3,18 +3,17 @@
 import { create } from "zustand";
 import type { BrowserElementAttachment } from "./useBrowserSelectionStore";
 import type { MessageImageAttachment } from "../types/messageAttachments";
-import type { PlanFeedbackDraft } from "../types/orchestration";
+import type { OrchestrationFeedbackDraft } from "../types/orchestration";
 
 export type RunningQueuedMessage = {
   id: string;
   content: string;
   status?: "accepted" | "dispatching";
   revision?: number;
-  specRequested?: boolean;
   displayContent?: string;
   browserElementAttachments?: BrowserElementAttachment[];
   imageAttachments?: MessageImageAttachment[];
-  planFeedback?: PlanFeedbackDraft[];
+  orchestrationFeedback?: OrchestrationFeedbackDraft[];
 };
 
 export const EMPTY_RUNNING_QUEUE: RunningQueuedMessage[] = [];

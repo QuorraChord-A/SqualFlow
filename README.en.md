@@ -22,7 +22,7 @@ SquadFlow is a multi-agent collaboration workspace that runs on your computer. Y
 
 - **Organize complex work into Flows** — A Flow keeps the goal, conversation, plan, tasks, tool calls, and result together and remains available after restart.
 - **Leader and specialist collaboration** — The Leader turns a goal into traceable work and delegates to specialists instead of forcing everything into one chat turn.
-- **Human control throughout** — Review plans, respond to decision cards, and redirect work when it matters; important decisions are not hidden in the background.
+- **Human control throughout** — Review requirement and orchestration plans, respond to the matching user-action card, and redirect work when it matters.
 - **Choose your runtime** — Use Codex, Claude, or a compatible custom model endpoint. Configure models and credentials through the in-app provider manager.
 - **Use native project context** — Discover available Skills and MCP servers from the current project and your machine; type `/` to filter and select them.
 - **See what tools did** — The workbench shows the exact MCP server and tool, status, input, and result. When an MCP provides an icon, it is shown in the active Flow.
@@ -32,7 +32,7 @@ SquadFlow is a multi-agent collaboration workspace that runs on your computer. Y
 
 1. **Create a Flow** — Choose a project directory, describe the outcome, and select a model.
 2. **Add context** — Type `/` in the composer, filter available Skills and MCP servers by name or description, then use the arrow keys and Enter to insert a selection.
-3. **Review the plan** — The Leader explains the breakdown and direction; confirm, reject, or add constraints through decision cards when needed.
+3. **Review plans** — The Leader explains the requirement plan and multi-expert orchestration; confirm, reject, or add constraints through the matching card.
 4. **Follow execution** — Inspect specialist progress, file operations, browser activity, and MCP results. Expand tool groups for raw details.
 5. **Continue the collaboration** — Follow up, correct course, or add work in the same Flow. Its state and conversation are persisted.
 
@@ -72,7 +72,7 @@ No model provider is created automatically on first launch. Click **Not configur
 | Layer | Technology and responsibility |
 | --- | --- |
 | Desktop shell | Electron: windows, system integration, updates, packaging, and bundled runtimes |
-| Interface | Next.js + React: Flows, chat, decision cards, tools, and browser workbench |
+| Interface | Next.js + React: Flows, chat, plan/orchestration cards, tools, and browser workbench |
 | Local service | TypeScript + Fastify: persistence, protocol, permissions, and agent orchestration |
 | Data | SQLite: local Flows, messages, tasks, and settings |
 | Agent runtimes | Codex App Server, Claude Agent SDK, and compatible custom model endpoints |
@@ -105,6 +105,8 @@ apps/
 tests/acceptance/ Natural-language desktop acceptance cases
 scripts/         Repository-level setup and development orchestration
 ```
+
+See the [Supervisor terminology](docs/supervisor-terminology.md), [product contract](docs/supervisor-product-contract.md), [system design](docs/supervisor-architecture.md), [REST API](docs/supervisor-rest-api.md), and [WebSocket protocol](docs/supervisor-ws-protocol.md) for the clean-break architecture.
 
 Run `npm run check` before submitting changes. Changes to the desktop shell, startup flow, or packaging should also run the desktop package and smoke checks.
 

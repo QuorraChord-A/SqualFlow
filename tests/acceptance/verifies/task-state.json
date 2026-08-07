@@ -1,0 +1,1 @@
+{"id":"task-state","description":"Task 业务状态","assertions":["Task 目标、说明、验收、依赖、进度和结果可观察","依赖阻断、重派和显式状态更新符合边界","AgentRun 成功、失败或取消不会自动完成或失败 Task"]}

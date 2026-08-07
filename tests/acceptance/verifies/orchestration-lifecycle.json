@@ -1,0 +1,1 @@
+{"id":"orchestration-lifecycle","description":"编排版本与审批模式","assertions":["单 Expert 不强制编排但主动创建卡仍按快照模式处理","自动执行卡片可见且无审批按钮并立即出现 Task","需要批准卡片有审批操作且批准前无 Task，后续设置切换不改变已有卡片"]}

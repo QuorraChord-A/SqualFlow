@@ -5,8 +5,33 @@ import { API_BASE } from "../lib/api";
 import { wsClient } from "../lib/ws";
 import type { OrchestrationPlanView } from "../types/orchestration";
 
+export type ChangeSetFile = {
+  path: string;
+  status: "modified" | "added" | "deleted" | string;
+  patch: string | null;
+  additions: number | null;
+  deletions: number | null;
+  attribution_kind: string;
+};
+
+export type ChangeSetView = {
+  change_set_id: string;
+  title: string;
+  status: "open" | "finalized" | "abandoned";
+  root_path: string;
+  baseline_kind: string;
+  baseline_ref: string | null;
+  partial_reason: string | null;
+  review: Record<string, unknown> | null;
+  created_at: string;
+  finalized_at: string | null;
+  abandoned_at: string | null;
+  updated_at: string;
+  files: ChangeSetFile[];
+};
+
 export interface FlowWorkbench {
-  orchestration_plan?: OrchestrationPlanView | null;
+  orchestration_plan: OrchestrationPlanView | null;
   team: Array<{
     id: string;
     display_name: string;
@@ -14,158 +39,92 @@ export interface FlowWorkbench {
     status: "running" | "idle";
     current_task_title: string | null;
     last_active_at: string | null;
-    agent_session_id: string | null;
-    flow_expert_id: string | null;
-    expert_id: string | null;
+    agent_run_id: string | null;
+    agent_session_id: string;
+    agent_definition_id: string;
     is_leader: boolean;
   }>;
   artifacts: {
-    specs: Array<{
-      id: string;
-      spec_revision_id: string;
+    plans: Array<{
+      plan_revision_id: string;
+      revision_number: number;
       title: string;
-      file_name: string;
       overview: string;
       content: string;
-      status: string;
+      source_agent_run_id: string;
       created_at: string;
     }>;
-    files: Array<{
-      path: string;
-      status?: string;
-      additions?: number;
-      deletions?: number;
-      source_artifact_id?: string;
-    }>;
+    files: Array<ChangeSetFile & { change_set_id: string }>;
     reports: Array<{
-      id: string;
+      artifact_id: string;
       type: string;
       title: string;
       content: string;
+      source_agent_run_id: string;
       created_at: string;
     }>;
+    change_sets: ChangeSetView[];
   };
   tasks: Array<{
     id: string;
-    work_run_id: string;
     subject: string;
+    description: string;
     status: string;
-    owner_flow_expert_id: string | null;
-    owner_expert_id: string | null;
+    revision: number;
+    owner_agent_session_id: string | null;
+    recommended_agent_definition_id: string | null;
     owner_name: string | null;
     owner_role: string | null;
     active_form: string | null;
     progress: string | null;
     blocked_by: string[];
+    orchestration_revision_id: string | null;
+    orchestration_node_id: string | null;
   }>;
-  files: {
-    root_path: string | null;
-    tree_available: boolean;
-  };
-  reviews: WorkRunReview[];
+  files: { root_path: string | null; tree_available: boolean };
 }
 
 export type WorkbenchTeamMember = FlowWorkbench["team"][number];
 
-export type WorkRunReviewLine = {
-  kind: "context" | "added" | "removed";
-  old_line: number | null;
-  new_line: number | null;
-  text: string;
-};
-
-export type WorkRunReviewFile = {
-  path: string;
-  status: "modified" | "added" | "deleted";
-  detail_status: "ready" | "binary" | "large" | "unavailable";
-  additions: number | null;
-  deletions: number | null;
-  lines: WorkRunReviewLine[];
-};
-
-export type WorkRunReview = {
-  flow_id: string;
-  work_run_id: string;
-  anchor_message_id: string;
-  status: "ready" | "empty" | "skipped" | "failed";
-  reason?: string;
-  completed_at: string | null;
-  totals: {
-    files: number;
-    additions: number;
-    deletions: number;
-    modified: number;
-    added: number;
-    deleted: number;
-  };
-  files: WorkRunReviewFile[];
-};
-
 export const emptyWorkbench: FlowWorkbench = {
   orchestration_plan: null,
   team: [],
-  artifacts: { specs: [], files: [], reports: [] },
+  artifacts: { plans: [], files: [], reports: [], change_sets: [] },
   tasks: [],
   files: { root_path: null, tree_available: false },
-  reviews: [],
 };
 
 export function hasWorkbenchContent(workbench: FlowWorkbench) {
   return Boolean(workbench.orchestration_plan)
     || workbench.tasks.length > 0
-    || workbench.artifacts.specs.length > 0
+    || workbench.artifacts.plans.length > 0
     || workbench.artifacts.files.length > 0
     || workbench.artifacts.reports.length > 0
-    || workbench.reviews.length > 0;
+    || workbench.artifacts.change_sets.length > 0;
 }
 
 export function useFlowWorkbench(flowId: string | null) {
   const [workbench, setWorkbench] = useState<FlowWorkbench>(emptyWorkbench);
-
   useEffect(() => {
     setWorkbench(emptyWorkbench);
     if (!flowId) return;
-
     let stale = false;
-    let loadPromise: Promise<void> | null = null;
+    let loading: Promise<void> | null = null;
     const load = () => {
-      if (loadPromise) return loadPromise;
-      loadPromise = (async () => {
-        try {
-          const response = await fetch(`${API_BASE}/api/flows/${flowId}/workbench`);
-          if (!response.ok) return;
-          const data = await response.json() as FlowWorkbench;
-          if (!stale) setWorkbench(data);
-        } catch {
-          // WebSocket reconnects and later events will retry the snapshot.
-        }
-      })().finally(() => {
-        loadPromise = null;
-      });
-      return loadPromise;
+      if (loading) return loading;
+      loading = fetch(`${API_BASE}/api/flows/${encodeURIComponent(flowId)}/workbench`)
+        .then(async (response) => { if (response.ok && !stale) setWorkbench(await response.json() as FlowWorkbench); })
+        .catch(() => undefined)
+        .finally(() => { loading = null; });
+      return loading;
     };
-
     void load();
-    const reloadForFlow = (message: { flow_id?: string }) => {
-      if (message.flow_id === flowId) void load();
-    };
+    const reload = (message: { flow_id?: string }) => { if (message.flow_id === flowId) void load(); };
     const unsubs = [
-      wsClient.onEvent("flow:state", reloadForFlow),
-      wsClient.onEvent("work_run:event", reloadForFlow),
-      wsClient.onEvent("task:event", reloadForFlow),
-      wsClient.onEvent("session:event", reloadForFlow),
-      wsClient.onEvent("flow_expert:event", reloadForFlow),
-      wsClient.onEvent("artifact:event", reloadForFlow),
-      wsClient.onEvent("plan:event", reloadForFlow),
-      wsClient.onEvent("plan_approval:event", reloadForFlow),
-      wsClient.onEvent("plan_run:event", reloadForFlow),
-    ];
-
-    return () => {
-      stale = true;
-      for (const unsub of unsubs) unsub();
-    };
+      "flow:state", "agent_run:event", "agent_session:event", "task:event", "artifact:event",
+      "plan:event", "orchestration:event", "orchestration_approval:event", "change_set:event",
+    ].map((event) => wsClient.onEvent(event, reload));
+    return () => { stale = true; unsubs.forEach((unsubscribe) => unsubscribe()); };
   }, [flowId]);
-
   return { workbench, hasContent: hasWorkbenchContent(workbench) };
 }

@@ -1,0 +1,1 @@
+{"id":"settings-recovery-ux","description":"设置、异常恢复、体验与无障碍","assertions":["主题、reasoning、角色启停、供应商、模型和 effort 设置可保存并在失败时回滚","密钥始终遮罩，连接测试反馈明确，同一 Flow 跨 SDK 切换被拒绝","WS 与 App 重启恢复自然；中文文案、焦点、键盘、Escape、窄窗口和减少动画无明显阻塞、重叠、抖动或陈旧状态"]}

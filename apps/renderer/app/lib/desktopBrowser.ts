@@ -9,7 +9,7 @@ export type DesktopBrowserBounds = {
 
 export type DesktopBrowserAgentLease = {
   flowId: string;
-  agentSessionId: string;
+  agentRunId: string;
   holderName: string;
   since: string;
 };

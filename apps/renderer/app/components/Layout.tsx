@@ -7,7 +7,6 @@ import TopBar from './TopBar';
 import Sidebar from './Sidebar';
 import NewFlowModal from './NewFlowModal';
 import NewTaskView from './NewTaskView';
-import type { RiskMode } from './ComposerModeMenu';
 import DeleteFlowModal from './DeleteFlowModal';
 import ClearAllFlowsModal from './ClearAllFlowsModal';
 import AbortFlowModal from './AbortFlowModal';
@@ -16,12 +15,11 @@ import LeaderChatPanel from './workbench/LeaderChatPanel';
 import FlowSidePanel from './workbench/FlowSidePanel';
 import {
   createInitialRightPanelState,
-  deriveLeaderAgentSessionId,
+  deriveLeaderAgentRunId,
   dynamicWorkbenchTabId,
   expertChatTabFromDispatchEvent,
   openDynamicWorkbenchTab,
   openOrchestrationPlanWorkbenchTab,
-  openReviewWorkbenchTab,
   openWorkspaceFileWorkbenchTab,
   parseRightPanelState,
   rightPanelStorageKey,
@@ -34,14 +32,12 @@ import { useModalStore } from '../stores/useModalStore';
 import { initTheme, useThemeStore } from '../stores/useThemeStore';
 import { initAppPreferences } from '../stores/useAppPreferencesStore';
 import { useDashboardData } from '../hooks/useDashboardData';
-import type { DecisionAnswers } from '../hooks/useDashboardData';
 import { useFlowWorkbench } from '../hooks/useFlowWorkbench';
-import { useAgentSessions } from '../hooks/useFlowExperts';
 import { wsClient } from '../lib/ws';
 import { API_BASE } from '../lib/api';
 import { installDesktopBrowserSelectionListener, useBrowserSelectionStore } from '../stores/useBrowserSelectionStore';
 import { useComposerImageStore } from '../stores/useComposerImageStore';
-import { usePlanFeedbackStore } from '../stores/usePlanFeedbackStore';
+import { useOrchestrationFeedbackStore } from '../stores/useOrchestrationFeedbackStore';
 import type { OrchestrationPlanView } from '../types/orchestration';
 import type { SquadFlow } from '../types';
 import { recordFlowNavigationVisit, type FlowNavigationState } from './flowNavigation';
@@ -74,11 +70,10 @@ export default function Layout() {
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>('general');
   const [settingsInitialAgentTab, setSettingsInitialAgentTab] = useState<AgentSettingsTab>('role_assignment');
   const [initialMessagesByFlow, setInitialMessagesByFlow] = useState<Record<string, UIMessage[]>>({});
-  const [initialPlanModeByFlow, setInitialPlanModeByFlow] = useState<Record<string, RiskMode>>({});
   const [leaderComposerDraftByFlow, setLeaderComposerDraftByFlow] = useState<Record<string, string>>({});
   const setBrowserSelectionActiveFlowId = useBrowserSelectionStore((state) => state.setActiveFlowId);
   const setComposerImageActiveFlowId = useComposerImageStore((state) => state.setActiveFlowId);
-  const setPlanFeedbackActiveFlowId = usePlanFeedbackStore((state) => state.setActiveFlowId);
+  const setOrchestrationFeedbackActiveFlowId = useOrchestrationFeedbackStore((state) => state.setActiveFlowId);
   const themePreference = useThemeStore((state) => state.theme);
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
 
@@ -206,18 +201,17 @@ export default function Layout() {
     );
   }, [isRightPanelOpen, rightPanelFlowId, rightPanelState, selectedFlowId]);
 
-  const { agentSessions } = useAgentSessions(selectedFlowId ?? null);
-  const leaderAgentSessionId = deriveLeaderAgentSessionId(dashboard.leaderAgentSessionId, agentSessions);
+  const leaderAgentRunId = deriveLeaderAgentRunId(dashboard.leaderAgentRunId);
 
   useEffect(() => {
     if (!selectedFlowId) return;
 
-    const unsubscribe = wsClient.onEvent('flow_expert:event', (message) => {
+    const unsubscribe = wsClient.onEvent('agent_session:event', (message) => {
       if (message.flow_id !== selectedFlowId) return;
       const tab = expertChatTabFromDispatchEvent(message);
       if (!tab) return;
-      if (handledDispatchSessionIdsRef.current.has(tab.flow_expert_id)) return;
-      handledDispatchSessionIdsRef.current.add(tab.flow_expert_id);
+      if (handledDispatchSessionIdsRef.current.has(tab.agent_session_id)) return;
+      handledDispatchSessionIdsRef.current.add(tab.agent_session_id);
       if (!autoFollowAgentDispatchRef.current) return;
 
       if (!isRightPanelOpenRef.current) {
@@ -319,14 +313,6 @@ export default function Layout() {
     localStorage.setItem(RIGHT_PANEL_MAXIMIZED_STORAGE_KEY, String(isRightPanelMaximized));
   }, [isRightPanelMaximized]);
 
-  // Decision card tracking
-  const decisionCardStatuses: Record<string, "pending" | "resolved" | "cancelled"> = {};
-  const decisionCardAnswers: Record<string, DecisionAnswers> = {};
-  dashboard.decisionCards.forEach((card) => {
-    decisionCardStatuses[card.card_id] = card.status;
-    if (card.answers) decisionCardAnswers[card.card_id] = card.answers;
-  });
-
   const autoNavRunRef = useRef(false);
   const autoNavGenerationRef = useRef(0);
   const launchViewRunRef = useRef(false);
@@ -358,18 +344,18 @@ export default function Layout() {
   useEffect(() => {
     setBrowserSelectionActiveFlowId(!isCreatingTask ? selectedFlowId ?? null : null);
     setComposerImageActiveFlowId(!isCreatingTask ? selectedFlowId ?? null : null);
-    setPlanFeedbackActiveFlowId(!isCreatingTask ? selectedFlowId ?? null : null);
-  }, [isCreatingTask, selectedFlowId, setBrowserSelectionActiveFlowId, setComposerImageActiveFlowId, setPlanFeedbackActiveFlowId]);
+    setOrchestrationFeedbackActiveFlowId(!isCreatingTask ? selectedFlowId ?? null : null);
+  }, [isCreatingTask, selectedFlowId, setBrowserSelectionActiveFlowId, setComposerImageActiveFlowId, setOrchestrationFeedbackActiveFlowId]);
 
   useEffect(() => {
     if (!flowSwitchOverlay) return;
     if (selectedFlowId !== flowSwitchOverlay.flowId) return;
     if (dashboard.flowStateLoadedFlowId !== flowSwitchOverlay.flowId) return;
     if (
-      dashboard.leaderAgentSessionId
+      dashboard.leaderAgentRunId
       && (
         dashboard.leaderTranscriptReadyFlowId !== flowSwitchOverlay.flowId
-        || dashboard.leaderTranscriptReadyAgentSessionId !== dashboard.leaderAgentSessionId
+        || dashboard.leaderTranscriptReadyAgentRunId !== dashboard.leaderAgentRunId
       )
     ) return;
 
@@ -380,7 +366,7 @@ export default function Layout() {
         flowId: flowSwitchOverlay.flowId,
         event: "flow_switch_ready",
         durationMs: Date.now() - flowSwitchOverlay.startedAt,
-        leaderAgentSessionId: dashboard.leaderAgentSessionId ?? undefined,
+        leaderAgentRunId: dashboard.leaderAgentRunId ?? undefined,
       });
     }
     const frame = window.requestAnimationFrame(() => {
@@ -391,9 +377,9 @@ export default function Layout() {
     return () => window.cancelAnimationFrame(frame);
   }, [
     dashboard.flowStateLoadedFlowId,
-    dashboard.leaderAgentSessionId,
+    dashboard.leaderAgentRunId,
     dashboard.leaderTranscriptReadyFlowId,
-    dashboard.leaderTranscriptReadyAgentSessionId,
+    dashboard.leaderTranscriptReadyAgentRunId,
     flowSwitchOverlay,
     selectedFlowId,
   ]);
@@ -410,9 +396,9 @@ export default function Layout() {
       event: "flow_switch_failed",
       durationMs: Date.now() - flowSwitchOverlay.startedAt,
       errorCode,
-      leaderAgentSessionId: dashboard.leaderAgentSessionId ?? undefined,
+      leaderAgentRunId: dashboard.leaderAgentRunId ?? undefined,
     });
-  }), [dashboard.leaderAgentSessionId, flowSwitchOverlay]);
+  }), [dashboard.leaderAgentRunId, flowSwitchOverlay]);
 
 
   // Auto-navigate: ?flow=xxx&stage=yyy → select flow after init
@@ -451,13 +437,18 @@ export default function Layout() {
             name_generation_status: detail.name_generation_status ?? 'generated',
             type: detail.flow_type || detail.type,
             status: detail.status,
-            current_stage: detail.current_stage,
             project_id: detail.project_id ?? null,
             // Project is the top-level local directory.
             created_at: detail.created_at,
             updated_at: detail.updated_at,
             is_pinned: detail.is_pinned,
-            has_pending_decision: detail.has_pending_decision,
+            indicator: detail.indicator,
+            has_pending_user_action: detail.has_pending_user_action,
+            has_active_agent_run: detail.has_active_agent_run,
+            has_unread_output: detail.has_unread_output,
+            behavior_mode: detail.behavior_mode,
+            risk_mode: detail.risk_mode,
+            orchestration_mode: detail.orchestration_mode,
           };
           useFlowStore.setState(s => ({ flows: [...s.flows, summary] }));
         }
@@ -690,15 +681,15 @@ export default function Layout() {
     setIsRightPanelMaximized((current) => !current);
   };
 
-  const openSpecPreview = (specRevisionId: string, title: string) => {
+  const openPlanPreview = (planRevisionId: string, title: string) => {
     if (!isRightPanelOpen) {
       disableRightPanelWidthAnimationOnce();
       playRightPanelDrawerAnimation('enter');
     }
     setIsRightPanelOpen(true);
     setRightPanelState((state) => openDynamicWorkbenchTab(state, {
-      type: "spec_preview",
-      spec_revision_id: specRevisionId,
+      type: "plan_preview",
+      plan_revision_id: planRevisionId,
       title,
     }));
   };
@@ -709,14 +700,6 @@ export default function Layout() {
     }
     setIsRightPanelOpen(true);
     setRightPanelState((state) => openWorkspaceFileWorkbenchTab(state, filePath));
-  };
-  const openReviewPanel = (workRunId?: string) => {
-    if (!isRightPanelOpen) {
-      disableRightPanelWidthAnimationOnce();
-      playRightPanelDrawerAnimation('enter');
-    }
-    setIsRightPanelOpen(true);
-    setRightPanelState((state) => openReviewWorkbenchTab(state, workRunId));
   };
   const openOrchestrationPlan = (plan: OrchestrationPlanView) => {
     if (!isRightPanelOpen) {
@@ -800,31 +783,18 @@ export default function Layout() {
                     <div data-testid="leader-chat-region" className="flex-1 flex flex-col min-w-0">
                       <LeaderChatPanel
                         flowId={selectedFlowId}
-                        leaderAgentSessionId={leaderAgentSessionId}
+                        leaderAgentRunId={leaderAgentRunId}
                         initialOptimisticMessages={initialMessagesByFlow[selectedFlowId] ?? []}
-                        initialPlanModeReturnRiskMode={initialPlanModeByFlow[selectedFlowId] ?? null}
-                        onInitialPlanModeResolved={() => {
-                          setInitialPlanModeByFlow((current) => {
-                            if (!(selectedFlowId in current)) return current;
-                            const next = { ...current };
-                            delete next[selectedFlowId];
-                            return next;
-                          });
-                        }}
                         flowStatus={dashboard.flowStatus || selectedFlowSummary?.status}
-                        decisionCardStatuses={decisionCardStatuses}
-                        decisionCardAnswers={decisionCardAnswers}
-                        decisionCards={dashboard.decisionCards}
-                        specCards={dashboard.specCards}
+                        activeLeaderAgentRunId={dashboard.activeLeaderAgentRunId}
+                        decisionRequests={dashboard.decisionRequests}
+                        planCards={dashboard.planCards}
                         orchestrationPlans={dashboard.orchestrationPlans}
+                        behaviorMode={dashboard.behaviorMode}
                         riskMode={dashboard.riskMode}
-                        planApproval={dashboard.planApproval}
-                        workRuns={dashboard.workRuns}
-                        agentSessions={agentSessions}
-                        onOpenSpecPreview={openSpecPreview}
+                        orchestrationMode={dashboard.orchestrationMode}
+                        onOpenPlanPreview={openPlanPreview}
                         onOpenPlan={openOrchestrationPlan}
-                        reviews={workbench.reviews}
-                        onOpenReview={openReviewPanel}
                         onOpenWorkspaceFile={openWorkspaceFile}
                         composerValue={leaderComposerDraft}
                         onComposerValueChange={handleLeaderComposerDraftChange}
@@ -837,17 +807,11 @@ export default function Layout() {
               ) : (
                 <NewTaskView
                   onOpenModelSettings={() => openSettings('agents', 'runtime_configs')}
-                  onTaskCreated={(flowId, initialMessage, initialPlanModeReturnRiskMode) => {
+                  onTaskCreated={(flowId, initialMessage) => {
                     setInitialMessagesByFlow((current) => ({
                       ...current,
                       [flowId]: [initialMessage],
                     }));
-                    if (initialPlanModeReturnRiskMode) {
-                      setInitialPlanModeByFlow((current) => ({
-                        ...current,
-                        [flowId]: initialPlanModeReturnRiskMode,
-                      }));
-                    }
                     setIsCreatingTask(false);
                   }}
                 />
@@ -883,32 +847,18 @@ export default function Layout() {
         >
           <LeaderChatPanel
             flowId={selectedFlowId}
-            leaderAgentSessionId={leaderAgentSessionId}
+            leaderAgentRunId={leaderAgentRunId}
             initialOptimisticMessages={selectedFlowId ? initialMessagesByFlow[selectedFlowId] ?? [] : []}
-            initialPlanModeReturnRiskMode={selectedFlowId ? initialPlanModeByFlow[selectedFlowId] ?? null : null}
-            onInitialPlanModeResolved={() => {
-              if (!selectedFlowId) return;
-              setInitialPlanModeByFlow((current) => {
-                if (!(selectedFlowId in current)) return current;
-                const next = { ...current };
-                delete next[selectedFlowId];
-                return next;
-              });
-            }}
             flowStatus={dashboard.flowStatus || selectedFlowSummary?.status}
-            decisionCardStatuses={decisionCardStatuses}
-            decisionCardAnswers={decisionCardAnswers}
-            decisionCards={dashboard.decisionCards}
-            specCards={dashboard.specCards}
+            activeLeaderAgentRunId={dashboard.activeLeaderAgentRunId}
+            decisionRequests={dashboard.decisionRequests}
+            planCards={dashboard.planCards}
             orchestrationPlans={dashboard.orchestrationPlans}
+            behaviorMode={dashboard.behaviorMode}
             riskMode={dashboard.riskMode}
-            planApproval={dashboard.planApproval}
-            workRuns={dashboard.workRuns}
-            agentSessions={agentSessions}
-            onOpenSpecPreview={openSpecPreview}
+            orchestrationMode={dashboard.orchestrationMode}
+            onOpenPlanPreview={openPlanPreview}
             onOpenPlan={openOrchestrationPlan}
-            reviews={workbench.reviews}
-            onOpenReview={openReviewPanel}
             composerOnly
             composerVariant="compactFloating"
             composerValue={leaderComposerDraft}
