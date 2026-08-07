@@ -1123,6 +1123,15 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
 
   const updateRoleEnabled = async (role: AgentRole, enabled: boolean) => {
     const previousEnabled = roleEnabled[role];
+    const boundConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[role])
+      ?? savedRuntimeConfigs[0]
+      ?? null;
+    const boundModel = boundModelOf(boundConfig, roleModels[role]);
+    if (enabled && (!boundConfig || !boundModel)) {
+      selectRole(role);
+      setRuntimeFeedback("请先在“供应商管理”中新增供应商和模型，再启用角色。");
+      return;
+    }
     setRoleEnabled((current) => ({ ...current, [role]: enabled }));
     selectRole(role);
     try {
@@ -1191,6 +1200,11 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
       {!isLoading && agentTab === "role_assignment" ? (
         <div className="grid min-h-0 gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <section className="self-start overflow-hidden rounded-lg border border-border bg-card">
+            {savedRuntimeConfigs.every((config) => usableModels(config).length === 0) ? (
+              <div className="border-b border-border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+                请先在“供应商管理”中新增供应商和模型，再启用 Expert 角色。
+              </div>
+            ) : null}
             <div className="grid grid-cols-[minmax(150px,1fr)_minmax(210px,280px)_112px_88px] gap-3 border-b border-border bg-muted/40 px-4 py-3 text-xs font-semibold text-muted-foreground">
               <span>角色</span>
               <span>默认模型（供应商 / 模型）</span>
@@ -1205,6 +1219,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
             {roleDefinitions.map((role) => {
               const boundConfig = savedRuntimeConfigs.find((config) => config.id === roleConfigs[role.role]) ?? savedRuntimeConfigs[0];
               const boundModel = boundModelOf(boundConfig, roleModels[role.role]);
+              const hasRoleBinding = Boolean(boundConfig && boundModel);
               const effortOptions = reasoningEffortOptionsForSdk(boundConfig?.sdk ?? "claudecode");
               const boundReasoningEffort = normalizeReasoningEffortForSdk(
                 boundConfig?.sdk ?? "claudecode",
@@ -1255,6 +1270,7 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                     </button>
                     <Select
                       value={boundReasoningEffort}
+                      disabled={!hasRoleBinding}
                       onValueChange={(value) => {
                         if (value) void updateRoleReasoningEffort(role.role, value);
                       }}
@@ -1276,12 +1292,14 @@ function AgentSettings({ initialTab = "role_assignment" }: { initialTab?: AgentS
                       ) : (
                         <div className="flex items-center gap-2">
                           <span className="text-xs text-muted-foreground">
-                            {roleEnabled[role.role] ? "启用" : "关闭"}
+                            {roleEnabled[role.role] ? "启用" : hasRoleBinding ? "关闭" : "需配置"}
                           </span>
                           <Switch
                             checked={roleEnabled[role.role]}
+                            disabled={!roleEnabled[role.role] && !hasRoleBinding}
                             onCheckedChange={(checked) => void updateRoleEnabled(role.role, checked)}
                             aria-label={`${role.label} 状态`}
+                            title={!hasRoleBinding ? "请先配置供应商和模型" : undefined}
                           />
                         </div>
                       )}

@@ -152,6 +152,32 @@ describe("AppSettingsDialog", () => {
     expect(screen.getByLabelText("调研 Expert 状态")).toBeChecked();
   });
 
+  it("requires a provider model before an Expert role can be enabled", async () => {
+    const user = userEvent.setup();
+    apiMocks.fetchAgentRuntimeConfig.mockResolvedValue({
+      roles: runtimeSnapshot.roles.map((role) => ({
+        ...role,
+        enabled: role.role === "leader",
+        configId: "",
+        modelId: "",
+      })),
+      configs: [],
+    });
+
+    render(<AppSettingsDialog open onOpenChange={vi.fn()} initialSection="agents" />);
+
+    const researchSwitch = await screen.findByRole("switch", { name: "调研 Expert 状态" });
+    expect(researchSwitch).toHaveAttribute("aria-disabled", "true");
+    expect(researchSwitch).toHaveAttribute("title", "请先配置供应商和模型");
+    expect(screen.getByText("请先在“供应商管理”中新增供应商和模型，再启用 Expert 角色。")).toBeInTheDocument();
+    expect(screen.getAllByText("需配置").length).toBeGreaterThan(0);
+    expect(screen.getByRole("combobox", { name: "选择 调研 Expert Effort" })).toBeDisabled();
+
+    await user.click(researchSwitch);
+    expect(apiMocks.updateAgentRuntimeRole).not.toHaveBeenCalled();
+    expect(screen.queryByText(/config_id/)).not.toBeInTheDocument();
+  });
+
   it("opens the full system prompt as a styled Markdown document", async () => {
     const user = userEvent.setup();
     apiMocks.fetchAgentRuntimeConfig.mockResolvedValue(runtimeSnapshot);
